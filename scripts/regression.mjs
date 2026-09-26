@@ -106,6 +106,8 @@ check('POST /status 返回 ok 与数组', st.ok === true && Array.isArray(st.val
 check('POST /status 命中沙箱的两个包', st.value.length === 2, JSON.stringify(st.value.map((r) => r.pkg)))
 const up = await post('updates')
 check('POST /updates 返回 ok 与数组', up.ok === true && Array.isArray(up.value))
+check('POST /status 每行都带 issues 数组（端到端送达界面）', st.value.every((r) => Array.isArray(r.issues)), JSON.stringify(st.value.map((r) => typeof r.issues)))
+check('POST /updates 每行都带 issues 数组', up.value.every((r) => Array.isArray(r.issues)))
 check('POST /updates 对不存在的包给出 unavailable 而非崩溃', up.value.every((r) => r.latest === null && r.reason !== null), JSON.stringify(up.value.map((r) => r.reason)))
 const badUpd = await post('update', {})
 check('POST /update 缺 pkg 时拒绝', badUpd.ok === false && String(badUpd.message).includes('pkg'))
@@ -190,6 +192,11 @@ check('needsText → 给出原因/办法/动作', diagText.length === 1 && diagT
 const diag404 = m.describeIssues({ pkg: 'y', version: '1.2.0', latest: null, reason: 'HTTP 404' })
 check('HTTP 404 → 解释为 GitHub 直装而非裸报错', diag404.length === 1 && diag404[0].code === 'not-on-npm', JSON.stringify(diag404))
 check('正常行无问题项', m.describeIssues({ pkg: 'z', version: '1.0.0', latest: '1.0.0', needsText: false }).length === 0)
+const diagNet = m.describeIssues({ pkg: 'w', version: '1.0.0', latest: null, reason: 'ETIMEDOUT' })
+check('网络失败 → registry-unavailable + 重试按钮', diagNet.length === 1 && diagNet[0].code === 'registry-unavailable' && diagNet[0].action.kind === 'retry', JSON.stringify(diagNet))
+const diagBundle = m.describeIssues({ pkg: 'v', version: '1.0.0', latest: '1.0.0', error: 'incompatible-version' })
+check('bundle 异常 → bundle-error + 处理建议', diagBundle.some((x) => x.code === 'bundle-error'), JSON.stringify(diagBundle))
+check('四类问题映射全部可达', ['needs-text', 'not-on-npm', 'registry-unavailable', 'bundle-error'].every((c) => [].concat(diagText, diag404, diagNet, diagBundle).some((x) => x.code === c)))
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')
