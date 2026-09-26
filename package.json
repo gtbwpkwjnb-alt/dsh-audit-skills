@@ -55,5 +55,11 @@
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": ">=3.18.2 <4"
+  },
+  "scripts": {
+    "check": "node scripts/preflight-client.mjs && node scripts/crash-rehearsal.mjs && node scripts/regression.mjs",
+    "preflight": "node scripts/preflight-client.mjs",
+    "rehearsal": "node scripts/crash-rehearsal.mjs",
+    "regression": "node scripts/regression.mjs"
   }
 }
