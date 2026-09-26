@@ -49,6 +49,7 @@ const LOCALE_EXPORT_VALUE = './locale/*.json'
 // 遗留写法：DSH 解析器要求 './locale/*.json'，'./locale/*' 不生效，需迁移
 const LEGACY_LOCALE_EXPORT_KEY = './locale/*'
 const BRIDGE_PREFIX = '/api/dsh-audit-skills'
+const NPM_REGISTRY = 'https://registry.npmjs.org/'
 
 /** 读取精炼目录；任何失败都返回空目录而不是抛错。 */
 export function readCatalog() {
@@ -257,10 +258,104 @@ export function revertLocale(profileDirs, options = {}) {
   return results
 }
 
-/** 客户端 ↔ 宿主 bridge：注册只读/幂等的三个动作。任何失败都不外抛。 */
+/**
+ * 复用第一方插件管理器服务。
+ * 它的 `listBundles()` 就是插件页用的那份数据 —— 同一个数据源才能保证两端一致，
+ * 也能天然覆盖「新装插件」。
+ */
+export function getPluginManager(ctx) {
+  try {
+    const pm = ctx.get('pluginManager')
+    return pm && typeof pm.listBundles === 'function' ? pm : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 用插件管理器的数据构造状态表（与插件页同源）；服务不可用时返回 undefined。 */
+export function collectStatusViaService(ctx, dirs) {
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return undefined
+  const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
+  try {
+    const list = pm.listBundles()
+    if (!Array.isArray(list)) return undefined
+    return list.map((b) => {
+      const st = inspectPackage(profileDir, { pkg: b.name })
+      return {
+        profileDir,
+        pkg: b.name,
+        installed: b.installed !== false,
+        enabled: b.enabled === true,
+        version: typeof b.version === 'string' ? b.version : null,
+        description: typeof b.description === 'string' ? b.description : '',
+        error: b.error ? String(b.error.code ?? b.error) : null,
+        localized: st.localized,
+        title: st.title,
+        inCatalog: false,
+        needsText: !st.localized,
+      }
+    })
+  } catch (error) {
+    return undefined
+  }
+}
+
+/** 查 npm 上的最新版本；git 安装或非 npm 包返回 unavailable（不猜）。 */
+export async function fetchLatestVersion(name) {
+  try {
+    const res = await fetch(NPM_REGISTRY + name.split('/').map(encodeURIComponent).join('/'), {
+      signal: AbortSignal.timeout(15000),
+      headers: { accept: 'application/vnd.npm.install-v1+json' },
+    })
+    if (!res.ok) return { status: 'unavailable', reason: 'HTTP ' + res.status }
+    const doc = await res.json()
+    const latest = doc && doc['dist-tags'] && doc['dist-tags'].latest
+    return typeof latest === 'string' ? { status: 'ok', latest } : { status: 'unavailable', reason: 'no dist-tags' }
+  } catch (error) {
+    return { status: 'unavailable', reason: String((error && error.message) || error) }
+  }
+}
+
+/** 一键更新：经第一方插件管理器执行（自带 profile 锁、兼容预检与失败回滚）。 */
+export async function updateBundle(ctx, pkg) {
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务不可用' }
+  if (typeof pm.installBundle !== 'function') return { ok: false, code: 'manager-unsupported', message: '插件管理器未提供 installBundle' }
+  try {
+    const spec = pkg + '@latest'
+    const result = await pm.installBundle(spec, {})
+    return { ok: true, spec, result }
+  } catch (error) {
+    return { ok: false, code: 'update-failed', message: String((error && error.message) || error) }
+  }
+}
+
+/** 客户端 ↔ 宿主 bridge：注册只读/幂等的动作。任何失败都不外抛。 */
 export function registerBridge(ctx, dirs) {
   ctx.inject(['webServer'], (sctx) => {
     sctx.effect(() => {
+      /** 读取 JSON 请求体；失败返回 undefined，绝不抛错。 */
+      const readJsonBody = (req) =>
+        new Promise((resolve) => {
+          try {
+            let data = ''
+            req.on('data', (chunk) => {
+              data += chunk
+              if (data.length > 65536) data = data.slice(0, 65536)
+            })
+            req.on('end', () => {
+              try {
+                resolve(data === '' ? {} : JSON.parse(data))
+              } catch {
+                resolve(undefined)
+              }
+            })
+            req.on('error', () => resolve(undefined))
+          } catch {
+            resolve(undefined)
+          }
+        })
       const writeJson = (res, status, body) => {
         try {
           res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -275,7 +370,9 @@ export function registerBridge(ctx, dirs) {
           path: BRIDGE_PREFIX + '/status',
           handler: async (req, res) => {
             try {
-              writeJson(res, 200, { ok: true, value: collectStatus(dirs) })
+              // 优先用插件管理器（与插件页同源）；不可用时回落到自行扫描
+              const viaService = collectStatusViaService(ctx, dirs)
+              writeJson(res, 200, { ok: true, value: viaService ?? collectStatus(dirs) })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -287,6 +384,48 @@ export function registerBridge(ctx, dirs) {
           handler: async (req, res) => {
             try {
               writeJson(res, 200, { ok: true, value: applyLocale(dirs) })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/updates',
+          handler: async (req, res) => {
+            try {
+              const rows = collectStatusViaService(ctx, dirs) ?? collectStatus(dirs)
+              const out = []
+              for (const row of rows) {
+                if (row.version === null || row.version === undefined) {
+                  out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: 'no-version' }))
+                  continue
+                }
+                const r = await fetchLatestVersion(row.pkg)
+                if (r.status !== 'ok') {
+                  out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: r.reason ?? 'unavailable' }))
+                  continue
+                }
+                out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: r.latest !== row.version, reason: null }))
+              }
+              writeJson(res, 200, { ok: true, value: out })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/update',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkg = body && typeof body.pkg === 'string' ? body.pkg : ''
+              if (pkg === '') {
+                writeJson(res, 200, { ok: false, message: '缺少 pkg' })
+                return
+              }
+              writeJson(res, 200, await updateBundle(ctx, pkg))
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }

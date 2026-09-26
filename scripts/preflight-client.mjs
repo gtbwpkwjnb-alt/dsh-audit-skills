@@ -53,12 +53,20 @@ for (const key of ['name', 'inject', 'apply']) if (!(key in exported)) fail('exp
 console.log('PASS exports = ' + Object.keys(exported).join(','))
 
 const calls = []
+const services = {
+  get(name) { calls.push('get:' + name); return { registerTab: () => () => {} } },
+}
+const slots = {
+  inject(name, cb) { calls.push('inject:' + name); try { cb() } catch (error) { calls.push('cbErr:' + name + ':' + error.message) } },
+  register(desc) { calls.push('register:' + desc.name + (desc.key ? '#' + desc.key : desc.id ? '#' + desc.id : '')); return () => {} },
+}
 const fakeCtx = {
-  slots: {
-    inject(name, cb) { calls.push('inject:' + name); try { cb() } catch (error) { calls.push('cbErr:' + name) } },
-    register(desc) { calls.push('register:' + desc.name + (desc.key ? '#' + desc.key : desc.id ? '#' + desc.id : '')); return () => {} },
+  slots,
+  // 真实 ctx.inject 在服务就绪时调用回调 —— 这里同步调用，保证内层注册同样被验证
+  inject(services_, cb) {
+    calls.push('injectSvc:' + services_.join(','))
+    if (typeof cb === 'function') cb(Object.assign({ slots }, services))
   },
-  inject(services) { calls.push('injectSvc:' + services.join(',')) },
 }
 try {
   exported.apply(fakeCtx)
