@@ -375,6 +375,36 @@ export function collectStatusViaService(ctx, dirs) {
   }
 }
 
+/**
+ * 最新版本缓存。
+ *
+ * 「刷新」现在一次拿全（状态 + 版本比对），所以必须避免每次都打 N 次 npm。
+ * 成功缓存 5 分钟，失败只缓存 30 秒（便于快速重试）。
+ */
+const LATEST_TTL_OK_MS = 5 * 60 * 1000
+const LATEST_TTL_FAIL_MS = 30 * 1000
+const latestCache = new Map()
+
+/** 清空版本缓存（force 刷新时用）。 */
+export function clearLatestCache() {
+  latestCache.clear()
+}
+
+/** 取某包的最新版本，带 TTL 缓存。 */
+export async function latestVersionCached(pkg, force) {
+  const hit = latestCache.get(pkg)
+  if (force !== true && hit !== undefined) {
+    const ttl = hit.latest === null ? LATEST_TTL_FAIL_MS : LATEST_TTL_OK_MS
+    if (Date.now() - hit.at < ttl) return hit
+  }
+  const r = await fetchLatestVersion(pkg)
+  const entry = r.status === 'ok'
+    ? { latest: r.latest, reason: null, at: Date.now() }
+    : { latest: null, reason: r.reason ?? 'unavailable', at: Date.now() }
+  latestCache.set(pkg, entry)
+  return entry
+}
+
 /** 查 npm 上的最新版本；git 安装或非 npm 包返回 unavailable（不猜）。 */
 export async function fetchLatestVersion(name) {
   try {
@@ -723,6 +753,8 @@ export function registerBridge(ctx, dirs) {
           path: BRIDGE_PREFIX + '/updates',
           handler: async (req, res) => {
             try {
+              const body = await readJsonBody(req)
+              const force = body && body.force === true
               const rows = collectStatusViaService(ctx, dirs) ?? collectStatus(dirs)
               const out = []
               for (const row of rows) {
@@ -730,8 +762,8 @@ export function registerBridge(ctx, dirs) {
                   out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: 'no-version' }))
                   continue
                 }
-                const r = await fetchLatestVersion(row.pkg)
-                if (r.status !== 'ok') {
+                const r = await latestVersionCached(row.pkg, force)
+                if (r.latest === null) {
                   out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: r.reason ?? 'unavailable' }))
                   continue
                 }

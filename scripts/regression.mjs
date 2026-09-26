@@ -241,18 +241,33 @@ process.env.DSH_HOME = oldHome
 console.log(String.fromCharCode(10) + 'A5 设计契约 / 客户端静态检查')
 const clientSrc = fs.readFileSync(path.join(REPO, 'client.js'), 'utf8')
 const optimizeBody = clientSrc.slice(clientSrc.indexOf('var optimize ='), clientSrc.indexOf('var revert ='))
-// 用户报告的 bug：点「翻译优化」后页面内容错乱，根因是把 /apply 的返回当成了表格行
-check('客户端：apply/revert 后不得把返回值当表格行', !/call\('(apply|revert)'\)[\s\S]{0,500}?setRows\(/.test(clientSrc))
-check('客户端：apply/revert 后必须重新取状态', /call\('apply'\)[\s\S]{0,500}?loadStatus\(/.test(clientSrc) && /call\('revert'\)[\s\S]{0,500}?loadStatus\(/.test(clientSrc))
-check('客户端：三个按钮且职责互不重叠', clientSrc.includes("'翻译优化'") && clientSrc.includes("'还原翻译'") && clientSrc.includes("'刷新'"))
-check('客户端：已删除重复的「刷新状态」「检查更新」', !clientSrc.includes("'刷新状态'") && !clientSrc.includes("'检查更新'"))
-check('客户端：已删除单独的「自动生成」按钮（并入翻译优化）', !clientSrc.includes("'自动生成'") && clientSrc.includes("call('generate'"))
-check('客户端：翻译优化内置生成流程', clientSrc.includes('needsText === true') && optimizeBody.includes("call('generate'") && optimizeBody.includes("call('apply'") && optimizeBody.includes('stepGen'))
+const snapshotBody = clientSrc.slice(clientSrc.indexOf('var snapshot ='), clientSrc.indexOf('useEffect(function () { snapshot(); }'))
+// 单一快照原则：表格行只能由 snapshot() 写入
+const setRowsCount = (clientSrc.match(/setRows\(/g) || []).length
+check('单一数据源：setRows 只出现 1 次（仅 snapshot 内）', setRowsCount === 1, '出现 ' + setRowsCount + ' 次')
+check('单一数据源：snapshot 只调 /updates', snapshotBody.includes("call('updates'") && !snapshotBody.includes("call('status'"), snapshotBody.slice(0, 120).replace(/\s+/g, ' '))
+check('客户端不再直接使用 /status', !clientSrc.includes("call('status'") && !clientSrc.includes('loadStatus'))
+// 用户报告的 bug：点「翻译优化」后页面内容错乱（把 /apply 返回值当行）
+check('apply/revert 后不得把返回值当表格行', !/call\('(apply|revert)'\)[\s\S]{0,600}?setRows\(/.test(clientSrc))
+check('apply/revert 后必须重新取快照', /call\('apply'\)[\s\S]{0,600}?snapshot\(/.test(clientSrc) && /call\('revert'\)[\s\S]{0,600}?snapshot\(/.test(clientSrc))
+check('更新完成后必须重新取快照（否则最新列被清空）', /updateOne\(pkg\)[\s\S]{0,400}?snapshot\(\{ force: true \}\)/.test(clientSrc))
+// 按钮集（用户定的名字与职责）
+check('按钮：翻译优化 / 还原翻译 / 刷新状态', clientSrc.includes("'翻译优化'") && clientSrc.includes("'还原翻译'") && clientSrc.includes("'刷新状态'"))
+check('检查更新已并入刷新（无独立按钮）', !clientSrc.includes("'检查更新'"))
+check('已删除单独的「自动生成」按钮（并入翻译优化）', !clientSrc.includes("'自动生成'") && clientSrc.includes("call('generate'"))
+const optimizeHasBoth = optimizeBody.includes("call('generate'") && optimizeBody.includes("call('apply'") && optimizeBody.includes('stepGen')
+check('翻译优化内置生成流程（同函数内含递归生成 + 应用）', optimizeHasBoth)
+check('存在一键更新（串行遍历可更新项）', clientSrc.includes('updateAll') && clientSrc.includes("'一键更新（'"))
+const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
+check('一键更新是串行而非并发（递归 step，无 Promise.all）',
+  updateAllBody.includes('var step = function') && updateAllBody.includes('return updateOne(pkg).then') && updateAllBody.includes('return step()') && !updateAllBody.includes('Promise.all'),
+  'len=' + updateAllBody.length)
+check('汇总行由 rows 派生（与表格同源）', clientSrc.includes('function summarize(rows)') && clientSrc.includes('var s = rows ? summarize(rows) : null'))
 check('客户端：含宿主半体过旧提示', clientSrc.includes('宿主半体版本过旧'))
 check('客户端：显示宿主版本', clientSrc.includes('宿主半体 v'))
-check('宿主：每个 bridge 响应带 rev', /{ rev: OWN_REV }/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
+check('宿主：每个 bridge 响应带 rev', /\{ rev: OWN_REV \}/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
 check('宿主：OWN_REV 形如版本号', /^\d+\.\d+\.\d+/.test(m.OWN_REV), String(m.OWN_REV))
-
+check('宿主：版本查询带 TTL 缓存', /latestVersionCached/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')
 const real = m.collectStatus([PROFILE])
@@ -261,6 +276,14 @@ check('collectStatus 不含未安装项', real.every((r) => r.installed === true
 check('collectStatus 每项都有 pkg', real.every((r) => typeof r.pkg === 'string' && r.pkg.length > 0))
 const cat = m.readCatalog()
 check('catalog 可读且非空', Array.isArray(cat) && cat.length > 0, 'entries=' + cat.length)
+const tc1 = Date.now(); await m.latestVersionCached('dsh-free-search'); const dc1 = Date.now() - tc1
+const tc2 = Date.now(); const cachedHit = await m.latestVersionCached('dsh-free-search'); const dc2 = Date.now() - tc2
+check('版本缓存：第二次命中（刷新即时）', cachedHit.latest !== null && dc2 <= dc1, 'first=' + dc1 + 'ms second=' + dc2 + 'ms')
+const forced = await m.latestVersionCached('dsh-free-search', true)
+check('版本缓存：force 可绕过', forced.latest !== null, JSON.stringify(forced))
+m.clearLatestCache()
+check('版本缓存：可清空', true)
+
 const latestOk = await m.fetchLatestVersion('dsh-free-search')
 check('npm 版本查询可用（dsh-free-search）', latestOk.status === 'ok' && typeof latestOk.latest === 'string', JSON.stringify(latestOk))
 const latestGit = await m.fetchLatestVersion('dsh-audit-skills')

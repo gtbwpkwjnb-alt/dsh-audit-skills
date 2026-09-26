@@ -2,12 +2,18 @@
  *
  * 形态要求（不可违反）：DSH 以传统 <script> 加载 client.js，
  * 不得有顶层 import/export，必须用 window.__ModuleLoader__.load({ id, factory }) 注册。
- * 改动后必须通过 scripts/preflight-client.mjs 与 scripts/regression.mjs 才能发布。
+ * 改动后必须通过 scripts/preflight-client.mjs 与 scripts/crash-rehearsal.mjs 才能发布。
  *
- * 交互设计（三个按钮，职责互不重叠）：
- *   翻译优化 = 给缺文案的插件生成文案 + 应用全部精炼（生成是它的内置能力，不单独暴露）
- *   还原翻译 = 撤销已应用的精炼
- *   刷新     = 状态 + 版本比对（一次拿全，取代原先重复的「刷新状态」「检查更新」）
+ * ── 单一快照原则（本文件最重要的不变量） ──
+ * 表格行只有**一个**来源：snapshot() → POST /updates（含 状态 + 已装版本 + 最新版本 + 问题）。
+ * 任何操作的返回值（/apply、/revert、/update）**一律不得进入表格**，只用于汇总文案。
+ * 这样才不会出现「应用后数量 ≠ 刷新后数量」「点更新后状态回退」这类不一致。
+ *
+ * 按钮职责：
+ *   翻译优化 = 生成缺失文案 + 应用全部精炼 + snapshot
+ *   还原翻译 = 撤销 + snapshot
+ *   刷新     = 重新取一次完整快照（状态 + 版本 + 更新检查，三者本就是一体的）
+ *   一键更新 = 串行更新所有有更新的插件 + snapshot
  */
 window.__ModuleLoader__.load({
   id: 'dsh-audit-skills',
@@ -24,6 +30,8 @@ window.__ModuleLoader__.load({
 
     var BRIDGE = '/api/dsh-audit-skills';
     var LABEL = '技能审查';
+    var POLL_MS = 1500;
+    var POLL_MAX = 240;
 
     function call(action, body) {
       return fetch(BRIDGE + '/' + action, {
@@ -38,6 +46,16 @@ window.__ModuleLoader__.load({
         .catch(function (error) {
           return { ok: false, code: 'network', message: '无法连接宿主半体：' + String((error && error.message) || error) };
         });
+    }
+
+    function fixOf(code) {
+      if (code === 'manager-unavailable') return '插件管理器服务未就绪，重启 DSH 后可重试。'
+      if (code === 'unsupported-spec') return '该包是内置或本地依赖，请在插件页处理。'
+      if (/^http-4/.test(String(code))) return '宿主半体没有这个接口（运行的是启动时加载的旧代码）→ 请重启 DSH。'
+      if (code === 'llm-unavailable') return 'LLM 服务不可用，请确认 DSH 已挂载 llm 服务。'
+      if (code === 'no-model') return '找不到默认模型，请先在设置中选定默认模型。'
+      if (code === 'bad-output') return '模型输出不是约定 JSON，可重试；若反复失败请手动补录。'
+      return '可重试，或到插件页处理。'
     }
 
     class Boundary extends Component {
@@ -59,6 +77,7 @@ window.__ModuleLoader__.load({
       note: { fontSize: '12px', opacity: 0.8 },
       err: { fontSize: '12px', color: 'var(--dsw-alias-label-error, #d33)' },
       ok: { fontSize: '12px', color: 'var(--dsw-alias-label-success, #2a2)' },
+      sum: { fontSize: '12px', opacity: 0.9, display: 'flex', gap: '12px', flexWrap: 'wrap' },
       table: { fontSize: '12px', width: '100%', borderCollapse: 'collapse' },
       th: { textAlign: 'left', padding: '4px 6px', borderBottom: '1px solid currentColor', opacity: 0.6, fontWeight: 500 },
       td: { padding: '4px 6px', borderBottom: '1px solid rgba(128,128,128,0.2)' },
@@ -66,6 +85,15 @@ window.__ModuleLoader__.load({
       mini: { fontSize: '11px', padding: '2px 8px' },
       card: { border: '1px solid rgba(128,128,128,0.3)', borderRadius: '6px', padding: '8px 10px', fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '4px' },
     };
+
+    function summarize(rows) {
+      var total = rows.length;
+      var refined = rows.filter(function (r) { return r.localized === true; }).length;
+      var pending = rows.filter(function (r) { return r.needsText === true; }).length;
+      var upd = rows.filter(function (r) { return r.hasUpdate === true; }).length;
+      var unk = rows.filter(function (r) { return r.hasUpdate === null; }).length;
+      return { total: total, refined: refined, pending: pending, upd: upd, unk: unk };
+    }
 
     function IssueCard(props) {
       var issues = props.issues || [];
@@ -97,45 +125,37 @@ window.__ModuleLoader__.load({
         return r;
       }, []);
 
-      // 挂载时只取状态（快，不做 npm 比对）；需要版本比对请点「刷新」
-      var loadStatus = useCallback(function () {
-        return call('status').then(absorb).then(function (r) {
+      // 唯一的数据入口：完整快照（状态 + 已装版本 + 最新版本 + 问题）
+      var snapshot = useCallback(function (opts) {
+        return call('updates', opts || {}).then(absorb).then(function (r) {
           if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); return r.value; }
-          setNote({ kind: 'err', text: '状态读取失败：' + ((r && r.message) || '未知') });
+          setNote({ kind: 'err', text: '读取失败：' + ((r && r.message) || '未知') });
           return null;
         });
       }, [absorb]);
 
-      useEffect(function () { loadStatus(); }, [loadStatus]);
+      useEffect(function () { snapshot(); }, [snapshot]);
 
-      // 刷新 = 状态 + 版本比对，一次拿全
       var refresh = useCallback(function () {
         setBusy('refresh');
-        setNote({ kind: 'note', text: '正在读取状态并比对 npm 版本…' });
-        return call('updates').then(absorb).then(function (r) {
+        setNote({ kind: 'note', text: '正在刷新（状态 + 版本 + 更新检查）…' });
+        return snapshot({ force: true }).then(function (v) {
           setBusy('');
-          if (r && r.ok && Array.isArray(r.value)) {
-            setRows(r.value);
-            var n = r.value.filter(function (x) { return x.hasUpdate === true; }).length;
-            var unk = r.value.filter(function (x) { return x.hasUpdate === null; }).length;
-            var pend = r.value.filter(function (x) { return x.needsText === true; }).length;
-            setNote({ kind: n || pend ? 'note' : 'ok',
-              text: '刷新完成：' + r.value.length + ' 个已装插件；' + n + ' 个有新版本；' + pend + ' 个缺文案' + (unk ? '；' + unk + ' 个无法比对' : '') });
-          } else setNote({ kind: 'err', text: '刷新失败：' + ((r && r.message) || '未知') });
+          if (v) {
+            var s = summarize(v);
+            setNote({ kind: s.upd || s.pending ? 'note' : 'ok',
+              text: '刷新完成：已装 ' + s.total + '，已精炼 ' + s.refined + '，待优化 ' + s.pending + '，可更新 ' + s.upd + (s.unk ? '，无法比对 ' + s.unk : '') });
+          }
         });
-      }, [absorb]);
+      }, [snapshot]);
 
-      // 翻译优化：生成缺失文案（内置）→ 应用全部精炼 → 刷新
+      // 翻译优化：生成缺失文案（内置能力）→ 应用全部精炼 → 重新取快照
       var optimize = useCallback(function () {
         setBusy('optimize');
-        setNote({ kind: 'note', text: '正在读取插件状态…' });
-        return call('status').then(absorb).then(function (st) {
-          if (!st || !st.ok || !Array.isArray(st.value)) {
-            setBusy('');
-            setNote({ kind: 'err', text: '状态读取失败，无法开始优化：' + ((st && st.message) || '未知') });
-            return;
-          }
-          var pending = st.value.filter(function (r) { return r.needsText === true; });
+        setNote({ kind: 'note', text: '正在读取状态…' });
+        return snapshot().then(function (cur) {
+          if (!cur) { setBusy(''); return; }
+          var pending = cur.filter(function (r) { return r.needsText === true; });
           var genOk = 0;
           var genFail = [];
           var i = 0;
@@ -144,14 +164,14 @@ window.__ModuleLoader__.load({
               setNote({ kind: 'note', text: '文案就绪，正在应用精炼…' });
               return call('apply').then(absorb).then(function (ap) {
                 var applied = ap && Array.isArray(ap.value) ? ap.value.filter(function (x) { return x.state === 'applied'; }).length : 0;
-                return loadStatus().then(function () {
+                return snapshot({ force: true }).then(function (v) {
                   setBusy('');
-                  if (ap && ap.ok) {
-                    setNote({ kind: genFail.length ? 'err' : 'ok',
-                      text: '翻译优化完成：生成 ' + genOk + ' 条文案，应用 ' + applied + ' 项' +
-                        (pending.length ? '（缺文案 ' + pending.length + ' 个）' : '') +
-                        (genFail.length ? '；生成失败 ' + genFail.length + ' 个：' + genFail.join('、') : '') });
-                  } else setNote({ kind: 'err', text: '应用精炼失败：' + ((ap && ap.message) || '未知') });
+                  if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用精炼失败：' + ((ap && ap.message) || '未知') }); return; }
+                  var s = v ? summarize(v) : null;
+                  setNote({ kind: genFail.length ? 'err' : 'ok',
+                    text: '翻译优化完成：本次应用 ' + applied + ' 项，新生成 ' + genOk + ' 条文案' +
+                      (s ? '；当前已装 ' + s.total + '，已精炼 ' + s.refined + '，待优化 ' + s.pending : '') +
+                      (genFail.length ? '；生成失败 ' + genFail.length + ' 个：' + genFail.join('、') : '') });
                 });
               });
             }
@@ -159,77 +179,108 @@ window.__ModuleLoader__.load({
             i += 1;
             setNote({ kind: 'note', text: '生成文案 ' + i + '/' + pending.length + '：' + pkg + ' …（调用模型，消耗 token）' });
             return call('generate', { pkg: pkg }).then(absorb).then(function (g) {
-              if (g && g.ok) genOk += 1; else genFail.push(pkg + '（' + ((g && g.message) || '未知') + '）');
+              if (g && g.ok) genOk += 1; else genFail.push(pkg);
               return stepGen();
             });
           };
           return stepGen();
         });
-      }, [absorb, loadStatus]);
+      }, [absorb, snapshot]);
 
       var revert = useCallback(function () {
         setBusy('revert');
         setNote({ kind: 'note', text: '正在还原…' });
         return call('revert').then(absorb).then(function (r) {
           var restored = r && Array.isArray(r.value) ? r.value.filter(function (x) { return x.state === 'restored'; }).length : 0;
-          // 关键：绝不用 apply/revert 的返回值当表格行，必须重新取状态
-          return loadStatus().then(function () {
+          return snapshot({ force: true }).then(function (v) {
             setBusy('');
-            if (r && r.ok) setNote({ kind: 'ok', text: '还原完成：' + restored + ' 项' });
+            var s = v ? summarize(v) : null;
+            if (r && r.ok) setNote({ kind: 'ok', text: '还原完成：' + restored + ' 项' + (s ? '；当前已精炼 ' + s.refined : '') });
             else setNote({ kind: 'err', text: '还原失败：' + ((r && r.message) || '未知') });
           });
         });
-      }, [absorb, loadStatus]);
+      }, [absorb, snapshot]);
+
+      // 更新单个插件，返回一个在完成/失败时 resolve 的 Promise
+      var updateOne = useCallback(function (pkg) {
+        setJobs(function (prev) { var n = Object.assign({}, prev); n[pkg] = { stage: 'installing', message: '已提交…', done: false }; return n; });
+        return call('update', { pkg: pkg }).then(absorb).then(function (r) {
+          if (!r || !r.ok) {
+            setJobs(function (prev) { var n = Object.assign({}, prev); delete n[pkg]; return n; });
+            return { ok: false, pkg: pkg, code: (r && r.code) || 'unknown', message: (r && r.message) || '未知' };
+          }
+          return new Promise(function (resolve) {
+            var n = 0;
+            var tick = function () {
+              n += 1;
+              call('update-status', { token: r.token }).then(absorb).then(function (s) {
+                var job = s && s.ok ? s.job : null;
+                if (job) {
+                  setJobs(function (prev) { var x = Object.assign({}, prev); x[pkg] = job; return x; });
+                  if (job.done) {
+                    setJobs(function (prev) { var x = Object.assign({}, prev); delete x[pkg]; return x; });
+                    resolve({ ok: job.ok === true, pkg: pkg, code: job.ok ? null : 'update-failed', message: job.message });
+                    return;
+                  }
+                }
+                if (n < POLL_MAX) setTimeout(tick, POLL_MS);
+                else { setJobs(function (prev) { var x = Object.assign({}, prev); delete x[pkg]; return x; }); resolve({ ok: false, pkg: pkg, code: 'timeout', message: '超时（可能仍在后台执行）' }); }
+              });
+            };
+            tick();
+          });
+        });
+      }, [absorb]);
 
       var doUpdate = useCallback(function (pkg) {
         setBusy('update:' + pkg);
-        setJobs(function (prev) { var n = Object.assign({}, prev); n[pkg] = { stage: 'installing', message: '已提交，等待安装…', done: false }; return n; });
-        setNote({ kind: 'note', text: '正在提交更新 ' + pkg + ' …' });
-        return call('update', { pkg: pkg }).then(absorb).then(function (r) {
-          if (!r || !r.ok) {
-            setBusy('');
-            setJobs(function (prev) { var n = Object.assign({}, prev); delete n[pkg]; return n; });
-            var code = (r && r.code) || 'unknown';
-            var fix = code === 'manager-unavailable'
-              ? '插件管理器服务未就绪，重启 DSH 后可重试。'
-              : code === 'unsupported-spec'
-                ? '该包是内置或本地依赖，请在插件页处理。'
-                : /^http-4/.test(String(code))
-                  ? '宿主半体没有这个接口（运行的是启动时加载的旧代码）→ 请重启 DSH。'
-                  : '可在插件页重试，或手动执行 pnpm install。';
-            setNote({ kind: 'err', text: pkg + ' 更新未启动：' + ((r && r.message) || '未知') + ' → ' + fix });
-            return;
-          }
-          var plan = r.plan || {};
-          setNote({ kind: 'note', text: pkg + ' 更新已启动（' + plan.kind + '：' + plan.spec + '），正在执行 pnpm…' });
-          var n = 0;
-          var tick = function () {
-            n += 1;
-            call('update-status', { token: r.token }).then(absorb).then(function (s) {
-              var job = s && s.ok ? s.job : null;
-              if (job) {
-                setJobs(function (prev) { var x = Object.assign({}, prev); x[pkg] = job; return x; });
-                if (job.done) {
-                  setBusy('');
-                  setNote(job.ok
-                    ? { kind: 'ok', text: pkg + ' 更新完成：' + job.message }
-                    : { kind: 'err', text: pkg + ' 更新失败：' + job.message + ' → 可在插件页重试，或手动执行 pnpm install。' });
-                  loadStatus();
-                  return;
-                }
-              }
-              if (n < 240) setTimeout(tick, 1500);
-              else { setBusy(''); setNote({ kind: 'err', text: pkg + ' 更新超时，仍在后台执行；稍后点「刷新」看版本是否变化。' }); }
-            });
-          };
-          tick();
+        setNote({ kind: 'note', text: '正在更新 ' + pkg + ' …' });
+        return updateOne(pkg).then(function (res) {
+          setBusy('');
+          return snapshot({ force: true }).then(function () {
+            if (res.ok) setNote({ kind: 'ok', text: pkg + ' 更新完成，状态已刷新。' });
+            else setNote({ kind: 'err', text: pkg + ' 更新失败：' + res.message + ' → ' + fixOf(res.code) });
+          });
         });
-      }, [absorb, loadStatus]);
+      }, [snapshot, updateOne]);
+
+      var updateAll = useCallback(function (list) {
+        var pend = (list || []).filter(function (r) { return r.hasUpdate === true; });
+        if (pend.length === 0) { setNote({ kind: 'ok', text: '没有可更新的插件。' }); return; }
+        setBusy('update:all');
+        var i = 0;
+        var okCount = 0;
+        var failed = [];
+        var step = function () {
+          if (i >= pend.length) {
+            setBusy('');
+            setJobs({});
+            return snapshot({ force: true }).then(function () {
+              setNote({ kind: failed.length ? 'err' : 'ok',
+                text: '一键更新完成：成功 ' + okCount + ' 个，失败 ' + failed.length + ' 个' + (failed.length ? '（' + failed.join('、') + '）' : '') });
+            });
+          }
+          var pkg = pend[i].pkg;
+          i += 1;
+          setNote({ kind: 'note', text: '正在更新 ' + i + '/' + pend.length + '：' + pkg + ' …' });
+          return updateOne(pkg).then(function (res) {
+            if (res.ok) okCount += 1; else failed.push(pkg + '（' + res.message + '）');
+            return step();
+          });
+        };
+        return step();
+      }, [snapshot, updateOne]);
+
+      var s = rows ? summarize(rows) : null;
 
       var head = h('div', { style: S.bar },
         h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
         h('button', { type: 'button', disabled: !!busy, onClick: revert }, busy === 'revert' ? '还原中…' : '还原翻译'),
-        h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新'));
+        h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态'),
+        (s && s.upd > 0)
+          ? h('button', { type: 'button', disabled: !!busy, onClick: function () { updateAll(rows); } },
+              busy === 'update:all' ? '批量更新中…' : '一键更新（' + s.upd + '）')
+          : null);
 
       var staleEl = stale
         ? h('div', { style: S.err }, '⚠ 宿主半体版本过旧：运行中的是进程启动时加载的代码，因此缺少新接口。请重启 DSH 后重试。')
@@ -237,6 +288,15 @@ window.__ModuleLoader__.load({
 
       var noteEl = note
         ? h('div', { style: note.kind === 'err' ? S.err : note.kind === 'ok' ? S.ok : S.note }, note.text)
+        : null;
+
+      var summaryEl = s
+        ? h('div', { style: S.sum },
+            h('span', null, '已装 ' + s.total),
+            h('span', null, '已精炼 ' + s.refined),
+            h('span', null, '待优化 ' + s.pending),
+            h('span', null, '可更新 ' + s.upd),
+            s.unk ? h('span', null, '无法比对 ' + s.unk) : null)
         : null;
 
       var table = rows === null
@@ -256,7 +316,7 @@ window.__ModuleLoader__.load({
               var cells = [
                 h('td', { style: S.td }, r.pkg),
                 h('td', { style: S.td }, r.enabled ? '开' : '关'),
-                h('td', { style: S.td }, r.needsText ? '待补文案' : (r.localized ? '已精炼' : '待精炼')),
+                h('td', { style: S.td }, r.needsText ? '待优化' : (r.localized ? '已精炼' : '待精炼')),
                 h('td', { style: S.td }, r.version || '—'),
                 h('td', { style: S.td }, r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—')),
               ];
@@ -275,8 +335,9 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: S.box },
         head,
-        h('div', { style: S.note }, '命名约定：标题保留原包名，中文名以（）附加。数据源与插件页一致（第一方 pluginManager）。'),
+        h('div', { style: S.note }, '命名约定：标题保留原包名，中文名以（）附加。刷新即包含状态、版本与更新检查（同一份快照）。'),
         staleEl,
+        summaryEl,
         noteEl,
         table,
         detail,
