@@ -118,6 +118,7 @@ window.__ModuleLoader__.load({
       var openState = useState(''); var openPkg = openState[0]; var setOpenPkg = openState[1];
       var revState = useState(''); var hostRev = revState[0]; var setHostRev = revState[1];
       var staleState = useState(false); var stale = staleState[0]; var setStale = staleState[1];
+      var batchState = useState(null); var batch = batchState[0]; var setBatch = batchState[1];
 
       var absorb = useCallback(function (r) {
         if (r && typeof r.rev === 'string' && r.rev !== '') setHostRev(r.rev);
@@ -135,6 +136,33 @@ window.__ModuleLoader__.load({
       }, [absorb]);
 
       useEffect(function () { snapshot(); }, [snapshot]);
+
+      // 批量更新由宿主侧串行执行，客户端只轮询 —— 因此本插件被重新加载后仍能看到进度与结果
+      var pollBatch = useCallback(function () {
+        return call('update-all-status').then(absorb).then(function (r) {
+          var b = r && r.ok ? r.batch : null
+          setBatch(b)
+          if (b && b.running === true) {
+            return new Promise(function (resolve) { setTimeout(resolve, POLL_MS) }).then(pollBatch)
+          }
+          return b
+        })
+      }, [absorb]);
+
+      // 挂载时恢复：上次批量若还在跑就继续显示，刚结束就把结果如实报出来
+      useEffect(function () {
+        call('update-all-status').then(absorb).then(function (r) {
+          var b = r && r.ok ? r.batch : null
+          if (!b) return
+          setBatch(b)
+          if (b.running === true) {
+            setBusy('update:all')
+            pollBatch().then(function () { setBusy(''); snapshot({ force: true }); });
+          } else if (typeof b.finishedAt === 'number' && Date.now() - b.finishedAt < 10 * 60 * 1000) {
+            setNote({ kind: /失败 [1-9]|未变化 [1-9]/.test(String(b.message)) ? 'note' : 'ok', text: '上次批量更新：' + String(b.message) });
+          }
+        });
+      }, [absorb, pollBatch, snapshot]);
 
       var refresh = useCallback(function () {
         setBusy('refresh');
@@ -245,31 +273,25 @@ window.__ModuleLoader__.load({
       }, [snapshot, updateOne]);
 
       var updateAll = useCallback(function (list) {
-        var pend = (list || []).filter(function (r) { return r.hasUpdate === true; });
+        var pend = (list || []).filter(function (r) { return r.hasUpdate === true; }).map(function (r) { return r.pkg; });
         if (pend.length === 0) { setNote({ kind: 'ok', text: '没有可更新的插件。' }); return; }
         setBusy('update:all');
-        var i = 0;
-        var okCount = 0;
-        var failed = [];
-        var step = function () {
-          if (i >= pend.length) {
+        setNote({ kind: 'note', text: '已提交批量更新（' + pend.length + ' 个），由宿主侧串行执行…' });
+        return call('update-all', { pkgs: pend }).then(absorb).then(function (r) {
+          if (!r || !r.ok) {
             setBusy('');
-            setJobs({});
-            return snapshot({ force: true }).then(function () {
-              setNote({ kind: failed.length ? 'err' : 'ok',
-                text: '一键更新完成：成功 ' + okCount + ' 个，失败 ' + failed.length + ' 个' + (failed.length ? '（' + failed.join('、') + '）' : '') });
-            });
+            setNote({ kind: 'err', text: '批量更新未启动：' + ((r && r.message) || '未知') + ' → ' + fixOf(r && r.code) });
+            return;
           }
-          var pkg = pend[i].pkg;
-          i += 1;
-          setNote({ kind: 'note', text: '正在更新 ' + i + '/' + pend.length + '：' + pkg + ' …' });
-          return updateOne(pkg).then(function (res) {
-            if (res.ok) okCount += 1; else failed.push(pkg + '（' + res.message + '）');
-            return step();
+          return pollBatch().then(function (b) {
+            setBusy('');
+            return snapshot({ force: true }).then(function () {
+              if (!b) { setNote({ kind: 'err', text: '批量更新状态丢失，请刷新状态查看结果。' }); return; }
+              setNote({ kind: /失败 [1-9]/.test(String(b.message)) ? 'err' : (/未变化 [1-9]/.test(String(b.message)) ? 'note' : 'ok'), text: '批量更新' + String(b.message) });
+            });
           });
-        };
-        return step();
-      }, [snapshot, updateOne]);
+        });
+      }, [absorb, pollBatch, snapshot]);
 
       var s = rows ? summarize(rows) : null;
 
@@ -297,6 +319,16 @@ window.__ModuleLoader__.load({
             h('span', null, '待优化 ' + s.pending),
             h('span', null, '可更新 ' + s.upd),
             s.unk ? h('span', null, '无法比对 ' + s.unk) : null)
+        : null;
+
+      var batchEl = batch && Array.isArray(batch.items) && batch.items.length > 0
+        ? h('div', { style: S.card },
+            h('div', { style: { fontWeight: 600 } },
+              '批量更新' + (batch.running === true ? '（进行中 ' + (batch.index + 1) + '/' + batch.total + '）' : '（已完成）')),
+            batch.items.map(function (it) {
+              return h('div', { key: it.pkg, style: S.note },
+                '· ' + it.pkg + '  [' + it.state + ']' + (it.message ? '  ' + it.message : ''))
+            }))
         : null;
 
       var table = rows === null
@@ -339,6 +371,7 @@ window.__ModuleLoader__.load({
         staleEl,
         summaryEl,
         noteEl,
+        batchEl,
         table,
         detail,
         h('div', { style: S.note }, '翻译优化会调用模型为缺失文案的插件生成中文（消耗 token），结果存入覆盖层，重装不丢；更新经第一方插件管理器执行，会真实运行 pnpm 并可能触发重载。' + (hostRev ? '  宿主半体 v' + hostRev : '')));

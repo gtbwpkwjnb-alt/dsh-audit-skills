@@ -88,7 +88,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 6 条 bridge 路由（/status 已按 YAGNI 删除）', routes.length === 6, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 8 条 bridge 路由（/status 已按 YAGNI 删除，新增批量接口）', routes.length === 8, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -265,9 +265,9 @@ const optimizeHasBoth = optimizeBody.includes("call('generate'") && optimizeBody
 check('翻译优化内置生成流程（同函数内含递归生成 + 应用）', optimizeHasBoth)
 check('存在一键更新（串行遍历可更新项）', clientSrc.includes('updateAll') && clientSrc.includes("'一键更新（'"))
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
-check('一键更新是串行而非并发（递归 step，无 Promise.all）',
-  updateAllBody.includes('var step = function') && updateAllBody.includes('return updateOne(pkg).then') && updateAllBody.includes('return step()') && !updateAllBody.includes('Promise.all'),
-  'len=' + updateAllBody.length)
+check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
+const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
+check('宿主：批量更新串行 for + await，且无 Promise.all', /for \(let i = 0; i < items\.length; i \+= 1\)/.test(idxSrcA5) && /await runOneUpdate/.test(idxSrcA5) && !/Promise\.all/.test(idxSrcA5))
 check('汇总行由 rows 派生（与表格同源）', clientSrc.includes('function summarize(rows)') && clientSrc.includes('var s = rows ? summarize(rows) : null'))
 check('客户端：含宿主半体过旧提示', clientSrc.includes('宿主半体版本过旧'))
 check('客户端：显示宿主版本', clientSrc.includes('宿主半体 v'))
@@ -320,6 +320,40 @@ const idxSrc = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
 check('更新任务表有界（有 prune）', idxSrc.includes('pruneUpdateJobs') && idxSrc.includes('UPDATE_JOB_KEEP'))
 // YAGNI：/status 已删除
 check('YAGNI：/status 端点已删除', !idxSrc.includes("BRIDGE_PREFIX + '/status'"))
+// ─────────────────────── A7 批量更新契约（宿主侧 + 落盘 + 诚实反馈） ───────────────────────
+console.log(String.fromCharCode(10) + 'A7 批量更新契约')
+const savedHome = process.env.DSH_HOME
+process.env.DSH_HOME = sandbox
+const batchFile = path.join(sandbox, 'dsh-audit-skills', 'update-batch.json')
+const noMgrCtx = { get: () => undefined }
+const startedBatch = m.startUpdateAll(noMgrCtx, sandbox, ['pkg-with-exports', 'never-heard-of'])
+check('批量更新启动返回 batch 与总数', startedBatch.ok === true && startedBatch.batch.total === 2)
+await new Promise((r) => setTimeout(r, 250))
+const stB1 = m.updateAllStatus()
+check('批量状态落盘且已完成', !!stB1 && stB1.running === false && typeof stB1.finishedAt === 'number', JSON.stringify(stB1 && stB1.message))
+check('状态文件确实写在磁盘（宿主模块被重载也不丢）', fs.existsSync(batchFile))
+check('无插件管理器时逐项如实报失败', !!stB1 && stB1.items.every((x) => x.state === 'failed'), JSON.stringify(stB1 && stB1.items.map((x) => x.state)))
+check('非法包名被过滤而不进入批次', m.startUpdateAll(noMgrCtx, sandbox, ['../../evil']).ok === false)
+fs.writeFileSync(batchFile, JSON.stringify({ running: true, startedAt: Date.now(), items: [], total: 0, index: 0, message: 'x' }))
+check('进行中时幂等返回、不重复启动', m.startUpdateAll(noMgrCtx, sandbox, ['pkg-with-exports']).alreadyRunning === true)
+fs.writeFileSync(batchFile, JSON.stringify({ running: true, startedAt: Date.now() - 11 * 60 * 1000, items: [], total: 0, index: 0, message: 'x' }))
+check('超过 10 分钟无进展的 running 视为中断（不卡死后续批量）', m.updateAllStatus().running === false)
+const targetPkgJson = path.join(nm, 'pkg-with-exports', 'package.json')
+const bumpPM = { listBundles: () => [], installBundle: async () => { const j = JSON.parse(fs.readFileSync(targetPkgJson, 'utf8')); j.version = '9.9.9'; fs.writeFileSync(targetPkgJson, JSON.stringify(j, null, 2)); return {} } }
+m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? bumpPM : undefined) }, sandbox, ['pkg-with-exports'])
+await new Promise((r) => setTimeout(r, 250))
+const itemB = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
+check('成功路径记录 from→to 并标为 updated', !!itemB && itemB.state === 'updated' && itemB.from !== itemB.to, JSON.stringify(itemB))
+const noopPM = { listBundles: () => [], installBundle: async () => ({}) }
+// 注意：A3 段已把沙箱依赖表重写为 {pkg-with-exports, pkg-git, pkg-local}，
+// 所以这里必须用仍在依赖里的包，否则会先被「不在依赖里」拦掉。
+m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? noopPM : undefined) }, sandbox, ['pkg-with-exports'])
+await new Promise((r) => setTimeout(r, 250))
+const itemC = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
+check('安装执行了但版本未变 -> 如实标为 unchanged（不假装成功）', !!itemC && itemC.state === 'unchanged', JSON.stringify(itemC))
+check('结束语区分 成功/未变化/失败', /成功 \d+ 个，未变化 \d+ 个，失败 \d+ 个/.test(String(m.updateAllStatus().message)), String(m.updateAllStatus().message))
+process.env.DSH_HOME = savedHome
+
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')
 const real = m.collectStatus([PROFILE])

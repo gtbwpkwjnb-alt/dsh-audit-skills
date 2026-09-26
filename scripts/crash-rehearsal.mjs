@@ -150,7 +150,7 @@ if (host) {
   let hostApplyErr = null
   try { host.apply(hostCtx, { autoApply: false, revertOnDisable: false, profileDir: PROFILE }) } catch (error) { hostApplyErr = error }
   check('宿主 apply() 不抛错', hostApplyErr === null, hostApplyErr && hostApplyErr.message)
-  check('bridge 路由数量正确', routes.length === 6, 'got ' + routes.length)
+  check('bridge 路由数量正确', routes.length === 8, 'got ' + routes.length)
 }
 
 // ── 8 bundle 补丁 ──

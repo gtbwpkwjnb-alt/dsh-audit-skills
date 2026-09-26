@@ -497,7 +497,136 @@ export function startUpdate(ctx, profileDir, pkg) {
   return { ok: true, token, plan: { kind: plan.kind, spec: plan.spec, range: plan.range } }
 }
 
-/** 查询更新进度。 */
+/** 读某包当前已装版本。 */
+export function installedVersion(profileDir, pkg) {
+  if (!isSafePackageName(pkg)) return null
+  try {
+    return JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', ...pkg.split('/'), 'package.json'), 'utf8')).version ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 批量更新状态**落盘**。
+ *
+ * 为什么必须落盘：更新一个插件会触发 DSH 重新组合插件图，从而 dispose/re-apply 本插件。
+ * 之前批量更新是由**客户端状态驱动的循环**——客户端一重挂载，循环就当场死掉，
+ * 所以「一键更新 3 个」实际只跑完第一个（实机证据：3 次期望只产生 1 次安装操作）。
+ * 放到宿主侧还不够（宿主模块也可能被重新求值），所以状态写文件。
+ */
+function batchFile() {
+  return path.join(path.dirname(overlayPath()), 'update-batch.json')
+}
+
+function readBatch() {
+  try {
+    return JSON.parse(fs.readFileSync(batchFile(), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function writeBatch(value) {
+  try {
+    fs.mkdirSync(path.dirname(batchFile()), { recursive: true })
+    fs.writeFileSync(batchFile(), JSON.stringify(value, null, 2) + '\n')
+  } catch {
+    /* 状态落盘失败不影响更新本身 */
+  }
+}
+
+const BATCH_STALE_MS = 10 * 60 * 1000
+
+/** 当前批量更新状态；过期的 running 视为已结束（避免卡死后续批量）。 */
+export function updateAllStatus() {
+  const batch = readBatch()
+  if (batch && batch.running === true && typeof batch.startedAt === 'number' && Date.now() - batch.startedAt > BATCH_STALE_MS) {
+    batch.running = false
+    batch.message = '上次批量更新已中断（超过 10 分钟无进展）'
+    writeBatch(batch)
+  }
+  return batch
+}
+
+/** 单包更新（等待完成），返回 {ok, message}。 */
+async function runOneUpdate(ctx, profileDir, pkg) {
+  const plan = resolveUpdateSpec(profileDir, pkg)
+  if (plan.spec === null) return { ok: false, message: plan.reason }
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return { ok: false, message: '插件管理器服务未就绪' }
+  if (typeof pm.installBundle !== 'function') return { ok: false, message: '插件管理器未提供 installBundle' }
+  try {
+    await pm.installBundle(plan.spec, {})
+    return { ok: true, message: '' }
+  } catch (error) {
+    return { ok: false, message: String((error && error.message) || error) }
+  }
+}
+
+/**
+ * 启动批量更新：**在宿主侧串行执行**，进度落盘，客户端只负责轮询显示。
+ * 已在进行中时幂等返回当前状态，不重复启动。
+ */
+export function startUpdateAll(ctx, profileDir, pkgs) {
+  const current = updateAllStatus()
+  if (current && current.running === true) return { ok: true, alreadyRunning: true, batch: current }
+  const items = (Array.isArray(pkgs) ? pkgs : []).filter(isSafePackageName).map((pkg) => ({
+    pkg,
+    state: 'pending',
+    message: '',
+    from: installedVersion(profileDir, pkg),
+    to: null,
+  }))
+  if (items.length === 0) return { ok: false, code: 'no-target', message: '没有可更新的插件' }
+  const batch = { running: true, index: 0, total: items.length, items, message: '准备中…', startedAt: Date.now(), finishedAt: null }
+  writeBatch(batch)
+  ;(async () => {
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i]
+      const live = readBatch() ?? batch
+      live.index = i
+      live.message = '正在更新 ' + (i + 1) + '/' + items.length + '：' + item.pkg
+      item.state = 'running'
+      live.items = items
+      writeBatch(live)
+      const result = await runOneUpdate(ctx, profileDir, item.pkg)
+      item.to = installedVersion(profileDir, item.pkg)
+      if (result.ok !== true) {
+        item.state = 'failed'
+        item.message = result.message
+      } else if (item.to !== null && item.from !== null && item.to !== item.from) {
+        item.state = 'updated'
+        item.message = item.from + ' → ' + item.to
+      } else {
+        // 安装确实执行了，但版本没变 —— 必须如实说明，不能假装成功
+        item.state = 'unchanged'
+        item.message = '安装已执行，但版本未变（仍为 ' + String(item.to) + '）'
+      }
+      const after = readBatch() ?? batch
+      after.items = items
+      writeBatch(after)
+    }
+    const done = readBatch() ?? batch
+    done.running = false
+    done.index = items.length
+    done.finishedAt = Date.now()
+    const updated = items.filter((x) => x.state === 'updated').length
+    const unchanged = items.filter((x) => x.state === 'unchanged').length
+    const failed = items.filter((x) => x.state === 'failed').length
+    done.message = '完成：成功 ' + updated + ' 个，未变化 ' + unchanged + ' 个，失败 ' + failed + ' 个'
+    writeBatch(done)
+  })().catch(() => {
+    const fallback = readBatch() ?? batch
+    fallback.running = false
+    fallback.finishedAt = Date.now()
+    fallback.message = '批量更新异常中止'
+    writeBatch(fallback)
+  })
+  return { ok: true, batch }
+}
+
+/** 查询单包更新进度。 */
 export function updateJobStatus(token) {
   const job = typeof token === 'string' ? updateJobs.get(token) : undefined
   if (job === undefined) return { ok: false, code: 'unknown-token', message: '任务不存在或已过期' }
@@ -885,6 +1014,30 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved))
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'generate-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/update-all',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkgs = body && Array.isArray(body.pkgs) ? body.pkgs : []
+              writeJson(res, 200, startUpdateAll(ctx, Array.isArray(dirs) ? dirs[0] : dirs, pkgs))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'batch-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/update-all-status',
+          handler: async (req, res) => {
+            try {
+              writeJson(res, 200, { ok: true, batch: updateAllStatus() })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'status-failed', message: String(error?.message ?? error) })
             }
           },
         },
