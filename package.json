@@ -1,15 +1,17 @@
 {
   "name": "dsh-audit-skills",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "DeepSeek Harness plugin that refines plugin-page descriptions into clear Chinese (package name preserved), summarizes plugin status, and flags conflicts. Delegates updates/recommendations/guardianship to existing ecosystem plugins.",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "client.js",
     "cordis.patch.yml",
     "config.yaml",
     "platforms",
@@ -41,6 +43,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "peerDependencies": {

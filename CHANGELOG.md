@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.0 — 2026-09-26
+
+### 客户端半体（需真机验证）
+
+按 `docs/client-ui-plan.md` 实现，三个入口全部经 **ErrorBoundary 隔离**——
+渲染失败只在本插件范围内显示一行提示，不拖垮设置页或插件页（对抗审查 T1）：
+
+| 入口 | Slot / API | 说明 |
+|---|---|---|
+| 设置页「技能审查」分区 | `ctx.slots.inject("settings.section")` | 主入口：按钮组 + 状态表 |
+| 插件页卡片 | `ctx.slots.inject("plugins.row.config")`，key = `dsh-audit-skills#dsh-audit-skills` | 与设置页同一面板 |
+| 侧边栏卡片（可选） | `ctx.betterSidebar.registerTab` | `betterSidebar` 不存在时静默跳过 |
+
+按钮：**应用翻译精炼** / **还原翻译** / **刷新状态**。状态表列出「插件 / 已精炼·待精炼·未安装 / 插件页当前标题」。
+
+### 宿主半体新增 bridge
+
+`ctx.inject(['webServer'])` 注册三个 `kind: 'exact'` 路由：
+`/api/dsh-audit-skills/{status,apply,revert}`。客户端不直接读磁盘，一律经此通道；
+每个 handler 独立 try/catch，失败返回 `{ok:false,message}` 而非 5xx。
+
+### 委托边界（不自研）
+
+更新检查 / 推荐 / 崩溃守护 **未在本插件实现**，设置页明确标注为委托生态既有插件。
+
+### ⚠️ 验证状态
+
+宿主半体已本机实测通过；**客户端半体尚未真机验证**（见 `docs/client-ui-plan.md` 的 5 条验证清单）。
+若设置页出现异常，在 Plugins 页停用本插件即可完全恢复。
+
 ## 1.1.0 — 2026-09-26
 
 ### 从「技能」转为「插件」

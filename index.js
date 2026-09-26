@@ -39,6 +39,7 @@ const CATALOG_FILE = path.join(PACKAGE_ROOT, 'references', 'dsh-plugin-locale-ca
 const BACKUP_SUFFIXES = ['.dsh-locale.backup', '.dsh-locale.bak']
 const LOCALE_EXPORT_KEY = './locale/*'
 const LOCALE_EXPORT_VALUE = './locale/*'
+const BRIDGE_PREFIX = '/api/dsh-audit-skills'
 
 /** 读取精炼目录；任何失败都返回空目录而不是抛错。 */
 export function readCatalog() {
@@ -196,9 +197,82 @@ export function revertLocale(profileDirs, options = {}) {
   return results
 }
 
+/** 客户端 ↔ 宿主 bridge：注册只读/幂等的三个动作。任何失败都不外抛。 */
+export function registerBridge(ctx, dirs) {
+  ctx.inject(['webServer'], (sctx) => {
+    sctx.effect(() => {
+      const writeJson = (res, status, body) => {
+        try {
+          res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(body))
+        } catch {
+          /* 响应已结束等情况忽略 */
+        }
+      }
+      const routes = [
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/status',
+          handler: async (req, res) => {
+            try {
+              writeJson(res, 200, { ok: true, value: collectStatus(dirs) })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/apply',
+          handler: async (req, res) => {
+            try {
+              writeJson(res, 200, { ok: true, value: applyLocale(dirs) })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/revert',
+          handler: async (req, res) => {
+            try {
+              writeJson(res, 200, { ok: true, value: revertLocale(dirs) })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+      ]
+      const disposers = []
+      for (const route of routes) {
+        try {
+          disposers.push(sctx.webServer.register(route))
+        } catch (error) {
+          ctx.logger?.warn?.('dsh-audit-skills: bridge route failed: ' + String(error?.message ?? error))
+        }
+      }
+      return () => {
+        for (const dispose of disposers) {
+          try {
+            dispose()
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }, 'dsh-audit-skills: settings bridge')
+  })
+}
+
 /** 宿主半体入口：按配置应用，绝不抛错。 */
 export function apply(ctx, config = {}) {
   const dirs = resolveProfileDirs(config)
+  try {
+    registerBridge(ctx, dirs)
+  } catch (error) {
+    ctx.logger?.warn?.('dsh-audit-skills: bridge registration failed: ' + String(error?.message ?? error))
+  }
   ctx.effect(() => {
     try {
       if (config.autoApply !== false) {

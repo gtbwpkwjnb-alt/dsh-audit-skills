@@ -24,8 +24,18 @@ github:gtbwpkwjnb-alt/dsh-audit-skills
 安装后 **重启 DSH**：侧边栏 **Plugins 页**出现 `dsh-audit-skills（插件审查）` 卡片，
 卡片上的开关就是效果开关——**启用即应用精炼，停用即还原**。
 
-> v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。宿主半体已实现并可本地验证；
-> 设置页按钮组与侧边栏卡片见 `docs/client-ui-plan.md`，待真机验证后发布。
+> v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。
+>
+> **v1.2.0** 加入三个 UI 入口，全部经 ErrorBoundary 隔离：
+> - 设置页 **「技能审查」分区** —— 按钮组：应用翻译精炼 / 还原翻译 / 刷新状态
+> - **插件页本插件卡片** —— 与设置页同一面板（key `dsh-audit-skills#dsh-audit-skills`）
+> - **侧边栏卡片**（可选，需 `dsh-better-sidebar`）—— 不存在时静默跳过
+>
+> 按钮作用：**应用翻译精炼** 会扫描 profile，把新装/未精炼插件的说明写入 `locale/{en,zh}.json`；
+> 新装插件后**只需点一次这个按钮**，无需重装本插件。
+>
+> ⚠️ 宿主半体已本机实测；**UI 半体待真机验证**（见 `docs/client-ui-plan.md`）。
+> 若设置页异常，在 Plugins 页停用本插件即可完全恢复。
 
 ---
 
