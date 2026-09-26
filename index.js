@@ -633,6 +633,313 @@ export async function describeUpdateDelta(profileDir, pkg, from, to) {
   return { source: 'structure', text: '', details: delta.details, repoUrl: delta.repoUrl, published: delta.published }
 }
 
+// ───────────────────────── 审查规则引擎 ─────────────────────────
+//
+// 设计约束（与用户确认过）：
+//  · 只报告，不动作 —— 绝不自动停用/修改任何插件
+//  · 没有证据的条目不进列表 —— 误报代价远大于漏报
+//  · 每条发现必须标 confidence：fact（机械可验证）或 inferred（推断）
+//  · 不评分 —— 伪精确的数字我们无法负责
+//  · 绝不在 apply() 里跑扫描；懒加载 + TTL 缓存；单项失败只跳过该项
+
+const AUDIT_TTL_MS = 10 * 60 * 1000
+let auditCache = null
+
+/** 「忽略此条」的持久化位置（本功能唯一的写入点）。 */
+function ignoredPath() {
+  return path.join(path.dirname(overlayPath()), 'ignored.json')
+}
+
+/** 读忽略列表。 */
+export function readIgnored() {
+  try {
+    const doc = JSON.parse(fs.readFileSync(ignoredPath(), 'utf8'))
+    return Array.isArray(doc.ids) ? doc.ids.filter((x) => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/** 忽略一条发现（幂等）。 */
+export function ignoreFinding(id) {
+  if (typeof id !== 'string' || id === '') return { ok: false, message: '缺少 id' }
+  try {
+    const ids = readIgnored()
+    if (!ids.includes(id)) ids.push(id)
+    const file = ignoredPath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ note: '被用户忽略的审查条目 id。', ids }, null, 2) + '\n')
+    return { ok: true, total: ids.length }
+  } catch (error) {
+    return { ok: false, message: String((error && error.message) || error) }
+  }
+}
+
+/** 清空审查缓存。 */
+export function clearAuditCache() {
+  auditCache = null
+}
+
+/** 读已安装包的原始 manifest。 */
+function readInstalledManifest(profileDir, pkg) {
+  if (!isSafePackageName(pkg)) return undefined
+  try {
+    return JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', ...pkg.split('/'), 'package.json'), 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 解析一份 cordis 补丁，区分「新增行」与「覆盖行」。
+ *
+ * 实测结构：`insert:` 下带 `name:` 的子条目是**新增行**；
+ * 顶层只有 `id:` + `config:` 的是**覆盖已有行**——这个区分必须准确，
+ * 否则会把"自己新挂一行"误报成"覆盖了别人的行"。
+ */
+export function parsePatchTargets(text) {
+  const inserts = []
+  const overrides = []
+  let insertIndent = -1
+  for (const rawLine of String(text).split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+$/, '')
+    if (line.trim() === '' || /^\s*#/.test(line)) continue
+    const indent = /^(\s*)/.exec(line)[1].length
+    if (insertIndent >= 0 && indent <= insertIndent) insertIndent = -1
+    if (/insert:\s*$/.test(line)) {
+      insertIndent = indent
+      continue
+    }
+    const m = /-\s*id:\s*(\S+)/.exec(line)
+    if (m === null) continue
+    const id = m[1].replace(/['"]/g, '')
+    if (insertIndent >= 0 && indent > insertIndent) inserts.push(id)
+    else overrides.push(id)
+  }
+  return { inserts, overrides }
+}
+
+/** 读某个已装 bundle 的补丁目标。 */
+function readPatchTargets(profileDir, pkg) {
+  const manifest = readInstalledManifest(profileDir, pkg)
+  const rel = manifest && manifest.dsh && manifest.dsh.bundle ? manifest.dsh.bundle.patch : undefined
+  if (typeof rel !== 'string' || rel === '') return undefined
+  const file = path.join(profileDir, 'node_modules', ...pkg.split('/'), rel.replace(/^\.\//, ''))
+  try {
+    return Object.assign({ file: rel }, parsePatchTargets(fs.readFileSync(file, 'utf8')))
+  } catch {
+    return undefined
+  }
+}
+
+/** 随 DSH 本体提供的包名集合（只走 asar 头部，不展开全部文件）。 */
+function dshAppPackages() {
+  const override = process.env.DSH_APP_ASAR
+  const resources = process.resourcesPath
+  const asar = typeof override === 'string' && override !== ''
+    ? override
+    : (typeof resources === 'string' && resources !== '' ? path.join(resources, 'app.asar') : undefined)
+  if (asar === undefined) return undefined
+  try {
+    const fd = fs.openSync(asar, 'r')
+    try {
+      const head = Buffer.alloc(16)
+      fs.readSync(fd, head, 0, 16, 0)
+      const size = head.readUInt32LE(4)
+      const raw = Buffer.alloc(size)
+      fs.readSync(fd, raw, 0, size, 8)
+      const text = raw.toString('utf8')
+      const start = text.indexOf('{')
+      let depth = 0
+      let inStr = false
+      let esc = false
+      let end = -1
+      for (let i = start; i < text.length; i += 1) {
+        const ch = text[i]
+        if (inStr) {
+          if (esc) esc = false
+          else if (ch === '\\') esc = true
+          else if (ch === '"') inStr = false
+          continue
+        }
+        if (ch === '"') inStr = true
+        else if (ch === '{') depth += 1
+        else if (ch === '}') { depth -= 1; if (depth === 0) { end = i + 1; break } }
+      }
+      const names = new Set()
+      const header = JSON.parse(text.slice(start, end))
+      for (const [name, val] of Object.entries(header.files || {})) {
+        const nm = val.files && val.files.node_modules
+        if (nm === undefined || nm.files === undefined) continue
+        for (const [pkgName, pkgVal] of Object.entries(nm.files)) {
+          if (pkgName.startsWith('@')) {
+            for (const sub of Object.keys(pkgVal.files || {})) names.add(pkgName + '/' + sub)
+          } else names.add(pkgName)
+        }
+      }
+      return names
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** 读 profile 用户补丁层关心的行 id。 */
+function readUserPatchIds(profileDir) {
+  try {
+    return parsePatchTargets(fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8')).overrides
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 审查全部已装插件，返回 { generatedAt, findings, byPkg, counts }。
+ * findings 为全局列表；byPkg 便于表格行内展示。
+ */
+export function auditPackages(ctx, profileDir) {
+  if (auditCache !== null && Date.now() - auditCache.at < AUDIT_TTL_MS) return auditCache.result
+  const findings = []
+  const add = (f) => { findings.push(Object.assign({ id: f.kind + ':' + f.key }, f)) }
+  try {
+    const list = collectStatusViaService(ctx, [profileDir]) ?? collectStatus([profileDir])
+    const pkgs = list.map((r) => r.pkg)
+    const patchByPkg = new Map()
+    const ownInsertIds = new Set()
+    for (const pkg of pkgs) {
+      const t = readPatchTargets(profileDir, pkg)
+      if (t !== undefined) {
+        patchByPkg.set(pkg, t)
+        for (const id of t.inserts) ownInsertIds.add(id)
+      }
+    }
+    const appPkgs = dshAppPackages()
+    const userIds = new Set(readUserPatchIds(profileDir))
+    // R1 dsh.client.inject 模块可满足性（正是让 DSH 起不来的那一类）
+    for (const pkg of pkgs) {
+      const manifest = readInstalledManifest(profileDir, pkg)
+      const inject = manifest && manifest.dsh && manifest.dsh.client ? manifest.dsh.client.inject : undefined
+      if (!Array.isArray(inject)) continue
+      for (const mod of inject) {
+        if (typeof mod !== 'string' || mod === '') continue
+        const inProfile = fs.existsSync(path.join(profileDir, 'node_modules', ...mod.split('/'), 'package.json'))
+        if (inProfile) continue
+        if (appPkgs === undefined) {
+          add({ kind: 'conflict', key: 'inject-' + pkg + '-' + mod, pkg, peers: [], severity: 'low', confidence: 'inferred',
+            title: '客户端依赖 ' + mod + ' 无法确认是否可满足',
+            evidence: 'dsh.client.inject 声明了 ' + mod + '，既不在 profile 中，也无法读取 DSH 本体清单',
+            remedy: '若该模块缺失，客户端半体会激活失败并导致界面无法启动；可在插件页确认其是否正常加载。' })
+          continue
+        }
+        if (!appPkgs.has(mod)) {
+          // 事实只是"该依赖不存在"；**后果未经验证** ——
+          // 实机有一个插件（dsh-sidebar-qa）带着同样的缺失却运行正常，
+          // 所以不能断言它会致命。宁可把话说到能证明的程度。
+          add({ kind: 'conflict', key: 'inject-' + pkg + '-' + mod, pkg, peers: [], severity: 'medium', confidence: 'fact',
+            title: '客户端依赖 ' + mod + ' 在任何位置都不存在',
+            evidence: 'dsh.client.inject 声明 ' + mod + '；profile 与 DSH 本体（app.asar 的 284 个 @deepseek-ai 包）中均未找到',
+            remedy: '依赖声明可能写错了。DSH 对缺失注入项的严格程度我未验证（本机上另一插件有同类缺失却工作正常），所以不判定它致命；若该插件加载正常可忽略此条。' })
+        }
+      }
+    }
+    // R2 覆盖了**非自身**的 loader 行
+    for (const [pkg, t] of patchByPkg) {
+      for (const id of Array.from(new Set(t.overrides))) {
+        if (ownInsertIds.has(id) || id === pkg) continue
+        add({ kind: 'conflict', key: 'override-' + pkg + '-' + id, pkg, peers: [], severity: 'medium', confidence: 'fact',
+          title: '覆盖了非自身的 loader 行 ' + id,
+          evidence: t.file + ' → id: ' + id + '（未声明 name，属覆盖已有行）',
+          remedy: '该行由平台或其他插件提供，覆盖会改变它们的行为。请确认这是你的本意。' })
+      }
+    }
+    // R3 两个及以上插件覆盖同一行
+    const byTarget = new Map()
+    for (const [pkg, t] of patchByPkg) {
+      for (const id of Array.from(new Set(t.overrides))) {
+        if (!byTarget.has(id)) byTarget.set(id, [])
+        byTarget.get(id).push(pkg)
+      }
+    }
+    for (const [id, who] of byTarget) {
+      if (who.length < 2) continue
+      add({ kind: 'conflict', key: 'dup-' + id, pkg: who[0], peers: who.slice(1), severity: 'high', confidence: 'fact',
+        title: '多个插件覆盖同一行 ' + id,
+        evidence: who.join('、') + ' 都覆盖了 ' + id + '，后者会覆盖前者的配置',
+        remedy: '后安装者胜出。若需要两者共存，请把它们对该行的 config 合并到 profile 的 patch 层。' })
+    }
+    // R4 用户 patch 层与插件自身 patch 撞名（推断）
+    for (const [pkg, t] of patchByPkg) {
+      const touched = Array.from(new Set(t.overrides.concat(t.inserts)))
+      const hit = touched.filter((id) => userIds.has(id))
+      for (const id of hit) {
+        add({ kind: 'interaction', key: 'userpatch-' + pkg + '-' + id, pkg, peers: [], severity: 'low', confidence: 'inferred',
+          title: '与用户补丁层同样涉及 ' + id,
+          evidence: 'profile 的 cordis.patch.yml 与 ' + t.file + ' 都涉及 ' + id,
+          remedy: '通常属正常覆盖关系，仅供知悉：两层配置会按加载顺序合并。' })
+      }
+    }
+    // R6 两个插件共享同一个客户端模块（推断）
+    const injectByPkg = new Map()
+    for (const pkg of pkgs) {
+      const manifest = readInstalledManifest(profileDir, pkg)
+      const inject = manifest && manifest.dsh && manifest.dsh.client ? manifest.dsh.client.inject : undefined
+      if (Array.isArray(inject)) injectByPkg.set(pkg, inject.filter((x) => typeof x === 'string'))
+    }
+    const pkgList = Array.from(injectByPkg.keys())
+    for (let i = 0; i < pkgList.length; i += 1) {
+      for (let j = i + 1; j < pkgList.length; j += 1) {
+        const a = injectByPkg.get(pkgList[i])
+        const b = injectByPkg.get(pkgList[j])
+        // 只关注**非平台**模块的共享：@deepseek-ai/* 是人人都会用的基础模块，
+        // 把它们算作"关联"会产出大量无意义条目（实测 16 条全是噪音）。
+        const shared = a.filter((x) => b.includes(x) && !x.startsWith('@deepseek-ai/'))
+        if (shared.length === 0) continue
+        // 一对只出一条（此前两个方向各出一条，重复）
+        add({ kind: 'interaction', key: 'sharedinject-' + pkgList[i] + '-' + pkgList[j], pkg: pkgList[i],
+          peers: [pkgList[j]], severity: 'low', confidence: 'inferred',
+          title: '与 ' + pkgList[j] + ' 共用非平台客户端模块',
+          evidence: '共享 ' + shared.join('、'),
+          remedy: '两者依赖同一个第三方客户端模块，可能同时出现在界面上；不代表会冲突。' })
+      }
+    }
+    // R5 未声明 DSH 兼容性（汇总，不逐行）
+    const noCompat = []
+    for (const pkg of pkgs) {
+      const manifest = readInstalledManifest(profileDir, pkg)
+      if (manifest === undefined) continue
+      const dsh = manifest.dsh || {}
+      const hasEngines = dsh.engines && typeof dsh.engines.dsh === 'string' && dsh.engines.dsh !== ''
+      const hasCompat = dsh.compatibility && dsh.compatibility.dshReleases && Object.keys(dsh.compatibility.dshReleases).length > 0
+      if (!hasEngines && !hasCompat) noCompat.push(pkg)
+    }
+    const byPkg = new Map()
+    for (const f of findings) {
+      if (!byPkg.has(f.pkg)) byPkg.set(f.pkg, [])
+      byPkg.get(f.pkg).push(f)
+    }
+    const result = {
+      generatedAt: Date.now(),
+      findings,
+      byPkg,
+      counts: {
+        high: findings.filter((f) => f.severity === 'high').length,
+        medium: findings.filter((f) => f.severity === 'medium').length,
+        low: findings.filter((f) => f.severity === 'low').length,
+        fact: findings.filter((f) => f.confidence === 'fact').length,
+        inferred: findings.filter((f) => f.confidence === 'inferred').length,
+      },
+      noCompat,
+    }
+    auditCache = { at: Date.now(), result }
+    return result
+  } catch {
+    // 审查整体失败时返回空结果，绝不影响主流程
+    return { generatedAt: Date.now(), findings: [], byPkg: new Map(), counts: { high: 0, medium: 0, low: 0, fact: 0, inferred: 0 }, noCompat: [] }
+  }
+}
+
 /** 读某包当前已装版本。 */
 export function installedVersion(profileDir, pkg) {
   if (!isSafePackageName(pkg)) return null
@@ -1117,7 +1424,35 @@ export function registerBridge(ctx, dirs) {
             try {
               const body = await readJsonBody(req)
               const force = body && body.force === true
+              const ownerDirs = Array.isArray(dirs) ? dirs : [dirs]
               const rows = collectStatusViaService(ctx, dirs) ?? collectStatus(dirs)
+              // 审查结果与状态走**同一次响应**（单一快照原则），不新增按钮
+              let audit = { generatedAt: null, counts: { high: 0, medium: 0, low: 0, fact: 0, inferred: 0 }, noCompat: [] }
+              const byPkg = new Map()
+              try {
+                const raw = auditPackages(ctx, ownerDirs[0])
+                const ignored = new Set(readIgnored())
+                const visible = raw.findings.filter((f) => !ignored.has(f.id))
+                for (const f of visible) {
+                  for (const owner of [f.pkg].concat(Array.isArray(f.peers) ? f.peers : [])) {
+                    if (!byPkg.has(owner)) byPkg.set(owner, [])
+                    if (!byPkg.get(owner).includes(f)) byPkg.get(owner).push(f)
+                  }
+                }
+                audit = {
+                  generatedAt: raw.generatedAt,
+                  counts: {
+                    high: visible.filter((f) => f.severity === 'high').length,
+                    medium: visible.filter((f) => f.severity === 'medium').length,
+                    low: visible.filter((f) => f.severity === 'low').length,
+                    fact: visible.filter((f) => f.confidence === 'fact').length,
+                    inferred: visible.filter((f) => f.confidence === 'inferred').length,
+                  },
+                  noCompat: raw.noCompat,
+                }
+              } catch {
+                /* 审查失败绝不影响状态刷新 */
+              }
               const out = []
               for (const row of rows) {
                 if (row.version === null || row.version === undefined) {
@@ -1132,7 +1467,11 @@ export function registerBridge(ctx, dirs) {
                 // 必须用版本序比较：用 !== 会把「已装版本更高」的降级也判成有更新
                 out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: isNewerVersion(r.latest, row.version) ? true : (isNewerVersion(row.version, r.latest) ? false : null), reason: null }))
               }
-              writeJson(res, 200, { ok: true, value: out.map((row) => Object.assign({}, row, { issues: describeIssues(row) })) })
+              writeJson(res, 200, {
+                ok: true,
+                audit: audit,
+                value: out.map((row) => Object.assign({}, row, { issues: describeIssues(row), findings: byPkg.get(row.pkg) ?? [] })),
+              })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -1156,6 +1495,20 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, startUpdate(ctx, Array.isArray(dirs) ? dirs[0] : dirs, pkg))
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'update-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/ignore',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const result = ignoreFinding(body && body.id)
+              clearAuditCache()
+              writeJson(res, 200, result)
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
           },
         },

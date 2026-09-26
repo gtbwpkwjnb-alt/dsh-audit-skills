@@ -96,6 +96,32 @@ window.__ModuleLoader__.load({
       return { total: total, refined: refined, pending: pending, toApply: toApply, upd: upd, unk: unk };
     }
 
+    var SEV = { high: '高', medium: '中', low: '低' };
+
+    function FindingCard(props) {
+      var all = props.findings || [];
+      if (all.length === 0) return null;
+      var facts = all.filter(function (f) { return f.confidence === 'fact'; });
+      var inferred = all.filter(function (f) { return f.confidence !== 'fact'; });
+      var render = function (f) {
+        return h('div', { key: f.id, style: { display: 'flex', flexDirection: 'column', gap: '2px', paddingBottom: '4px' } },
+          h('div', null, '[' + f.kind + ' · ' + (f.confidence === 'fact' ? '事实' : '推断') + ' · ' + (SEV[f.severity] || f.severity) + '] ' + f.title),
+          h('div', { style: { fontSize: '11px', opacity: 0.6, paddingLeft: '10px' } }, '证据：' + f.evidence),
+          h('div', { style: { fontSize: '11px', paddingLeft: '10px' } }, '建议：' + f.remedy),
+          h('div', { style: { paddingLeft: '10px' } },
+            h('button', { type: 'button', style: S.mini, disabled: !!props.busy, onClick: function () { props.onIgnore(f.id); } }, '忽略此条')));
+      };
+      return h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600 } }, props.pkg),
+        facts.length ? h('div', { style: { fontSize: '11px', opacity: 0.7 } }, '事实（' + facts.length + '）') : null,
+        facts.map(render),
+        inferred.length
+          ? h('details', { style: { fontSize: '11px' } },
+              h('summary', { style: { opacity: 0.7, cursor: 'pointer' } }, '另有 ' + inferred.length + ' 条推断（仅供知悉）'),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '4px' } }, inferred.map(render)))
+          : null);
+    }
+
     function IssueCard(props) {
       var issues = props.issues || [];
       if (issues.length === 0) return null;
@@ -120,6 +146,8 @@ window.__ModuleLoader__.load({
       var revState = useState(''); var hostRev = revState[0]; var setHostRev = revState[1];
       var staleState = useState(false); var stale = staleState[0]; var setStale = staleState[1];
       var batchState = useState(null); var batch = batchState[0]; var setBatch = batchState[1];
+      var auditState = useState(null); var audit = auditState[0]; var setAudit = auditState[1];
+      var onlyState = useState(false); var onlyFlagged = onlyState[0]; var setOnlyFlagged = onlyState[1];
 
       var absorb = useCallback(function (r) {
         if (r && typeof r.rev === 'string' && r.rev !== '') setHostRev(r.rev);
@@ -130,7 +158,7 @@ window.__ModuleLoader__.load({
       // 唯一的数据入口：完整快照（状态 + 已装版本 + 最新版本 + 问题）
       var snapshot = useCallback(function (opts) {
         return call('updates', opts || {}).then(absorb).then(function (r) {
-          if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); return r.value; }
+          if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); if (r.audit) setAudit(r.audit); return r.value; }
           setNote({ kind: 'err', text: '读取失败：' + ((r && r.message) || '未知') });
           return null;
         });
@@ -303,6 +331,16 @@ window.__ModuleLoader__.load({
         });
       }, [absorb, pollBatch, snapshot]);
 
+      var ignore = useCallback(function (id) {
+        setBusy('ignore:' + id);
+        return call('ignore', { id: id }).then(absorb).then(function (r) {
+          setBusy('');
+          if (!r || !r.ok) { setNote({ kind: 'err', text: '忽略失败：' + ((r && r.message) || '未知') }); return; }
+          setNote({ kind: 'ok', text: '已忽略该条，刷新后不再显示。' });
+          return snapshot({ force: true });
+        });
+      }, [absorb, snapshot]);
+
       var s = rows ? summarize(rows) : null;
 
       var head = h('div', { style: S.bar },
@@ -329,7 +367,11 @@ window.__ModuleLoader__.load({
             h('span', null, '待应用 ' + s.toApply),
             h('span', null, '待生成文案 ' + s.pending),
             h('span', null, '可更新 ' + s.upd),
-            s.unk ? h('span', null, '无法比对 ' + s.unk) : null)
+            s.unk ? h('span', null, '无法比对 ' + s.unk) : null,
+            audit && (audit.counts.fact + audit.counts.inferred) > 0
+              ? h('button', { type: 'button', style: S.mini, onClick: function () { setOnlyFlagged(!onlyFlagged); } },
+                  onlyFlagged ? '显示全部' : ('审查 ⚠' + audit.counts.fact + ' 事实 / ' + audit.counts.inferred + ' 推断'))
+              : h('span', null, '审查 无发现'))
         : null;
 
       var batchEl = batch && Array.isArray(batch.items) && batch.items.length > 0
@@ -364,28 +406,40 @@ window.__ModuleLoader__.load({
               h('th', { style: S.th }, '版本'),
               h('th', { style: S.th }, '最新'),
               h('th', { style: S.th }, '操作'))),
-            h('tbody', null, rows.map(function (r) {
+            h('tbody', null, (onlyFlagged
+              ? rows.filter(function (r) { return (r.issues || []).length > 0 || (r.findings || []).length > 0; })
+              : rows).map(function (r) {
               var upd = r.hasUpdate === true;
               var job = jobs[r.pkg];
               var issues = r.issues || [];
               var cells = [
                 h('td', { style: S.td }, r.pkg),
                 // 三态：已优化 / 待应用（有文案未落盘）/ 待优化（压根没有文案）
-                h('td', { style: S.td }, r.localized ? '已优化' : (r.needsText ? '待优化' : '待应用')),
+                h('td', { style: S.td },
+                  (r.localized ? '已优化' : (r.needsText ? '待优化' : '待应用')) + (function () {
+                    var fs2 = r.findings || [];
+                    var facts = fs2.filter(function (f) { return f.confidence === 'fact'; });
+                    if (facts.length === 0) return '';
+                    var sev = facts.some(function (f) { return f.severity === 'high'; }) ? '高'
+                      : (facts.some(function (f) { return f.severity === 'medium'; }) ? '中' : '低');
+                    return '  ⚠' + sev;
+                  })()),
                 h('td', { style: S.td }, r.version || '—'),
                 h('td', { style: S.td }, r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—')),
               ];
               var op = [];
               if (job && !job.done) op.push(h('span', { key: 'j', style: S.note }, job.stage + '…'));
               else if (upd) op.push(h('button', { key: 'u', type: 'button', style: S.mini, disabled: !!busy, onClick: function () { doUpdate(r.pkg); } }, '更新'));
-              if (issues.length) op.push(h('button', { key: 'i', type: 'button', style: S.mini, onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); } }, '⚠ 问题'));
+              if (issues.length || (r.findings || []).length) op.push(h('button', { key: 'i', type: 'button', style: S.mini, onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); } }, '⚠ 详情'));
               cells.push(h('td', { style: S.td }, op.length ? op : null));
               return h('tr', { key: r.profileDir + '|' + r.pkg, style: r.installed === false ? S.dim : undefined }, cells);
             })));
 
       var openRow = rows ? rows.filter(function (r) { return r.pkg === openPkg; })[0] : null;
-      var detail = openRow && (openRow.issues || []).length
-        ? h(IssueCard, { pkg: openRow.pkg, issues: openRow.issues, onRetry: refresh })
+      var detail = openRow
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+            h(FindingCard, { pkg: openRow.pkg, findings: openRow.findings, onIgnore: ignore, busy: busy.indexOf('ignore:') === 0 }),
+            (openRow.issues || []).length ? h(IssueCard, { pkg: openRow.pkg, issues: openRow.issues, onRetry: refresh }) : null)
         : null;
 
       return h('div', { style: S.box },

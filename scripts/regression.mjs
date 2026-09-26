@@ -88,7 +88,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 8 条 bridge 路由（/status 已按 YAGNI 删除，新增批量接口）', routes.length === 8, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 9 条 bridge 路由（新增审查忽略接口）', routes.length === 9, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -424,6 +424,99 @@ check('客户端：全部已优化时直接返回不做事', clientSrc.includes(
 check('客户端：表格已去掉「启用」列', !clientSrc.includes("'启用'"))
 check('客户端：精炼措辞已改为优化', !clientSrc.includes('已精炼') && !clientSrc.includes('待精炼') && clientSrc.includes("'已优化'"))
 check('客户端：三态标签齐全（已优化/待应用/待优化）', clientSrc.includes("'已优化'") && clientSrc.includes("'待应用'") && clientSrc.includes("'待优化'"))
+
+// ─────────────────────── A10 审查规则引擎 ───────────────────────
+console.log(String.fromCharCode(10) + 'A10 审查规则')
+// 补丁解析：必须区分「新增行」与「覆盖行」，否则会把自己新挂的行误报成覆盖别人
+// 注意缩进：真实文件里顶层覆盖行与 `- insert:` **同级**，insert 的子条目更深一层
+const patchSample = [
+  '    - insert:',
+    "        - id: my-row",
+    "          name: 'pkg-alpha'",
+  '    - id: shared-row',
+  '      config:',
+  '        a: 1',
+].join(String.fromCharCode(10))
+const parsed = m.parsePatchTargets(patchSample)
+check('补丁解析：insert 下的条目算新增行', parsed.inserts.includes('my-row') && !parsed.inserts.includes('shared-row'), JSON.stringify(parsed))
+check('补丁解析：顶层只有 id 的算覆盖行', parsed.overrides.includes('shared-row') && !parsed.overrides.includes('my-row'), JSON.stringify(parsed))
+// 自建最小 asar，让注入可满足性判定不依赖本机路径
+const auditRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-'))
+const auditNm = path.join(auditRoot, 'node_modules')
+const appPkgs = ['@deepseek-ai/dsh-client-locale', 'third-party-shared']
+const bundleDecl2 = { dsh: { bundle: { patch: './cordis.patch.yml' } } }
+function mkPkg(name, opts) {
+  const dir = path.join(auditNm, ...name.split('/'))
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(Object.assign({ name, version: '1.0.0', dsh: Object.assign({}, bundleDecl2.dsh, opts.client ? { client: { platform: 'web', inject: opts.client } } : {}) }, opts.extra || {}), null, 2))
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), opts.patch)
+}
+mkPkg('pkg-alpha', { patch: ['- insert:', '    - id: alpha-row', "      name: 'pkg-alpha'"].join(String.fromCharCode(10)), client: ['@deepseek-ai/dsh-client-locale'] })
+mkPkg('pkg-beta', { patch: ['- id: shared-row', '  config:', '    b: 2'].join(String.fromCharCode(10)), client: ['@deepseek-ai/no-such-module'] })
+mkPkg('pkg-gamma', { patch: ['- id: shared-row', '  config:', '    c: 3'].join(String.fromCharCode(10)) })
+mkPkg('pkg-delta', { patch: ['- id: delta-row', '  config: {}'].join(String.fromCharCode(10)), client: ['third-party-shared'] })
+mkPkg('pkg-epsilon', { patch: ['- id: epsilon-row', '  config: {}'].join(String.fromCharCode(10)), client: ['third-party-shared'] })
+fs.writeFileSync(path.join(auditRoot, 'package.json'), JSON.stringify({ name: 'audit', dependencies: { 'pkg-alpha': '*', 'pkg-beta': '*', 'pkg-gamma': '*', 'pkg-delta': '*', 'pkg-epsilon': '*' }, dsh: { profile: { bundles: ['pkg-alpha', 'pkg-beta', 'pkg-gamma', 'pkg-delta', 'pkg-epsilon'] } } }, null, 2))
+fs.writeFileSync(path.join(auditRoot, 'cordis.patch.yml'), ['- id: alpha-row', '  config: {}'].join(String.fromCharCode(10)))
+// 最小 asar：只放我们声明的两个模块名
+function writeMiniAsar(file, names) {
+  const data = []
+  const files = {}
+  let offset = 0
+  const nmFiles = {}
+  for (const n of names) {
+    const parts = n.split('/')
+    const content = Buffer.from(JSON.stringify({ name: n, version: '0.0.0' }), 'utf8')
+    data.push(content)
+    nmFiles[parts[0]] = nmFiles[parts[0]] || { files: {} }
+    nmFiles[parts[0]].files[parts[1]] = { files: { 'package.json': { size: content.length, offset: offset } } }
+    offset += content.length
+  }
+  const header = { files: { dsh: { files: { node_modules: { files: nmFiles } } } } }
+  const headerJson = Buffer.from(JSON.stringify(header), 'utf8')
+  const pre = Buffer.alloc(8)
+  pre.writeUInt32LE(4, 0)
+  pre.writeUInt32LE(headerJson.length, 4)
+  fs.writeFileSync(file, Buffer.concat([pre, headerJson].concat(data)))
+}
+const miniAsar = path.join(auditRoot, 'app.asar')
+writeMiniAsar(miniAsar, appPkgs)
+process.env.DSH_APP_ASAR = miniAsar
+m.clearAuditCache()
+const audited = m.auditPackages({ get: () => undefined }, auditRoot)
+const find = (kind, pkg) => audited.findings.filter((f) => f.kind === kind && (f.pkg === pkg || (f.peers || []).includes(pkg)))
+check('R1：声明缺失模块 -> 事实级发现', find('conflict', 'pkg-beta').some((f) => f.confidence === 'fact' && f.title.includes('no-such-module')), JSON.stringify(find('conflict', 'pkg-beta').map((f) => f.title)))
+check('R1：模块可满足则不报', !find('conflict', 'pkg-alpha').some((f) => f.title.includes('dsh-client-locale')))
+check('R1：缺失只断言「不存在」，标题不宣称致命', (function () { const r1 = find('conflict', 'pkg-beta').filter((f) => f.title.includes('no-such-module')); return r1.length === 1 && r1[0].title.includes('不存在') && !r1[0].title.includes('无法启动') })(), JSON.stringify(find('conflict', 'pkg-beta').map((f) => f.title)))
+check('R2：覆盖非自身行 -> 报出', find('conflict', 'pkg-beta').some((f) => f.title.includes('shared-row')), JSON.stringify(find('conflict', 'pkg-beta').map((f) => f.title)))
+check('R2：自己 insert 的行不算覆盖', !find('conflict', 'pkg-alpha').some((f) => f.title.includes('alpha-row')))
+check('R3：两个插件覆盖同一行 -> 一条、双方可见', (function () {
+  const dup = audited.findings.filter((f) => f.kind === 'conflict' && f.peers.includes('pkg-gamma'))
+  return dup.length === 1 && dup[0].peers.length === 1 && dup[0].severity === 'high'
+})(), JSON.stringify(audited.findings.filter((f) => f.title.includes('shared-row')).map((f) => f.pkg + '/' + f.peers)))
+check('R4：用户补丁层与插件新增行撞名 -> 推断级', find('interaction', 'pkg-alpha').some((f) => f.confidence === 'inferred' && f.title.includes('alpha-row')), JSON.stringify(find('interaction', 'pkg-alpha').map((f) => f.title)))
+check('R6：共享非平台模块 -> 一条、标推断', (function () {
+  const sh = audited.findings.filter((f) => f.kind === 'interaction' && String(f.evidence).includes('third-party-shared'))
+  return sh.length === 1 && sh[0].confidence === 'inferred'
+})(), JSON.stringify(audited.findings.filter((f) => f.kind === 'interaction').map((f) => f.title)))
+check('R6：平台模块（@deepseek-ai/*）共享不报（避免噪音）', !audited.findings.some((f) => f.evidence && f.evidence.includes('@deepseek-ai/dsh-client-locale')))
+check('R5：未声明兼容性收集为汇总名单，不逐行', Array.isArray(audited.noCompat) && audited.noCompat.length === 5 && !audited.findings.some((f) => f.title.includes('兼容')))
+check('审查缓存：第二次命中同一对象', m.auditPackages({ get: () => undefined }, auditRoot) === audited)
+// 忽略列表：写入后不再出现
+const savedHome5 = process.env.DSH_HOME
+process.env.DSH_HOME = auditRoot
+const target = audited.findings[0]
+check('忽略：写入成功', m.ignoreFinding(target.id).ok === true)
+check('忽略：读回包含该 id', m.readIgnored().includes(target.id))
+check('忽略：幂等（重复写不重复计）', (function () { m.ignoreFinding(target.id); return m.readIgnored().filter((x) => x === target.id).length === 1 })())
+process.env.DSH_HOME = savedHome5
+delete process.env.DSH_APP_ASAR
+fs.rmSync(auditRoot, { recursive: true, force: true })
+// 客户端契约
+check('客户端：审查并入刷新，无独立按钮', clientSrc.includes('call(\'updates\'') && !clientSrc.includes("'安全审查'"))
+check('客户端：事实/推断分组展示', clientSrc.includes('另有 ') && clientSrc.includes('仅供知悉'))
+check('客户端：严重度用文字而非仅颜色', clientSrc.includes("high: '高'") && clientSrc.includes("medium: '中'"))
+check('客户端：提供忽略入口', clientSrc.includes("call('ignore'") && clientSrc.includes('忽略此条'))
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')
