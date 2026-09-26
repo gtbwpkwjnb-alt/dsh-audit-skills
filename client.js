@@ -326,8 +326,21 @@ window.__ModuleLoader__.load({
             h('div', { style: { fontWeight: 600 } },
               '批量更新' + (batch.running === true ? '（进行中 ' + (batch.index + 1) + '/' + batch.total + '）' : '（已完成）')),
             batch.items.map(function (it) {
-              return h('div', { key: it.pkg, style: S.note },
-                '· ' + it.pkg + '  [' + it.state + ']' + (it.message ? '  ' + it.message : ''))
+              var line = '· ' + it.pkg + '  [' + it.state + ']' + (it.message ? '  ' + it.message : '') + (it.refined === true ? '  精炼已保持' : '')
+              var d = it.delta
+              var deltaLine = null
+              if (d) {
+                if (d.source === 'changelog') deltaLine = '变更日志：' + String(d.text).slice(0, 200)
+                else if (d.source === 'structure') {
+                  deltaLine = (d.details && d.details.length)
+                    ? '结构性变化（推断）：' + d.details.join('；')
+                    : '未检出结构性变化（依赖与说明均未变）；该包无变更日志，无法判定是修复还是新增'
+                  if (d.repoUrl) deltaLine += '  仓库：' + d.repoUrl
+                } else deltaLine = '变更信息不可得'
+              }
+              return h('div', { key: it.pkg, style: { display: 'flex', flexDirection: 'column', gap: '1px' } },
+                h('div', { style: S.note }, line),
+                deltaLine ? h('div', { style: { fontSize: '11px', opacity: 0.65, paddingLeft: '12px' } }, deltaLine) : null)
             }))
         : null;
 

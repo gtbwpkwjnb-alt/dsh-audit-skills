@@ -182,7 +182,8 @@ const ctxWithPM = { get: (n) => (n === 'pluginManager' ? fakePM : undefined) }
 const started = m.startUpdate(ctxWithPM, sandbox, 'pkg-with-exports')
 check('startUpdate 立即返回 token 与计划', started.ok === true && typeof started.token === 'string' && started.plan.kind === 'registry', JSON.stringify(started))
 check('startUpdate 对 git 依赖用 git spec', m.startUpdate(ctxWithPM, sandbox, 'pkg-git').plan.spec === 'github:owner/repo')
-await new Promise((r) => setTimeout(r, 80))
+// 完成处理现在是 async（收尾要做一次变化提示查询），所以给足等待
+await new Promise((r) => setTimeout(r, 800))
 const jr = m.updateJobStatus(started.token)
 check('轮询到 done 且 ok（不再是一次长请求）', jr.ok === true && jr.job.done === true && jr.job.ok === true, JSON.stringify(jr))
 check('installBundle 收到的 spec 正确', seenSpecs.includes('pkg-with-exports@latest'), JSON.stringify(seenSpecs))
@@ -353,6 +354,46 @@ const itemC = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-
 check('安装执行了但版本未变 -> 如实标为 unchanged（不假装成功）', !!itemC && itemC.state === 'unchanged', JSON.stringify(itemC))
 check('结束语区分 成功/未变化/失败', /成功 \d+ 个，未变化 \d+ 个，失败 \d+ 个/.test(String(m.updateAllStatus().message)), String(m.updateAllStatus().message))
 process.env.DSH_HOME = savedHome
+
+// ─────────────────────── A8 更新后的精炼保持 + 变化提示 ───────────────────────
+console.log(String.fromCharCode(10) + 'A8 更新后精炼保持 / 变化提示')
+const savedHome3 = process.env.DSH_HOME
+process.env.DSH_HOME = sandbox
+// 用真实 catalog 里的包名，验证「更新后自动补回精炼」
+const keepDir = path.join(nm, 'dsh-better-sidebar')
+fs.mkdirSync(keepDir, { recursive: true })
+fs.writeFileSync(path.join(keepDir, 'package.json'), JSON.stringify({ name: 'dsh-better-sidebar', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }, null, 2))
+fs.writeFileSync(path.join(sandbox, 'package.json'), JSON.stringify({ name: 'p', dependencies: { 'dsh-better-sidebar': '^1.0.0' }, dsh: { profile: { bundles: ['dsh-better-sidebar'] } } }, null, 2))
+check('更新前：该包未被精炼', m.inspectPackage(sandbox, { pkg: 'dsh-better-sidebar' }).localized === false)
+// 假插件管理器：模拟「重新物化目录」——把 locale 洗掉并把版本抬上去
+const rematerializePM = { listBundles: () => [], installBundle: async () => {
+  fs.rmSync(path.join(keepDir, 'locale'), { recursive: true, force: true })
+  const j = JSON.parse(fs.readFileSync(path.join(keepDir, 'package.json'), 'utf8')); j.version = '2.0.0'
+  fs.writeFileSync(path.join(keepDir, 'package.json'), JSON.stringify(j, null, 2)); return {} } }
+m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? rematerializePM : undefined) }, sandbox, ['dsh-better-sidebar'])
+await new Promise((r) => setTimeout(r, 300))
+const keepItem = (m.updateAllStatus().items || []).find((x) => x.pkg === 'dsh-better-sidebar')
+check('更新后：精炼被自动补回并标记 refined', !!keepItem && keepItem.refined === true, JSON.stringify(keepItem && { state: keepItem.state, refined: keepItem.refined }))
+check('更新后：locale 文件确实重新落盘（用户无需再点翻译优化）', fs.existsSync(path.join(keepDir, 'locale', 'zh.json')))
+// 变化提示：包内 CHANGELOG 优先
+fs.writeFileSync(path.join(keepDir, 'CHANGELOG.md'), ['# Changelog', '', '## 2.0.0', '', '- 新增：支持 X 功能', '- 修复：Y 崩溃', '', '## 1.0.0', '', '- 初始版本'].join(String.fromCharCode(10)))
+const section = m.readLocalChangelog(sandbox, 'dsh-better-sidebar', '2.0.0')
+check('readLocalChangelog 抽取正确版本小节', typeof section === 'string' && section.includes('支持 X 功能') && !section.includes('初始版本'), String(section).slice(0, 60))
+check('readLocalChangelog 对缺失版本返回 undefined', m.readLocalChangelog(sandbox, 'dsh-better-sidebar', '9.9.9') === undefined)
+const deltaLocal = await m.describeUpdateDelta(sandbox, 'dsh-better-sidebar', '1.0.0', '2.0.0')
+check('有 CHANGELOG 时来源标为 changelog（事实优先）', deltaLocal.source === 'changelog', JSON.stringify(deltaLocal.source))
+check('describeDeltaText 事实源直出日志', m.describeDeltaText(deltaLocal).startsWith('变更日志：'))
+// 无 CHANGELOG -> 退回结构性推断，且必须明确说明无法判定修复/新增
+fs.rmSync(path.join(keepDir, 'CHANGELOG.md'), { force: true })
+const deltaNet = await m.fetchVersionDelta('dsh-context', '0.56.1', '0.56.2')
+check('registry 差异查询可用', deltaNet.status === 'ok', JSON.stringify(deltaNet).slice(0, 120))
+check('dsh-context 0.56.1→0.56.2 未检出结构性变化（与实测一致）', Array.isArray(deltaNet.details) && deltaNet.details.length === 0, JSON.stringify(deltaNet.details))
+const deltaText = m.describeDeltaText({ source: 'structure', details: [], repoUrl: 'https://github.com/x/y' })
+check('推断源明确标注「无法判定是修复还是新增」', deltaText.includes('未检出结构性变化') && deltaText.includes('无法判定是修复还是新增'), deltaText)
+check('推断源附带仓库地址（让用户自己看 release notes）', deltaText.includes('https://github.com/x/y'))
+check('新增依赖会被报为结构性变化', m.describeDeltaText({ source: 'structure', details: ['新增依赖 a、b'], repoUrl: null }).includes('新增依赖 a、b'))
+check('信息不可得时如实说明', m.describeDeltaText({ source: 'unavailable', reason: 'HTTP 404' }).includes('无法获取变更信息'))
+process.env.DSH_HOME = savedHome3
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')

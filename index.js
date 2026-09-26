@@ -484,10 +484,30 @@ export function startUpdate(ctx, profileDir, pkg) {
   updateJobs.set(token, Object.assign({}, base, { stage: 'installing', message: '正在执行安装（pnpm，可能持续数十秒）…', done: false, ok: null }))
   Promise.resolve()
     .then(() => pm.installBundle(plan.spec, {}))
-    .then((result) => {
+    .then(async (result) => {
       const job = updateJobs.get(token) ?? base
-      pruneUpdateJobs()
-      updateJobs.set(token, Object.assign({}, job, { stage: 'done', message: '安装完成。新版本需刷新页面或重启 DSH 才会加载。', done: true, ok: true, result: result ?? null }))
+      // 注意：startUpdate 的第二参数就叫 profileDir，这里不能再从 dirs 推导
+      const before = installedVersion(profileDir, pkg)
+      // 与批量一致的收尾：补回被 pnpm 洗掉的精炼 + 给出变化提示
+      let suffix = ''
+      try {
+        const entry = readCatalog().filter((e) => e.pkg === pkg)
+        if (entry.length > 0) {
+          applyLocale([profileDir], { entries: entry })
+          if (inspectPackage(profileDir, { pkg }).localized === true) suffix += ' 精炼已保持。'
+        }
+      } catch {
+        /* 忽略 */
+      }
+      if (plan.kind === 'registry' && before !== null) {
+        try {
+          const delta = await describeUpdateDelta(profileDir, pkg, before, latestVersionFromSpec(plan.spec) ?? before)
+          suffix += ' ' + describeDeltaText(delta)
+        } catch {
+          /* 忽略 */
+        }
+      }
+      updateJobs.set(token, Object.assign({}, job, { stage: 'done', message: '安装执行完成。' + suffix + ' 新版本需刷新页面或重启 DSH 才会加载。', done: true, ok: true, result: result ?? null }))
     })
     .catch((error) => {
       const job = updateJobs.get(token) ?? base
@@ -495,6 +515,104 @@ export function startUpdate(ctx, profileDir, pkg) {
       updateJobs.set(token, Object.assign({}, job, { stage: 'failed', message: String((error && error.message) || error), done: true, ok: false }))
     })
   return { ok: true, token, plan: { kind: plan.kind, spec: plan.spec, range: plan.range } }
+}
+
+/** 从 CHANGELOG 文本里抽取某个版本号所在的小节。 */
+function extractVersionSection(text, version) {
+  const lines = String(text).split(/\r?\n/)
+  const start = lines.findIndex((line) => /^#{1,3}\s/.test(line) && line.includes(version))
+  if (start < 0) return undefined
+  const out = []
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^#{1,3}\s/.test(lines[i])) break
+    out.push(lines[i])
+  }
+  const body = out.join('\n').trim()
+  return body === '' ? undefined : body.slice(0, 600)
+}
+
+/** 读包内自带的变更日志（最权威的来源）。 */
+export function readLocalChangelog(profileDir, pkg, version) {
+  if (!isSafePackageName(pkg)) return undefined
+  const dir = path.join(profileDir, 'node_modules', ...pkg.split('/'))
+  for (const name of ['CHANGELOG.md', 'CHANGELOG', 'CHANGELOG.markdown', 'CHANGES.md', 'HISTORY.md']) {
+    try {
+      const section = extractVersionSection(fs.readFileSync(path.join(dir, name), 'utf8'), version)
+      if (section !== undefined) return section
+    } catch {
+      /* 试下一个文件名 */
+    }
+  }
+  return undefined
+}
+
+/**
+ * 从 registry 元数据里做**结构性差异**。
+ *
+ * 本机实测：这些插件**都不随包提供 CHANGELOG**，所以"是修 bug 还是加功能"无法直接得知。
+ * 能做的是给出客观结构信号（说明文字/依赖/发布时间），并明确标注这是**推断**而非事实，
+ * 同时把仓库地址交出去让用户自己看 release notes。
+ */
+export async function fetchVersionDelta(pkg, from, to) {
+  try {
+    const res = await fetch(NPM_REGISTRY + pkg.split('/').map(encodeURIComponent).join('/'), {
+      signal: AbortSignal.timeout(15000),
+      headers: { accept: 'application/vnd.npm.install-v1+json' },
+    })
+    if (!res.ok) return { status: 'unavailable', reason: 'HTTP ' + res.status }
+    const doc = await res.json()
+    const a = doc.versions ? doc.versions[from] : undefined
+    const b = doc.versions ? doc.versions[to] : undefined
+    if (a === undefined || b === undefined) return { status: 'unavailable', reason: '缺少版本元数据' }
+    const details = []
+    if (String(a.description ?? '') !== String(b.description ?? '')) details.push('说明文字已变更（用途可能变化）')
+    const da = Object.keys(a.dependencies ?? {})
+    const db = Object.keys(b.dependencies ?? {})
+    const added = db.filter((x) => !da.includes(x))
+    const removed = da.filter((x) => !db.includes(x))
+    if (added.length > 0) details.push('新增依赖 ' + added.slice(0, 5).join('、'))
+    if (removed.length > 0) details.push('移除依赖 ' + removed.slice(0, 5).join('、'))
+    const rawRepo = b.repository === undefined ? b.homepage : (typeof b.repository === 'string' ? b.repository : b.repository.url)
+    return {
+      status: 'ok',
+      details,
+      published: doc.time === undefined ? null : (doc.time[to] ?? null),
+      repoUrl: typeof rawRepo === 'string' ? rawRepo.replace(/^git\+/, '').replace(/\.git$/, '') : null,
+    }
+  } catch (error) {
+    return { status: 'unavailable', reason: String((error && error.message) || error) }
+  }
+}
+
+/**
+ * 汇总一次更新的"变化提示"。
+ * 优先级：包内 CHANGELOG（事实）> registry 结构性差异（推断）> 无法判定。
+ */
+/** 把变化提示转成一句人话（明确区分"事实"与"推断"）。 */
+export function describeDeltaText(delta) {
+  if (delta === undefined || delta === null) return ''
+  if (delta.source === 'changelog') return '变更日志：' + String(delta.text).replace(/\s+/g, ' ').slice(0, 200)
+  if (delta.source === 'structure') {
+    const head = (Array.isArray(delta.details) && delta.details.length > 0)
+      ? '检出结构性变化（推断，非作者说明）：' + delta.details.join('；')
+      : '未检出结构性变化（依赖与说明均未变）'
+    return head + '。该包未随包提供变更日志，无法判定是修复还是新增功能。' + (delta.repoUrl ? ' 仓库：' + delta.repoUrl : '')
+  }
+  return '无法获取变更信息' + (delta.reason ? '（' + delta.reason + '）' : '') + '。'
+}
+
+/** 从 registry spec（pkg@x.y.z）里取出目标版本。 */
+function latestVersionFromSpec(spec) {
+  const m = /@([^@/]+)$/.exec(String(spec ?? ''))
+  return m === null ? undefined : m[1]
+}
+
+export async function describeUpdateDelta(profileDir, pkg, from, to) {
+  const changelog = readLocalChangelog(profileDir, pkg, to)
+  if (changelog !== undefined) return { source: 'changelog', text: changelog, details: [], repoUrl: null }
+  const delta = await fetchVersionDelta(pkg, from, to)
+  if (delta.status !== 'ok') return { source: 'unavailable', text: '', details: [], repoUrl: null, reason: delta.reason }
+  return { source: 'structure', text: '', details: delta.details, repoUrl: delta.repoUrl, published: delta.published }
 }
 
 /** 读某包当前已装版本。 */
@@ -592,6 +710,24 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
       writeBatch(live)
       const result = await runOneUpdate(ctx, profileDir, item.pkg)
       item.to = installedVersion(profileDir, item.pkg)
+      if (result.ok === true && item.from !== null && item.to !== null && item.to !== item.from) {
+        // 更新会重新物化包目录，把我们的 locale 洗掉。这里立刻补回，
+        // 用户就不必再点一次「翻译优化」（此前后续的 autoApply 也会补，但会晚到一次重载）。
+        try {
+          const entry = readCatalog().filter((e) => e.pkg === item.pkg)
+          if (entry.length > 0) {
+            applyLocale([profileDir], { entries: entry })
+            item.refined = inspectPackage(profileDir, { pkg: item.pkg }).localized === true
+          }
+        } catch {
+          /* 补回失败不影响更新本身 */
+        }
+        try {
+          item.delta = await describeUpdateDelta(profileDir, item.pkg, item.from, item.to)
+        } catch {
+          /* 变化提示失败不影响更新本身 */
+        }
+      }
       if (result.ok !== true) {
         item.state = 'failed'
         item.message = result.message
