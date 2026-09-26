@@ -32,6 +32,24 @@ window.__ModuleLoader__.load({
     var LABEL = '插件与技能审查';
     var POLL_MS = 1500;
     var POLL_MAX = 240;
+    /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
+       宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
+       「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
+    var CLIENT_REV = '2.6.1';
+
+    /** 比较点分版本号；非数字段按 0 算。 */
+    function compareRev(a, b) {
+      var pa = String(a === undefined || a === null ? '' : a).split('.');
+      var pb = String(b === undefined || b === null ? '' : b).split('.');
+      var n = Math.max(pa.length, pb.length);
+      for (var i = 0; i < n; i += 1) {
+        var x = parseInt(pa[i], 10); var y = parseInt(pb[i], 10);
+        if (isNaN(x)) x = 0;
+        if (isNaN(y)) y = 0;
+        if (x !== y) return x < y ? -1 : 1;
+      }
+      return 0;
+    }
 
     function call(action, body) {
       return fetch(BRIDGE + '/' + action, {
@@ -89,14 +107,17 @@ window.__ModuleLoader__.load({
       tabOn: { fontSize: '12px', padding: '4px 12px', border: 'none', borderBottom: '2px solid currentColor', background: 'none', color: 'inherit', opacity: 1, fontWeight: 600, cursor: 'default' },
     };
 
-    function summarize(rows) {
+    function summarize(rows, isSkill) {
       var total = rows.length;
-      var refined = rows.filter(function (r) { return r.localized === true; }).length;
-      var pending = rows.filter(function (r) { return r.needsText === true; }).length;
-      var toApply = rows.filter(function (r) { return r.localized !== true; }).length;
+      /* 技能侧：随 DSH 提供的技能在 app.asar 里，没有可写路径 —— 只入表并标注来源，
+         不计入「待应用 / 待生成」，否则那几项永远是待办、还会在优化时去写写不了的文件。 */
+      var active = isSkill ? rows.filter(function (r) { return r.bundled !== true; }) : rows;
+      var refined = active.filter(function (r) { return r.localized === true; }).length;
+      var pending = active.filter(function (r) { return r.needsText === true; }).length;
+      var toApply = active.filter(function (r) { return r.localized !== true; }).length;
       var upd = rows.filter(function (r) { return r.hasUpdate === true; }).length;
       var unk = rows.filter(function (r) { return r.hasUpdate === null; }).length;
-      return { total: total, refined: refined, pending: pending, toApply: toApply, upd: upd, unk: unk };
+      return { total: total, refined: refined, pending: pending, toApply: toApply, upd: upd, unk: unk, bundled: total - active.length };
     }
 
     var SEV = { high: '高', medium: '中', low: '低' };
@@ -183,8 +204,10 @@ window.__ModuleLoader__.load({
         })
       }, [absorb]);
 
-      // 挂载时恢复：上次批量若还在跑就继续显示，刚结束就把结果如实报出来
+      // 挂载时恢复：上次批量若还在跑就继续显示，刚结束就把结果如实报出来。
+      // 技能视图直接跳过 —— 批量更新是插件专属动作，两页不共用这份状态。
       useEffect(function () {
+        if (IS_SKILL) return;
         call('update-all-status').then(absorb).then(function (r) {
           var b = r && r.ok ? r.batch : null
           if (!b) return
@@ -204,7 +227,7 @@ window.__ModuleLoader__.load({
         return snapshot({ force: true }).then(function (v) {
           setBusy('');
           if (v) {
-            var s = summarize(v);
+            var s = summarize(v, IS_SKILL);
             setNote({ kind: s.upd || s.pending ? 'note' : 'ok',
               text: '刷新完成：已装 ' + s.total + '，已优化 ' + s.refined + '，待应用 ' + s.toApply + '，待生成文案 ' + s.pending + '，可更新 ' + s.upd + (s.unk ? '，无法比对 ' + s.unk : '') });
           }
@@ -219,7 +242,8 @@ window.__ModuleLoader__.load({
           return snapshot().then(function (cur) {
             if (!cur) { setBusy(''); return; }
             var pend = cur.filter(function (r) { return r.needsText === true; });
-            var toApplyS = cur.filter(function (r) { return r.localized !== true; });
+            // 随 DSH 提供的技能在 app.asar 内，没有可写路径：跳过，不算失败
+            var toApplyS = cur.filter(function (r) { return r.bundled !== true && r.localized !== true; });
             if (toApplyS.length === 0) {
               setBusy('');
               setNote({ kind: 'ok', text: '全部 ' + cur.length + ' 个技能均已优化，无需处理。' });
@@ -230,15 +254,15 @@ window.__ModuleLoader__.load({
             var si = 0;
             var stepSkill = function () {
               if (si >= pend.length) {
-                setNote({ kind: 'note', text: '正在应用（' + toApplyS.length + ' 个，跳过已优化 ' + (cur.length - toApplyS.length) + ' 个）…' });
+                setNote({ kind: 'note', text: '正在应用（' + toApplyS.length + ' 个，跳过 ' + (cur.length - toApplyS.length) + ' 个：已优化或随 DSH 提供）…' });
                 return call('apply-skills', { pkgs: toApplyS.map(function (r) { return r.pkg; }) }).then(absorb).then(function (ap) {
                   var applied = ap && Array.isArray(ap.value) ? ap.value.filter(function (x) { return x.state === 'applied'; }).length : 0;
                   return snapshot({ force: true }).then(function (v) {
                     setBusy('');
                     if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用失败：' + ((ap && ap.message) || '未知') }); return; }
-                    var ss = v ? summarize(v) : null;
+                    var ss = v ? summarize(v, true) : null;
                     setNote({ kind: gFail.length ? 'err' : 'ok',
-                      text: '技能优化完成：新生成 ' + gOk + ' 条，应用 ' + applied + ' 项，跳过已优化 ' + (cur.length - toApplyS.length) + ' 个' +
+                      text: '技能优化完成：新生成 ' + gOk + ' 条，应用 ' + applied + ' 项，跳过 ' + (cur.length - toApplyS.length) + ' 个（已优化或随 DSH 提供）' +
                         (ss ? '；当前已优化 ' + ss.refined + '/' + ss.total : '') +
                         (gFail.length ? '；生成失败 ' + gFail.length + ' 个：' + gFail.join('、') : '') });
                   });
@@ -396,7 +420,7 @@ window.__ModuleLoader__.load({
         });
       }, [absorb, snapshot]);
 
-      var s = rows ? summarize(rows) : null;
+      var s = rows ? summarize(rows, IS_SKILL) : null;
 
       var head = h('div', { style: S.bar },
         h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
@@ -407,8 +431,14 @@ window.__ModuleLoader__.load({
               busy === 'update:all' ? '批量更新中…' : '一键更新（' + s.upd + '）')
           : null);
 
-      var staleEl = stale
-        ? h('div', { style: S.err }, '⚠ 宿主半体版本过旧：运行中的是进程启动时加载的代码，因此缺少新接口。请重启 DSH 后重试。')
+      var revGap = hostRev !== '' && hostRev !== CLIENT_REV;
+      var staleEl = (stale || revGap)
+        ? h('div', { style: S.err }, revGap
+          ? '⚠ 客户端半体 v' + CLIENT_REV + ' 与运行中的宿主半体 v' + hostRev + ' 不一致：' +
+            (compareRev(hostRev, CLIENT_REV) < 0
+              ? '宿主半体是旧的 —— 它只在 DSH 进程启动时加载一次，因此可能缺少本页需要的接口（例如 /skills）。请重启 DSH。'
+              : '客户端半体是旧的（页面来自缓存）。请刷新页面。')
+          : '⚠ 宿主半体版本过旧：运行中的是进程启动时加载的代码，因此缺少新接口。请重启 DSH 后重试。')
         : null;
 
       var noteEl = note
@@ -421,15 +451,17 @@ window.__ModuleLoader__.load({
             h('span', null, '已优化 ' + s.refined),
             h('span', null, '待应用 ' + s.toApply),
             h('span', null, '待生成文案 ' + s.pending),
-            h('span', null, '可更新 ' + s.upd),
-            s.unk ? h('span', null, '无法比对 ' + s.unk) : null,
+            !IS_SKILL ? h('span', null, '可更新 ' + s.upd) : null,
+            !IS_SKILL && s.unk ? h('span', null, '无法比对 ' + s.unk) : null,
+            IS_SKILL && s.bundled > 0 ? h('span', null, '随 DSH 提供 ' + s.bundled) : null,
             audit && (audit.counts.fact + audit.counts.inferred) > 0
               ? h('button', { type: 'button', style: S.mini, onClick: function () { setOnlyFlagged(!onlyFlagged); } },
                   onlyFlagged ? '显示全部' : ('审查 ⚠' + audit.counts.fact + ' 事实 / ' + audit.counts.inferred + ' 推断'))
               : h('span', null, '审查 无发现'))
         : null;
 
-      var batchEl = batch && Array.isArray(batch.items) && batch.items.length > 0
+      // 技能视图不渲染批量更新卡片（它是插件专属动作的状态，别让两页看起来共用一份状态）
+      var batchEl = !IS_SKILL && batch && Array.isArray(batch.items) && batch.items.length > 0
         ? h('div', { style: S.card },
             h('div', { style: { fontWeight: 600 } },
               '批量更新' + (batch.running === true ? '（进行中 ' + (batch.index + 1) + '/' + batch.total + '）' : '（已完成）')),
@@ -453,11 +485,11 @@ window.__ModuleLoader__.load({
         : null;
 
       var table = rows === null
-        ? h('div', { style: S.note }, '正在读取插件状态…')
+        ? h('div', { style: S.note }, IS_SKILL ? '正在读取技能状态…' : '正在读取插件状态…')
         : h('table', { style: S.table },
             h('thead', null, h('tr', null,
               h('th', { style: S.th }, IS_SKILL ? '技能' : '插件'),
-              h('th', { style: S.th }, IS_SKILL ? '描述' : '优化'),
+              h('th', { style: S.th }, IS_SKILL ? '优化 · 描述' : '优化'),
               h('th', { style: S.th }, '版本'),
               h('th', { style: S.th }, IS_SKILL ? '来源' : '最新'),
               h('th', { style: S.th }, '操作'))),
@@ -469,11 +501,14 @@ window.__ModuleLoader__.load({
               var issues = r.issues || [];
               var cells = [
                 h('td', { style: S.td }, r.pkg),
-                // 三态：已优化 / 待应用（有文案未落盘）/ 待优化（压根没有文案）
+                // 三态：已优化 / 待应用（有文案未落盘）/ 待生成文案（压根没有文案）。
+                // 技能侧此前误用 needsText 判「描述为空」—— 它在技能侧的语义是「没有文案条目」，
+                // 于是每个技能都会被标成描述为空。技能侧另附描述语言，随 DSH 提供的只读。
                 h('td', { style: S.td },
-                  (IS_SKILL
-                    ? (r.needsText ? '描述为空' : r.descriptionLang)
-                    : (r.localized ? '已优化' : (r.needsText ? '待优化' : '待应用'))) + (function () {
+                  (r.bundled === true
+                    ? '随 DSH 提供'
+                    : (r.localized ? '已优化' : (r.needsText ? '待生成文案' : '待应用')) +
+                      (IS_SKILL ? ' · ' + (r.descriptionLang || '未知') : '')) + (function () {
                     var fs2 = r.findings || [];
                     var facts = fs2.filter(function (f) { return f.confidence === 'fact'; });
                     if (facts.length === 0) return '';
@@ -513,7 +548,7 @@ window.__ModuleLoader__.load({
         table,
         detail,
         h('div', { style: S.note }, IS_SKILL
-          ? '技能改写会真实写入 SKILL.md：name 保留原文、中文名以（）附加，description 替换为「触发词 → 精炼说明」；改写前留 .dsh-skill.backup 备份，「还原翻译」逐字节恢复原文件。注意 description 是模型选择技能的依据，改它属于行为变更而非展示变更，请自行确认生成内容。' + (hostRev ? '  宿主半体 v' + hostRev : '')
+          ? '技能改写会真实写入 SKILL.md：name 保留原文、中文名以（）附加，description 替换为「触发词 → 精炼说明」；改写前留 .dsh-skill.backup 备份，「还原翻译」逐字节恢复原文件。注意 description 是模型选择技能的依据，改它属于行为变更而非展示变更，请自行确认生成内容。「随 DSH 提供」的技能在 app.asar 内、没有可写路径，只入表不参与优化。' + (hostRev ? '  宿主半体 v' + hostRev : '')
           : '翻译优化会调用模型为缺失文案的插件生成中文（消耗 token），结果存入覆盖层，重装不丢；更新经第一方插件管理器执行，会真实运行 pnpm 并可能触发重载。' + (hostRev ? '  宿主半体 v' + hostRev : '')));
     }
 

@@ -269,7 +269,7 @@ const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clie
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
 check('宿主：批量更新串行 for + await，且无 Promise.all', /for \(let i = 0; i < items\.length; i \+= 1\)/.test(idxSrcA5) && /await installAndWait/.test(idxSrcA5) && !/Promise\.all/.test(idxSrcA5))
-check('汇总行由 rows 派生（与表格同源）', clientSrc.includes('function summarize(rows)') && clientSrc.includes('var s = rows ? summarize(rows) : null'))
+check('汇总行由 rows 派生（与表格同源）', clientSrc.includes('function summarize(rows, isSkill)') && clientSrc.includes('summarize(rows, IS_SKILL)'))
 check('客户端：含宿主半体过旧提示', clientSrc.includes('宿主半体版本过旧'))
 check('客户端：显示宿主版本', clientSrc.includes('宿主半体 v'))
 check('宿主：每个 bridge 响应带 rev', /\{ rev: OWN_REV \}/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
@@ -423,7 +423,7 @@ check('客户端：翻译优化会跳过已优化（只对未 localized 的包�
 check('客户端：全部已优化时直接返回不做事', clientSrc.includes('均已优化，无需处理'))
 check('客户端：表格已去掉「启用」列', !clientSrc.includes("'启用'"))
 check('客户端：精炼措辞已改为优化', !clientSrc.includes('已精炼') && !clientSrc.includes('待精炼') && clientSrc.includes("'已优化'"))
-check('客户端：三态标签齐全（已优化/待应用/待优化）', clientSrc.includes("'已优化'") && clientSrc.includes("'待应用'") && clientSrc.includes("'待优化'"))
+check('客户端：三态标签齐全（已优化/待应用/待生成文案）', clientSrc.includes("'已优化'") && clientSrc.includes("'待应用'") && clientSrc.includes("'待生成文案'"))
 
 // ─────────────────────── A10 审查规则引擎 ───────────────────────
 console.log(String.fromCharCode(10) + 'A10 审查规则')
@@ -574,7 +574,22 @@ fs.rmSync(skillRoot, { recursive: true, force: true })
 check('客户端：插件与技能合并为一页（只注册一个 settings.section）', (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 && clientSrc.includes("'插件与技能审查'"))
 check('客户端：合并页用页内切换区分 插件/技能', clientSrc.includes('function Merged') && clientSrc.includes("tab('plugin'") && clientSrc.includes("tab('skill'") && clientSrc.includes('h(Panel, { key: mode, target: mode })'))
 check('客户端：技能视图如实声明会写入 SKILL.md（含备份与还原）', clientSrc.includes('技能改写会真实写入 SKILL.md') && clientSrc.includes('.dsh-skill.backup') && clientSrc.includes('行为变更'))
-check('客户端：技能页列头为 技能/描述/版本/来源', clientSrc.includes("'描述'") && clientSrc.includes("'来源'"))
+check('客户端：技能视图把 优化状态 与 描述语言 分栏如实呈现',
+  (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 &&
+  clientSrc.includes("'优化 · 描述'") && clientSrc.includes("'随 DSH 提供'") &&
+  clientSrc.includes('r.descriptionLang') && clientSrc.includes('r.bundled !== true'))
+check('客户端：技能侧不再把 needsText 当成「描述为空」', !clientSrc.includes("'描述为空'"))
+check('客户端：技能视图与插件视图的状态互不串门',
+  clientSrc.includes('if (IS_SKILL) return;') && clientSrc.includes('!IS_SKILL && batch &&') &&
+  clientSrc.includes("!IS_SKILL ? h('span', null, '可更新 '"))
+check('客户端：加载中的占位文案按视图区分',
+  clientSrc.includes("'正在读取技能状态…'") && clientSrc.includes("'正在读取插件状态…'"))
+check('客户端：版本不一致时同时报出两个版本与各自修法',
+  clientSrc.includes('var CLIENT_REV = ') && clientSrc.includes('compareRev(hostRev, CLIENT_REV)') &&
+  clientSrc.includes('请重启 DSH。') && clientSrc.includes('请刷新页面。'))
+const clientRevLit = (clientSrc.match(/var CLIENT_REV = '([0-9]+\.[0-9]+\.[0-9]+)'/) || [])[1]
+const pkgVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).version
+check('客户端半体版本字面量与 package.json 一致（防漂移）', clientRevLit === pkgVersion, clientRevLit + ' vs ' + pkgVersion)
 
 // ─────────────────────── A12 技能改写（直接动 SKILL.md，必须最严格） ───────────────────────
 console.log(String.fromCharCode(10) + 'A12 技能改写与还原')
