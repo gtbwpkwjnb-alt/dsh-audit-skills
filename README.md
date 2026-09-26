@@ -26,6 +26,11 @@ github:gtbwpkwjnb-alt/dsh-audit-skills
 
 > v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。
 >
+> **v1.3.1 —— 修复 locale 导出键 / 新装插件 / 设置页口径。**
+>
+> DSH 要求 exports 用 **`./locale/*.json`**（`./locale/*` 无效）；本插件会自动迁移旧键。
+> 状态表改为**动态发现已装 bundle**，新装插件自动现身并标「待补文案」。
+>
 > **v1.3.0 —— UI 半体以正确格式回归。** 关键：DSH 客户端必须是**无顶层 import 的传统脚本**
 > （`window.__ModuleLoader__.load({ id, factory: (require) => ... })`），不是裸 ESM，也**不需要打包器**。
 >

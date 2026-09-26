@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "naming_convention": "title 必须保留原包名（英文代码名）以便识别；中文名以全角括号附加在包名之后。description 按语言直接替换为精炼文案。",
   "mechanism": "DSH readPluginMeta() 读 <pkg>/locale/en.json（英语资源，定义同目录语言文件集合）的 meta.title/meta.description；缺失才回落 package.json.name/description。路径经包 specifier 解析，故 exports 必须导出 ./locale/*。",
   "source_ref": "dsh-app-boot lib/index.js:1968",
@@ -79,6 +79,17 @@
       "zh": {
         "title": "dsh-whale-widget（余额小鲸鱼）",
         "description": "右下角挂件：显示 DeepSeek 余额、今日用量与峰谷定价，可自定义气泡、角色与音效。纯前端展示，不参与对话。"
+      }
+    },
+    {
+      "pkg": "dsh-find-plugins",
+      "en": {
+        "title": "dsh-find-plugins",
+        "description": "Searches the whole DSH plugin ecosystem for a capability: aggregates community catalogs plus live GitHub and npm search, ranked by relevance x trust x freshness. Discovery only - it does not install."
+      },
+      "zh": {
+        "title": "dsh-find-plugins（插件检索）",
+        "description": "在全 DSH 插件生态里按能力检索：聚合多个社区目录 + GitHub/npm 实时搜索，按相关度×可信度×新鲜度排序。只做发现，不负责安装。"
       }
     }
   ]

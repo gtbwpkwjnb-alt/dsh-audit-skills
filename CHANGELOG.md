@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.3.1 — 2026-09-26 · 三个实机问题修复
+
+用户实测反馈：① 本插件自己的卡片是英文 ② 新装的插件没被翻译 ③ 设置页列了未安装插件，与插件页不统一。
+
+### ① locale 导出键写错（根因）
+
+DSH 解析 `<pkg>/locale/en.json` 时**要求 exports 用 `./locale/*.json` 形式**；
+`./locale/*` 虽然 Node 能解析，**DSH 读不到**。
+
+实机对比（100% 相关）：
+
+| 包 | locale 导出键 | 插件页 |
+|---|---|---|
+| dsh-better-sidebar / dsh-context | `./locale/*.json` | ✅ 中文 |
+| dsh-whale-widget | 无 exports（纯路径） | ✅ 中文 |
+| dsh-free-search / @furongjun1999/dsh-memory | `./locale/*` ← 本插件旧版所加 | ❌ 未生效 |
+| dsh-audit-skills（自身） | 无 locale 导出 | ❌ 英文 |
+
+修复：
+- 新写入一律用 `./locale/*.json`
+- **自动迁移**：已存在 `./locale/*` 的包会被改写为 `./locale/*.json`（删旧键、加新键，写前备份）
+- **本插件自身**也补上 `./locale/*.json`——之前只顾着给别的插件补，忘了自己
+
+### ② 新装插件无法翻译
+
+旧版 catalog 是**静态 7 条**，用户新装的 `dsh-find-plugins` 不在其中，点"应用翻译精炼"也无效。
+
+修复：`collectStatus` 改为**动态发现已装 bundle**（读 profile 的 dependencies，
+按 `dsh.bundle.patch` 判定，与插件页同口径），新装插件立刻出现在表里并标为
+**待补文案**；`applyLocale` 也会对这类包返回 `needs-catalog` 而不是静默跳过。
+同时补入 `dsh-find-plugins` 的精炼文案。
+
+### ③ 设置页与插件页不统一
+
+旧版 `collectStatus` 遍历 catalog，把已卸载的 `dsh-web-fetch-playwright`、
+`@linxin666/dsh-remote-web-ui` 也列成"未安装"。
+
+修复：只列**已安装**项。表头改为 插件 / 启用 / 精炼 / 插件页当前标题。
+
+### 验证（对已安装产物）
+
+```
+status  rows=7  未安装=0  待补文案=0
+  on | 已精炼 | @furongjun1999/dsh-memory
+  on | 已精炼 | dsh-audit-skills
+  on | 已精炼 | dsh-better-sidebar
+  on | 已精炼 | dsh-context
+  on | 已精炼 | dsh-find-plugins
+  on | 已精炼 | dsh-free-search
+  on | 已精炼 | dsh-whale-widget
+
+locale/en.json 解析：7/7 OK
+客户端闸门：ALL PASS
+```
+
 ## 1.3.0 — 2026-09-26 · 客户端半体以**正确格式**回归 + 发布闸门
 
 ### 根因彻底解决

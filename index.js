@@ -37,8 +37,10 @@ export const Config = z.object({
 const PACKAGE_ROOT = fileURLToPath(new URL('./', import.meta.url))
 const CATALOG_FILE = path.join(PACKAGE_ROOT, 'references', 'dsh-plugin-locale-catalog.json')
 const BACKUP_SUFFIXES = ['.dsh-locale.backup', '.dsh-locale.bak']
-const LOCALE_EXPORT_KEY = './locale/*'
-const LOCALE_EXPORT_VALUE = './locale/*'
+const LOCALE_EXPORT_KEY = './locale/*.json'
+const LOCALE_EXPORT_VALUE = './locale/*.json'
+// 遗留写法：DSH 解析器要求 './locale/*.json'，'./locale/*' 不生效，需迁移
+const LEGACY_LOCALE_EXPORT_KEY = './locale/*'
 const BRIDGE_PREFIX = '/api/dsh-audit-skills'
 
 /** 读取精炼目录；任何失败都返回空目录而不是抛错。 */
@@ -109,18 +111,48 @@ export function inspectPackage(profileDir, entry) {
   return { pkg: entry.pkg, installed, enabled, localized, title }
 }
 
-/** 汇总：只读，不写任何文件。 */
+/** 判断某个已装依赖是否为 DSH bundle（与插件页同判据）。 */
+export function readBundleInfo(profileDir, pkg) {
+  try {
+    const dir = path.join(profileDir, 'node_modules', ...pkg.split('/'))
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+    if (!manifest.dsh || !manifest.dsh.bundle || !manifest.dsh.bundle.patch) return undefined
+    return { dir, name: manifest.name, description: String(manifest.description ?? '') }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 汇总：只读。
+ * 动态发现**已安装的 bundle**（与插件页口径一致），而不是只列 catalog 条目——
+ * 这样用户新装插件后会立刻出现在表里并标为待补文案，也能避免把已卸载的插件列成“未安装”。
+ */
 export function collectStatus(profileDirs) {
   const entries = readCatalog()
+  const byPkg = new Map(entries.map((e) => [e.pkg, e]))
   const dirs = Array.isArray(profileDirs) ? profileDirs : [profileDirs]
   const out = []
   for (const profileDir of dirs) {
-    for (const entry of entries) {
-      try {
-        out.push(Object.assign({ profileDir }, inspectPackage(profileDir, entry)))
-      } catch {
-        /* 单条失败不影响整表 */
-      }
+    const manifest = readProfileManifest(profileDir)
+    if (!manifest) continue
+    for (const pkg of manifest.dependencies) {
+      const info = readBundleInfo(profileDir, pkg)
+      if (info === undefined) continue
+      const entry = byPkg.get(pkg)
+      const st = inspectPackage(profileDir, { pkg })
+      out.push({
+        profileDir,
+        pkg,
+        installed: true,
+        enabled: manifest.bundles.includes(pkg),
+        inCatalog: entry !== undefined,
+        // 没有 catalog 文案、自身也没有 locale 文件 → 需要补文案
+        needsText: entry === undefined && !st.localized,
+        localized: st.localized,
+        title: st.title,
+        description: info.description,
+      })
     }
   }
   return out
@@ -143,14 +175,18 @@ export function applyLocale(profileDirs, options = {}) {
         const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
         let exportNote = 'no-exports-map'
         const hasExports = pkg.exports !== undefined && typeof pkg.exports === 'object' && pkg.exports !== null && !Array.isArray(pkg.exports)
-        const hasLocaleExport = hasExports && Object.keys(pkg.exports).some((k) => k.startsWith('./locale'))
-        if (hasExports && !hasLocaleExport) {
-          backupOnce(pkgFile)
-          pkg.exports[LOCALE_EXPORT_KEY] = LOCALE_EXPORT_VALUE
-          fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n')
-          exportNote = 'added-locale-export'
-        } else if (hasExports) {
-          exportNote = 'already-exported'
+        if (hasExports) {
+          const hasModern = Object.hasOwn(pkg.exports, LOCALE_EXPORT_KEY)
+          const hasLegacy = Object.hasOwn(pkg.exports, LEGACY_LOCALE_EXPORT_KEY)
+          if (!hasModern || hasLegacy) {
+            backupOnce(pkgFile)
+            if (hasLegacy) delete pkg.exports[LEGACY_LOCALE_EXPORT_KEY]
+            pkg.exports[LOCALE_EXPORT_KEY] = LOCALE_EXPORT_VALUE
+            fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n')
+            exportNote = hasLegacy ? 'migrated-legacy-locale-export' : 'added-locale-export'
+          } else {
+            exportNote = 'already-exported'
+          }
         }
         writeJson(path.join(dir, 'locale', 'en.json'), { meta: entry.en })
         writeJson(path.join(dir, 'locale', 'zh.json'), { meta: entry.zh })
@@ -158,6 +194,15 @@ export function applyLocale(profileDirs, options = {}) {
       } catch (error) {
         results.push({ pkg: entry.pkg, state: 'failed', message: String(error?.message ?? error) })
       }
+    }
+    // 已装但没有文案的 bundle：明确报出来，而不是静默跳过
+    const known = new Set(entries.map((e) => e.pkg))
+    const manifest = readProfileManifest(profileDir)
+    for (const pkg of manifest ? manifest.dependencies : []) {
+      if (known.has(pkg)) continue
+      if (readBundleInfo(profileDir, pkg) === undefined) continue
+      if (inspectPackage(profileDir, { pkg }).localized) continue
+      results.push({ pkg, state: 'needs-catalog', message: '已安装但缺少精炼文案' })
     }
   }
   return results

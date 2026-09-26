@@ -108,18 +108,20 @@ window.__ModuleLoader__.load({
         : h('table', { style: S.table },
             h('thead', null, h('tr', null,
               h('th', { style: S.th }, '插件'),
-              h('th', { style: S.th }, '状态'),
+              h('th', { style: S.th }, '启用'),
+              h('th', { style: S.th }, '精炼'),
               h('th', { style: S.th }, '插件页当前标题'))),
             h('tbody', null, rows.map(function (r) {
               return h('tr', { key: r.profileDir + '|' + r.pkg, style: r.installed ? undefined : S.dim },
                 h('td', { style: S.td }, r.pkg),
-                h('td', { style: S.td }, !r.installed ? '未安装' : (r.localized ? '已精炼' : '待精炼')),
+                h('td', { style: S.td }, r.enabled ? '开' : '关'),
+                h('td', { style: S.td }, r.needsText ? '待补文案' : (r.localized ? '已精炼' : '待精炼')),
                 h('td', { style: S.td }, r.title || '—'));
             })));
 
       return h('div', { style: S.box },
         head,
-        h('div', { style: S.note }, '命名约定：标题保留原包名，中文名以（）附加，避免认不出原插件。'),
+        h('div', { style: S.note }, '命名约定：标题保留原包名，中文名以（）附加。本表只列已安装插件，与插件页口径一致。'),
         note ? h('div', { style: S.note }, note) : null,
         body,
         h('div', { style: S.note }, '更新检查 / 推荐 / 崩溃守护 已委托生态既有插件，本插件不重复实现。'));
