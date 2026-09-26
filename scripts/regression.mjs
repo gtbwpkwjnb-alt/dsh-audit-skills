@@ -265,6 +265,21 @@ check('已删除单独的「自动生成」按钮（并入翻译优化）', !cli
 const optimizeHasBoth = optimizeBody.includes("call('generate'") && optimizeBody.includes("call('apply'") && optimizeBody.includes('stepGen')
 check('翻译优化内置生成流程（同函数内含递归生成 + 应用）', optimizeHasBoth)
 check('存在一键更新（串行遍历可更新项）', clientSrc.includes('updateAll') && clientSrc.includes("'一键更新（'"))
+// A6b：功能性按钮的统一规则（用户要求：不可用要「暗下去、无法点击」；两页同一套逻辑）
+check('按钮：不可用即暗下去（两页共用一个 opBtn）',
+  clientSrc.includes('function opBtn(') && clientSrc.includes("off: { opacity: 0.45, cursor: 'default' }") &&
+  clientSrc.includes('onClick: off ? undefined : onClick') && clientSrc.includes('disabled: !!off'))
+check('按钮：翻译优化 / 还原翻译 无待办时禁用（插件页与技能页同一判定）',
+  clientSrc.includes('var noOptimize = noRows || s.toApply === 0') &&
+  clientSrc.includes('var noRevert = noRows || s.refined === 0') &&
+  clientSrc.includes("opBtn('opt'") && clientSrc.includes("opBtn('rev'"))
+check('按钮：一键更新在无待更新或本轮已完成时禁用',
+  clientSrc.includes('var noUpdate = noRows || updatable === 0 || batchSettled') && clientSrc.includes("opBtn('all'"))
+check('按钮：更新完成后按结果暗下去（不是消失），刷新才重新判定',
+  clientSrc.includes('var OUTCOME =') && clientSrc.includes('function outcomeLabel(') &&
+  clientSrc.includes("n[pkg] = { state: res.ok ? 'ok' : 'fail'") && clientSrc.includes('absorbBatch(b)') &&
+  clientSrc.includes('setDone({})') && clientSrc.includes('setBatchSettled(false)'))
+check('按钮：行内不再有「可点但点了没用」的更新按钮', !clientSrc.includes("op.push(h('button', { key: 'u'"))
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')

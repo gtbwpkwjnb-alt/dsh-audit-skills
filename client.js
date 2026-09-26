@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.6.1';
+    var CLIENT_REV = '2.6.2';
 
     /** 比较点分版本号；非数字段按 0 算。 */
     function compareRev(a, b) {
@@ -101,6 +101,7 @@ window.__ModuleLoader__.load({
       td: { padding: '4px 6px', borderBottom: '1px solid rgba(128,128,128,0.2)' },
       dim: { opacity: 0.45 },
       mini: { fontSize: '11px', padding: '2px 8px' },
+      off: { opacity: 0.45, cursor: 'default' },
       card: { border: '1px solid rgba(128,128,128,0.3)', borderRadius: '6px', padding: '8px 10px', fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '4px' },
       tabs: { display: 'flex', gap: '2px', borderBottom: '1px solid rgba(128,128,128,0.25)' },
       tab: { fontSize: '12px', padding: '4px 12px', border: 'none', borderBottom: '2px solid transparent', background: 'none', color: 'inherit', opacity: 0.6, cursor: 'pointer' },
@@ -121,6 +122,39 @@ window.__ModuleLoader__.load({
     }
 
     var SEV = { high: '高', medium: '中', low: '低' };
+
+    /* ── 功能性按钮的统一规则（插件页与技能页共用同一套，两页只有「对象」不同） ──
+     * 「不可用」一律表现为**暗下去**（disabled + 降透明度），不允许出现「看起来能点、点了没事发生」。
+     * 判定只有两种：① 有操作在跑；② 此刻无待办（更新：无可更新；优化：无待优化；还原：无已优化条目）。 */
+    var OUTCOME = { ok: '已更新', updated: '已更新', unchanged: '未变化', fail: '更新失败', failed: '更新失败', done: '已完成' };
+
+    function outcomeLabel(entry) {
+      var k = entry && entry.state;
+      return OUTCOME[k] || '已完成';
+    }
+
+    /**
+     * 统一按钮：off 为真即暗下去且不可点击（onClick 直接摘掉，避免只靠 disabled 属性）。
+     * @param key - React key
+     * @param label - 按钮文字
+     * @param off - 是否暗下去
+     * @param onClick - 可用时的动作
+     * @param title - 悬停说明（暗下去时用来说明为什么不可用）
+     * @param mini - 行内小按钮（S.mini）
+     */
+    function opBtn(key, label, off, onClick, title, mini) {
+      var style = mini === true
+        ? (off ? Object.assign({}, S.mini, S.off) : S.mini)
+        : (off ? S.off : undefined);
+      return h('button', {
+        key: key,
+        type: 'button',
+        disabled: !!off,
+        title: title === undefined || title === null ? undefined : title,
+        style: style,
+        onClick: off ? undefined : onClick,
+      }, label);
+    }
 
     function FindingCard(props) {
       var all = props.findings || [];
@@ -174,6 +208,11 @@ window.__ModuleLoader__.load({
       var batchState = useState(null); var batch = batchState[0]; var setBatch = batchState[1];
       var auditState = useState(null); var audit = auditState[0]; var setAudit = auditState[1];
       var onlyState = useState(false); var onlyFlagged = onlyState[0]; var setOnlyFlagged = onlyState[1];
+      /* 本次会话内已处理完的动作：把按钮**按结果暗下去**，而不是让它消失。
+         消失会让人以为功能没了，也让「未变化 / 失败」这种仍然显示可更新的行看不出已经处理过。
+         「刷新状态」= 重新判定，会清空这些标记，于是可以重试。 */
+      var doneState = useState({}); var done = doneState[0]; var setDone = doneState[1];
+      var settledState = useState(false); var batchSettled = settledState[0]; var setBatchSettled = settledState[1];
 
       var absorb = useCallback(function (r) {
         if (r && typeof r.rev === 'string' && r.rev !== '') setHostRev(r.rev);
@@ -204,6 +243,18 @@ window.__ModuleLoader__.load({
         })
       }, [absorb]);
 
+      /** 把宿主侧批量记录里的每一项结果记成「本轮已处理」，用于把对应行的按钮暗下去。 */
+      var absorbBatch = function (b) {
+        if (!b || !Array.isArray(b.items)) return;
+        setDone(function (prev) {
+          var n = Object.assign({}, prev);
+          for (var i = 0; i < b.items.length; i += 1) {
+            n[b.items[i].pkg] = { state: b.items[i].state, message: b.items[i].message };
+          }
+          return n;
+        });
+      };
+
       // 挂载时恢复：上次批量若还在跑就继续显示，刚结束就把结果如实报出来。
       // 技能视图直接跳过 —— 批量更新是插件专属动作，两页不共用这份状态。
       useEffect(function () {
@@ -214,8 +265,11 @@ window.__ModuleLoader__.load({
           setBatch(b)
           if (b.running === true) {
             setBusy('update:all')
-            pollBatch().then(function () { setBusy(''); snapshot({ force: true }); });
+            pollBatch().then(function (bb) { setBusy(''); setBatchSettled(true); absorbBatch(bb); snapshot({ force: true }); });
           } else if (typeof b.finishedAt === 'number' && Date.now() - b.finishedAt < 10 * 60 * 1000) {
+            // 上一轮批量已完成：按结果把按钮暗下去，直到用户「刷新状态」重新判定
+            setBatchSettled(true);
+            absorbBatch(b);
             setNote({ kind: /失败 [1-9]|未变化 [1-9]/.test(String(b.message)) ? 'note' : 'ok', text: '上次批量更新：' + String(b.message) });
           }
         });
@@ -223,6 +277,9 @@ window.__ModuleLoader__.load({
 
       var refresh = useCallback(function () {
         setBusy('refresh');
+        // 刷新 = 重新判定：清掉「本轮已完成」标记，让按钮按新数据重新决定可用性
+        setDone({});
+        setBatchSettled(false);
         setNote({ kind: 'note', text: '正在刷新（状态 + 版本 + 更新检查）…' });
         return snapshot({ force: true }).then(function (v) {
           setBusy('');
@@ -382,6 +439,11 @@ window.__ModuleLoader__.load({
         setNote({ kind: 'note', text: '正在更新 ' + pkg + ' …' });
         return updateOne(pkg).then(function (res) {
           setBusy('');
+          setDone(function (prev) {
+            var n = Object.assign({}, prev);
+            n[pkg] = { state: res.ok ? 'ok' : 'fail', message: res.message };
+            return n;
+          });
           return snapshot({ force: true }).then(function () {
             if (res.ok) setNote({ kind: 'ok', text: pkg + ' 更新完成，状态已刷新。' });
             else setNote({ kind: 'err', text: pkg + ' 更新失败：' + res.message + ' → ' + fixOf(res.code) });
@@ -402,6 +464,10 @@ window.__ModuleLoader__.load({
           }
           return pollBatch().then(function (b) {
             setBusy('');
+            setBatchSettled(true);
+            // 宿主逐个给出结果：按结果把每一行的按钮暗下去。未变化/失败的行虽然仍可更新，
+            // 但这一轮已经处理过，不再允许重复点击 —— 要重试先「刷新状态」重新判定。
+            absorbBatch(b);
             return snapshot({ force: true }).then(function () {
               if (!b) { setNote({ kind: 'err', text: '批量更新状态丢失，请刷新状态查看结果。' }); return; }
               setNote({ kind: /失败 [1-9]/.test(String(b.message)) ? 'err' : (/未变化 [1-9]/.test(String(b.message)) ? 'note' : 'ok'), text: '批量更新' + String(b.message) });
@@ -422,13 +488,27 @@ window.__ModuleLoader__.load({
 
       var s = rows ? summarize(rows, IS_SKILL) : null;
 
+      /* 两个页面共用同一套按钮规则：无待办即暗下去，且悬停说明原因。 */
+      var busyNow = busy !== '';
+      var noRows = s === null;
+      var noOptimize = noRows || s.toApply === 0;          // 全部条目都已优化 → 无待办
+      var noRevert = noRows || s.refined === 0;            // 没有处于已优化状态的条目 → 无待办
+      var updatable = noRows ? 0 : s.upd;
+      var noUpdate = noRows || updatable === 0 || batchSettled;
+
       var head = h('div', { style: S.bar },
-        h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
-        h('button', { type: 'button', disabled: !!busy, onClick: revert }, busy === 'revert' ? '还原中…' : '还原翻译'),
-        h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态'),
-        (!IS_SKILL && s && s.upd > 0)
-          ? h('button', { type: 'button', disabled: !!busy, onClick: function () { updateAll(rows); } },
-              busy === 'update:all' ? '批量更新中…' : '一键更新（' + s.upd + '）')
+        opBtn('opt', busy === 'optimize' ? '优化中…' : '翻译优化', busyNow || noOptimize, optimize,
+          noOptimize ? (noRows ? '状态尚未读取完成' : '全部条目均已优化，无待办') : '生成缺失文案并应用全部改写'),
+        opBtn('rev', busy === 'revert' ? '还原中…' : '还原翻译', busyNow || noRevert, revert,
+          noRevert ? (noRows ? '状态尚未读取完成' : '当前没有处于「已优化」状态的条目，无需还原') : '撤销全部已应用的改写'),
+        opBtn('ref', busy === 'refresh' ? '刷新中…' : '刷新状态', busyNow, refresh,
+          '重新取一次完整快照（状态 + 版本 + 更新检查）'),
+        !IS_SKILL
+          ? opBtn('all', busy === 'update:all' ? '批量更新中…' : '一键更新（' + updatable + '）', busyNow || noUpdate,
+              function () { updateAll(rows); },
+              noRows ? '状态尚未读取完成'
+                : (updatable === 0 ? '当前没有可更新的插件'
+                  : (batchSettled ? '本轮批量更新已完成；点「刷新状态」可重新判定' : '按顺序更新全部可更新插件')))
           : null);
 
       var revGap = hostRev !== '' && hostRev !== CLIENT_REV;
@@ -522,8 +602,12 @@ window.__ModuleLoader__.load({
                   : (r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'))),
               ];
               var op = [];
-              if (job && !job.done) op.push(h('span', { key: 'j', style: S.note }, job.stage + '…'));
-              else if (upd) op.push(h('button', { key: 'u', type: 'button', style: S.mini, disabled: !!busy, onClick: function () { doUpdate(r.pkg); } }, '更新'));
+              var finished = done[r.pkg];
+              if (job && !job.done) op.push(h('span', { key: 'j', style: S.off }, job.stage + '…'));
+              // 本会话已处理过这一行：按结果暗下去（未变化/失败也不允许重复点击，重试先「刷新状态」）
+              else if (finished) op.push(opBtn('u', outcomeLabel(finished), true, null,
+                (finished.message ? finished.message + ' · ' : '') + '本轮已处理；点「刷新状态」可重新判定'));
+              else if (upd) op.push(opBtn('u', '更新', false, function () { doUpdate(r.pkg); }, '更新到 ' + (r.latest || '最新版'), true));
               if (issues.length || (r.findings || []).length) op.push(h('button', { key: 'i', type: 'button', style: S.mini, onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); } }, '⚠ 详情'));
               cells.push(h('td', { style: S.td }, op.length ? op : null));
               return h('tr', { key: r.profileDir + '|' + r.pkg, style: r.installed === false ? S.dim : undefined }, cells);
