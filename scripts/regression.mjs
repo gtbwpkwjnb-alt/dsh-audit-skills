@@ -191,7 +191,7 @@ check('未知 token 优雅报错', m.updateJobStatus('nope').ok === false)
 // 失败路径
 const failPM = { listBundles: () => [], installBundle: () => Promise.reject(new Error('boom')) }
 const started2 = m.startUpdate({ get: () => failPM }, sandbox, 'pkg-with-exports')
-await new Promise((r) => setTimeout(r, 80))
+await new Promise((r) => setTimeout(r, 700))
 const jr2 = m.updateJobStatus(started2.token)
 check('安装失败时 stage=failed 且带原因', jr2.ok && jr2.job.done === true && jr2.job.ok === false && jr2.job.message === 'boom', JSON.stringify(jr2))
 // 问题诊断
@@ -256,7 +256,7 @@ check('单一数据源：snapshot 只调 /updates', snapshotBody.includes("call(
 check('客户端不再直接使用 /status', !clientSrc.includes("call('status'") && !clientSrc.includes('loadStatus'))
 // 用户报告的 bug：点「翻译优化」后页面内容错乱（把 /apply 返回值当行）
 check('apply/revert 后不得把返回值当表格行', !/call\('(apply|revert)'\)[\s\S]{0,600}?setRows\(/.test(clientSrc))
-check('apply/revert 后必须重新取快照', /call\('apply'\)[\s\S]{0,600}?snapshot\(/.test(clientSrc) && /call\('revert'\)[\s\S]{0,600}?snapshot\(/.test(clientSrc))
+check('apply/revert 后必须重新取快照', /call\('apply'[\s\S]{0,600}?snapshot\(/.test(clientSrc) && /call\('revert'\)[\s\S]{0,600}?snapshot\(/.test(clientSrc))
 check('更新完成后必须重新取快照（否则最新列被清空）', /updateOne\(pkg\)[\s\S]{0,400}?snapshot\(\{ force: true \}\)/.test(clientSrc))
 // 按钮集（用户定的名字与职责）
 check('按钮：翻译优化 / 还原翻译 / 刷新状态', clientSrc.includes("'翻译优化'") && clientSrc.includes("'还原翻译'") && clientSrc.includes("'刷新状态'"))
@@ -268,7 +268,7 @@ check('存在一键更新（串行遍历可更新项）', clientSrc.includes('up
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
-check('宿主：批量更新串行 for + await，且无 Promise.all', /for \(let i = 0; i < items\.length; i \+= 1\)/.test(idxSrcA5) && /await runOneUpdate/.test(idxSrcA5) && !/Promise\.all/.test(idxSrcA5))
+check('宿主：批量更新串行 for + await，且无 Promise.all', /for \(let i = 0; i < items\.length; i \+= 1\)/.test(idxSrcA5) && /await installAndWait/.test(idxSrcA5) && !/Promise\.all/.test(idxSrcA5))
 check('汇总行由 rows 派生（与表格同源）', clientSrc.includes('function summarize(rows)') && clientSrc.includes('var s = rows ? summarize(rows) : null'))
 check('客户端：含宿主半体过旧提示', clientSrc.includes('宿主半体版本过旧'))
 check('客户端：显示宿主版本', clientSrc.includes('宿主半体 v'))
@@ -329,7 +329,7 @@ const batchFile = path.join(sandbox, 'dsh-audit-skills', 'update-batch.json')
 const noMgrCtx = { get: () => undefined }
 const startedBatch = m.startUpdateAll(noMgrCtx, sandbox, ['pkg-with-exports', 'never-heard-of'])
 check('批量更新启动返回 batch 与总数', startedBatch.ok === true && startedBatch.batch.total === 2)
-await new Promise((r) => setTimeout(r, 250))
+await new Promise((r) => setTimeout(r, 1500))
 const stB1 = m.updateAllStatus()
 check('批量状态落盘且已完成', !!stB1 && stB1.running === false && typeof stB1.finishedAt === 'number', JSON.stringify(stB1 && stB1.message))
 check('状态文件确实写在磁盘（宿主模块被重载也不丢）', fs.existsSync(batchFile))
@@ -342,14 +342,14 @@ check('超过 10 分钟无进展的 running 视为中断（不卡死后续批量
 const targetPkgJson = path.join(nm, 'pkg-with-exports', 'package.json')
 const bumpPM = { listBundles: () => [], installBundle: async () => { const j = JSON.parse(fs.readFileSync(targetPkgJson, 'utf8')); j.version = '9.9.9'; fs.writeFileSync(targetPkgJson, JSON.stringify(j, null, 2)); return {} } }
 m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? bumpPM : undefined) }, sandbox, ['pkg-with-exports'])
-await new Promise((r) => setTimeout(r, 250))
+await new Promise((r) => setTimeout(r, 1500))
 const itemB = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
 check('成功路径记录 from→to 并标为 updated', !!itemB && itemB.state === 'updated' && itemB.from !== itemB.to, JSON.stringify(itemB))
 const noopPM = { listBundles: () => [], installBundle: async () => ({}) }
 // 注意：A3 段已把沙箱依赖表重写为 {pkg-with-exports, pkg-git, pkg-local}，
 // 所以这里必须用仍在依赖里的包，否则会先被「不在依赖里」拦掉。
 m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? noopPM : undefined) }, sandbox, ['pkg-with-exports'])
-await new Promise((r) => setTimeout(r, 250))
+await new Promise((r) => setTimeout(r, 1500))
 const itemC = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
 check('安装执行了但版本未变 -> 如实标为 unchanged（不假装成功）', !!itemC && itemC.state === 'unchanged', JSON.stringify(itemC))
 check('结束语区分 成功/未变化/失败', /成功 \d+ 个，未变化 \d+ 个，失败 \d+ 个/.test(String(m.updateAllStatus().message)), String(m.updateAllStatus().message))
@@ -371,7 +371,7 @@ const rematerializePM = { listBundles: () => [], installBundle: async () => {
   const j = JSON.parse(fs.readFileSync(path.join(keepDir, 'package.json'), 'utf8')); j.version = '2.0.0'
   fs.writeFileSync(path.join(keepDir, 'package.json'), JSON.stringify(j, null, 2)); return {} } }
 m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? rematerializePM : undefined) }, sandbox, ['dsh-better-sidebar'])
-await new Promise((r) => setTimeout(r, 300))
+await new Promise((r) => setTimeout(r, 1500))
 const keepItem = (m.updateAllStatus().items || []).find((x) => x.pkg === 'dsh-better-sidebar')
 check('更新后：精炼被自动补回并标记 refined', !!keepItem && keepItem.refined === true, JSON.stringify(keepItem && { state: keepItem.state, refined: keepItem.refined }))
 check('更新后：locale 文件确实重新落盘（用户无需再点翻译优化）', fs.existsSync(path.join(keepDir, 'locale', 'zh.json')))
@@ -394,6 +394,36 @@ check('推断源附带仓库地址（让用户自己看 release notes）', delta
 check('新增依赖会被报为结构性变化', m.describeDeltaText({ source: 'structure', details: ['新增依赖 a、b'], repoUrl: null }).includes('新增依赖 a、b'))
 check('信息不可得时如实说明', m.describeDeltaText({ source: 'unavailable', reason: 'HTTP 404' }).includes('无法获取变更信息'))
 process.env.DSH_HOME = savedHome3
+
+// ─────────────────────── A9 更新不得被卡住 + 优化跳过已优化 ───────────────────────
+console.log(String.fromCharCode(10) + 'A9 有界等待 / 跳过已优化')
+const savedHome4 = process.env.DSH_HOME
+process.env.DSH_HOME = sandbox
+// A8 改过沙箱依赖，这里恢复出需要的包
+fs.writeFileSync(path.join(sandbox, 'package.json'), JSON.stringify({ name: 'p', dependencies: { 'pkg-with-exports': '^1.0.0' }, dsh: { profile: { bundles: ['pkg-with-exports'] } } }, null, 2))
+// 核心：永不 settle 的安装不能让流程挂住（实机表现就是「批量卡在 1/3」）
+const neverPM = { listBundles: () => [], installBundle: () => new Promise(() => {}) }
+const tHang = Date.now()
+const hangResult = await m.installAndWait({ get: (n) => (n === 'pluginManager' ? neverPM : undefined) }, sandbox, 'pkg-with-exports', 2500)
+const hangMs = Date.now() - tHang
+check('永不 settle 的安装不会挂住（有界超时）', hangResult.ok === false && hangResult.timedOut === true && hangMs < 9000, 'ms=' + hangMs + ' ' + JSON.stringify(hangResult))
+// 版本真的变了 -> 快速返回成功，不必等满超时
+const fastPM = { listBundles: () => [], installBundle: async () => { const f = path.join(nm, 'pkg-with-exports', 'package.json'); const j = JSON.parse(fs.readFileSync(f, 'utf8')); j.version = '7.7.7'; fs.writeFileSync(f, JSON.stringify(j, null, 2)); return {} } }
+const tFast = Date.now()
+const fastResult = await m.installAndWait({ get: (n) => (n === 'pluginManager' ? fastPM : undefined) }, sandbox, 'pkg-with-exports', 30000)
+check('版本确实变化时提前返回成功', fastResult.ok === true && fastResult.to === '7.7.7' && Date.now() - tFast < 8000, JSON.stringify({ ms: Date.now() - tFast, r: fastResult }))
+check('有界等待不再出现裸 await pm.installBundle', !/await pm\.installBundle/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
+// /apply 支持定向：只处理指定包
+const onlyA = m.applyLocale([sandbox], { entries: m.readCatalog().filter((e) => e.pkg === 'dsh-better-sidebar') })
+check('定向应用只返回被指定的包', onlyA.length === 1 && onlyA[0].pkg === 'dsh-better-sidebar', JSON.stringify(onlyA.map((x) => x.pkg)))
+check('定向应用对空列表什么都不做', m.applyLocale([sandbox], { entries: [] }).length === 0)
+process.env.DSH_HOME = savedHome4
+// 客户端契约：跳过已优化 + 去启用列 + 措辞
+check('客户端：翻译优化会跳过已优化（只对未 localized 的包调 apply）', clientSrc.includes('var toApply = cur.filter') && clientSrc.includes("call('apply', { pkgs: toApply.map"))
+check('客户端：全部已优化时直接返回不做事', clientSrc.includes('均已优化，无需处理'))
+check('客户端：表格已去掉「启用」列', !clientSrc.includes("'启用'"))
+check('客户端：精炼措辞已改为优化', !clientSrc.includes('已精炼') && !clientSrc.includes('待精炼') && clientSrc.includes("'已优化'"))
+check('客户端：三态标签齐全（已优化/待应用/待优化）', clientSrc.includes("'已优化'") && clientSrc.includes("'待应用'") && clientSrc.includes("'待优化'"))
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')

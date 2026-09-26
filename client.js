@@ -90,9 +90,10 @@ window.__ModuleLoader__.load({
       var total = rows.length;
       var refined = rows.filter(function (r) { return r.localized === true; }).length;
       var pending = rows.filter(function (r) { return r.needsText === true; }).length;
+      var toApply = rows.filter(function (r) { return r.localized !== true; }).length;
       var upd = rows.filter(function (r) { return r.hasUpdate === true; }).length;
       var unk = rows.filter(function (r) { return r.hasUpdate === null; }).length;
-      return { total: total, refined: refined, pending: pending, upd: upd, unk: unk };
+      return { total: total, refined: refined, pending: pending, toApply: toApply, upd: upd, unk: unk };
     }
 
     function IssueCard(props) {
@@ -172,7 +173,7 @@ window.__ModuleLoader__.load({
           if (v) {
             var s = summarize(v);
             setNote({ kind: s.upd || s.pending ? 'note' : 'ok',
-              text: '刷新完成：已装 ' + s.total + '，已精炼 ' + s.refined + '，待优化 ' + s.pending + '，可更新 ' + s.upd + (s.unk ? '，无法比对 ' + s.unk : '') });
+              text: '刷新完成：已装 ' + s.total + '，已优化 ' + s.refined + '，待应用 ' + s.toApply + '，待生成文案 ' + s.pending + '，可更新 ' + s.upd + (s.unk ? '，无法比对 ' + s.unk : '') });
           }
         });
       }, [snapshot]);
@@ -183,22 +184,31 @@ window.__ModuleLoader__.load({
         setNote({ kind: 'note', text: '正在读取状态…' });
         return snapshot().then(function (cur) {
           if (!cur) { setBusy(''); return; }
+          // 跳过已优化的：needsText = 压根没有文案（要生成）；未 localized = 有文案但未落盘（要应用）
           var pending = cur.filter(function (r) { return r.needsText === true; });
+          var toApply = cur.filter(function (r) { return r.localized !== true; });
+          var skipped = cur.length - toApply.length;
+          if (toApply.length === 0) {
+            setBusy('');
+            setNote({ kind: 'ok', text: '全部 ' + cur.length + ' 个插件均已优化，无需处理。' });
+            return;
+          }
           var genOk = 0;
           var genFail = [];
           var i = 0;
           var stepGen = function () {
             if (i >= pending.length) {
-              setNote({ kind: 'note', text: '文案就绪，正在应用精炼…' });
-              return call('apply').then(absorb).then(function (ap) {
+              setNote({ kind: 'note', text: '文案就绪，正在应用（' + toApply.length + ' 个，跳过已优化 ' + skipped + ' 个）…' });
+              // 只对这些包应用，已优化的一律不碰
+              return call('apply', { pkgs: toApply.map(function (r) { return r.pkg; }) }).then(absorb).then(function (ap) {
                 var applied = ap && Array.isArray(ap.value) ? ap.value.filter(function (x) { return x.state === 'applied'; }).length : 0;
                 return snapshot({ force: true }).then(function (v) {
                   setBusy('');
-                  if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用精炼失败：' + ((ap && ap.message) || '未知') }); return; }
+                  if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用失败：' + ((ap && ap.message) || '未知') }); return; }
                   var s = v ? summarize(v) : null;
                   setNote({ kind: genFail.length ? 'err' : 'ok',
-                    text: '翻译优化完成：本次应用 ' + applied + ' 项，新生成 ' + genOk + ' 条文案' +
-                      (s ? '；当前已装 ' + s.total + '，已精炼 ' + s.refined + '，待优化 ' + s.pending : '') +
+                    text: '翻译优化完成：新生成 ' + genOk + ' 条文案，应用 ' + applied + ' 项，跳过已优化 ' + skipped + ' 个' +
+                      (s ? '；当前已优化 ' + s.refined + '/' + s.total : '') +
                       (genFail.length ? '；生成失败 ' + genFail.length + ' 个：' + genFail.join('、') : '') });
                 });
               });
@@ -223,7 +233,7 @@ window.__ModuleLoader__.load({
           return snapshot({ force: true }).then(function (v) {
             setBusy('');
             var s = v ? summarize(v) : null;
-            if (r && r.ok) setNote({ kind: 'ok', text: '还原完成：' + restored + ' 项' + (s ? '；当前已精炼 ' + s.refined : '') });
+            if (r && r.ok) setNote({ kind: 'ok', text: '还原完成：' + restored + ' 项' + (s ? '；当前已优化 ' + s.refined : '') });
             else setNote({ kind: 'err', text: '还原失败：' + ((r && r.message) || '未知') });
           });
         });
@@ -315,8 +325,9 @@ window.__ModuleLoader__.load({
       var summaryEl = s
         ? h('div', { style: S.sum },
             h('span', null, '已装 ' + s.total),
-            h('span', null, '已精炼 ' + s.refined),
-            h('span', null, '待优化 ' + s.pending),
+            h('span', null, '已优化 ' + s.refined),
+            h('span', null, '待应用 ' + s.toApply),
+            h('span', null, '待生成文案 ' + s.pending),
             h('span', null, '可更新 ' + s.upd),
             s.unk ? h('span', null, '无法比对 ' + s.unk) : null)
         : null;
@@ -349,8 +360,7 @@ window.__ModuleLoader__.load({
         : h('table', { style: S.table },
             h('thead', null, h('tr', null,
               h('th', { style: S.th }, '插件'),
-              h('th', { style: S.th }, '启用'),
-              h('th', { style: S.th }, '精炼'),
+              h('th', { style: S.th }, '优化'),
               h('th', { style: S.th }, '版本'),
               h('th', { style: S.th }, '最新'),
               h('th', { style: S.th }, '操作'))),
@@ -360,8 +370,8 @@ window.__ModuleLoader__.load({
               var issues = r.issues || [];
               var cells = [
                 h('td', { style: S.td }, r.pkg),
-                h('td', { style: S.td }, r.enabled ? '开' : '关'),
-                h('td', { style: S.td }, r.needsText ? '待优化' : (r.localized ? '已精炼' : '待精炼')),
+                // 三态：已优化 / 待应用（有文案未落盘）/ 待优化（压根没有文案）
+                h('td', { style: S.td }, r.localized ? '已优化' : (r.needsText ? '待优化' : '待应用')),
                 h('td', { style: S.td }, r.version || '—'),
                 h('td', { style: S.td }, r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—')),
               ];

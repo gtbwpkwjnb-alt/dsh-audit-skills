@@ -473,6 +473,32 @@ export function resolveUpdateSpec(profileDir, pkg) {
 }
 
 /** 启动一次更新：立即返回 token，真实进度用 updateJobStatus 轮询（避免长请求卡死界面）。 */
+/**
+ * 更新后的统一收尾：补回被 pnpm 洗掉的优化结果 + 取变化提示。
+ * **单包与批量共用**，避免两条路径行为分叉（这正是之前多处不一致的来源）。
+ */
+export async function finishAfterUpdate(profileDir, pkg, from, to) {
+  let refined = false
+  const entry = readCatalog().filter((e) => e.pkg === pkg)
+  if (entry.length > 0) {
+    try {
+      applyLocale([profileDir], { entries: entry })
+      refined = inspectPackage(profileDir, { pkg }).localized === true
+    } catch {
+      /* 补回失败不影响更新本身 */
+    }
+  }
+  let delta = null
+  if (typeof from === 'string' && typeof to === 'string' && from !== to) {
+    try {
+      delta = await describeUpdateDelta(profileDir, pkg, from, to)
+    } catch {
+      /* 变化提示失败不影响更新本身 */
+    }
+  }
+  return { refined, delta }
+}
+
 export function startUpdate(ctx, profileDir, pkg) {
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, code: 'unsupported-spec', message: plan.reason }
@@ -482,32 +508,24 @@ export function startUpdate(ctx, profileDir, pkg) {
   const token = pkg + ':' + Date.now().toString(36)
   const base = { pkg, spec: plan.spec, kind: plan.kind, startedAt: Date.now() }
   updateJobs.set(token, Object.assign({}, base, { stage: 'installing', message: '正在执行安装（pnpm，可能持续数十秒）…', done: false, ok: null }))
-  Promise.resolve()
-    .then(() => pm.installBundle(plan.spec, {}))
+  installAndWait(ctx, profileDir, pkg)
     .then(async (result) => {
       const job = updateJobs.get(token) ?? base
-      // 注意：startUpdate 的第二参数就叫 profileDir，这里不能再从 dirs 推导
-      const before = installedVersion(profileDir, pkg)
-      // 与批量一致的收尾：补回被 pnpm 洗掉的精炼 + 给出变化提示
-      let suffix = ''
-      try {
-        const entry = readCatalog().filter((e) => e.pkg === pkg)
-        if (entry.length > 0) {
-          applyLocale([profileDir], { entries: entry })
-          if (inspectPackage(profileDir, { pkg }).localized === true) suffix += ' 精炼已保持。'
-        }
-      } catch {
-        /* 忽略 */
-      }
-      if (plan.kind === 'registry' && before !== null) {
-        try {
-          const delta = await describeUpdateDelta(profileDir, pkg, before, latestVersionFromSpec(plan.spec) ?? before)
-          suffix += ' ' + describeDeltaText(delta)
-        } catch {
-          /* 忽略 */
-        }
-      }
-      updateJobs.set(token, Object.assign({}, job, { stage: 'done', message: '安装执行完成。' + suffix + ' 新版本需刷新页面或重启 DSH 才会加载。', done: true, ok: true, result: result ?? null }))
+      const finished = await finishAfterUpdate(profileDir, pkg, result.from, result.to)
+      const suffix = (finished.refined === true ? ' 优化已保持。' : '') + (finished.delta !== null ? ' ' + describeDeltaText(finished.delta) : '')
+      pruneUpdateJobs()
+      updateJobs.set(token, Object.assign({}, job, {
+        stage: result.ok === true ? 'done' : 'failed',
+        message: result.ok === true
+          ? '安装执行完成。' + suffix
+          : String(result.message || '更新失败'),
+        done: true,
+        ok: result.ok === true,
+        from: result.from ?? null,
+        to: result.to ?? null,
+        refined: finished.refined,
+        delta: finished.delta,
+      }))
     })
     .catch((error) => {
       const job = updateJobs.get(token) ?? base
@@ -667,19 +685,48 @@ export function updateAllStatus() {
   return batch
 }
 
-/** 单包更新（等待完成），返回 {ok, message}。 */
-async function runOneUpdate(ctx, profileDir, pkg) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** 单个包最多等多久（毫秒）。超时不代表失败，只代表我们不再等。 */
+const UPDATE_WAIT_MS = 120000
+
+/**
+ * 安装并**有界**等待完成。
+ *
+ * 为什么不 await installBundle：安装会触发 DSH 重新组合插件图，而那个 Promise
+ * 可能在重组合过程中**永不 settle** —— 实机表现就是「批量更新一直卡在 1/3」。
+ * 因此改为：把安装发出去，然后轮询已装版本的变化，到点就如实汇报，
+ * 绝不把整个批量的推进权交给一个可能不返回的 Promise。
+ */
+export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_MS) {
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, message: plan.reason }
   const pm = getPluginManager(ctx)
   if (pm === undefined) return { ok: false, message: '插件管理器服务未就绪' }
   if (typeof pm.installBundle !== 'function') return { ok: false, message: '插件管理器未提供 installBundle' }
-  try {
-    await pm.installBundle(plan.spec, {})
-    return { ok: true, message: '' }
-  } catch (error) {
-    return { ok: false, message: String((error && error.message) || error) }
+  const from = installedVersion(profileDir, pkg)
+  let failure = null
+  let settled = false
+  Promise.resolve()
+    .then(() => pm.installBundle(plan.spec, {}))
+    .then(() => { settled = true })
+    .catch((error) => { failure = String((error && error.message) || error); settled = true })
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    if (failure !== null) return { ok: false, message: failure, from }
+    // Promise 已 settle 就立刻判断，不先白等一个轮询周期
+    if (settled === true) {
+      const now = installedVersion(profileDir, pkg)
+      if (now !== null && now !== from) return { ok: true, message: '', from, to: now }
+      // 让出一小段时间，避免 pnpm 写盘与我们的读取竞争
+      await sleep(300)
+      const again = installedVersion(profileDir, pkg)
+      return { ok: true, message: '', from, to: again, unchanged: again === from }
+    }
+    if (Date.now() >= deadline) break
+    await sleep(250)
   }
+  return { ok: false, message: '等待超时（安装可能仍在后台执行，可稍后刷新查看）', from, timedOut: true }
 }
 
 /**
@@ -708,25 +755,13 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
       item.state = 'running'
       live.items = items
       writeBatch(live)
-      const result = await runOneUpdate(ctx, profileDir, item.pkg)
+      const result = await installAndWait(ctx, profileDir, item.pkg)
       item.to = installedVersion(profileDir, item.pkg)
-      if (result.ok === true && item.from !== null && item.to !== null && item.to !== item.from) {
-        // 更新会重新物化包目录，把我们的 locale 洗掉。这里立刻补回，
-        // 用户就不必再点一次「翻译优化」（此前后续的 autoApply 也会补，但会晚到一次重载）。
-        try {
-          const entry = readCatalog().filter((e) => e.pkg === item.pkg)
-          if (entry.length > 0) {
-            applyLocale([profileDir], { entries: entry })
-            item.refined = inspectPackage(profileDir, { pkg: item.pkg }).localized === true
-          }
-        } catch {
-          /* 补回失败不影响更新本身 */
-        }
-        try {
-          item.delta = await describeUpdateDelta(profileDir, item.pkg, item.from, item.to)
-        } catch {
-          /* 变化提示失败不影响更新本身 */
-        }
+      if (result.ok === true) {
+        // 与单包路径共用收尾：补回被 pnpm 洗掉的优化结果 + 变化提示
+        const finished = await finishAfterUpdate(profileDir, item.pkg, item.from, item.to)
+        item.refined = finished.refined
+        item.delta = finished.delta
       }
       if (result.ok !== true) {
         item.state = 'failed'
@@ -1065,7 +1100,11 @@ export function registerBridge(ctx, dirs) {
           path: BRIDGE_PREFIX + '/apply',
           handler: async (req, res) => {
             try {
-              writeJson(res, 200, { ok: true, value: applyLocale(dirs) })
+              // 传 pkgs 时只处理这些包 —— 让「翻译优化」能跳过已优化的插件
+              const body = await readJsonBody(req)
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const options = pkgs === null ? {} : { entries: readCatalog().filter((e) => pkgs.includes(e.pkg)) }
+              writeJson(res, 200, { ok: true, value: applyLocale(dirs, options) })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
