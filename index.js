@@ -52,13 +52,36 @@ const BRIDGE_PREFIX = '/api/dsh-audit-skills'
 const NPM_REGISTRY = 'https://registry.npmjs.org/'
 
 /** 读取精炼目录；任何失败都返回空目录而不是抛错。 */
-export function readCatalog() {
+/** 用户/Agent 可写回的文案覆盖层（不在 node_modules 内，重装不会被覆盖）。 */
+export function overlayPath() {
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  return path.join(home, 'dsh-audit-skills', 'catalog.local.json')
+}
+
+function readEntries(file) {
   try {
-    const raw = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf8'))
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
     return Array.isArray(raw.entries) ? raw.entries : []
   } catch {
     return []
   }
+}
+
+/**
+ * 内置 catalog ∪ 用户覆盖层（overlay 优先）。
+ *
+ * overlay 是「新装插件」唯一的可补录通路：本插件不调用模型，自己变不出中文，
+ * 必须有人把精炼文案写进去。写在 ~/.dsh 下而不是 node_modules，升级/重装都不会丢。
+ */
+export function readCatalog() {
+  const merged = new Map()
+  for (const entry of readEntries(CATALOG_FILE)) {
+    if (entry && typeof entry.pkg === 'string') merged.set(entry.pkg, entry)
+  }
+  for (const entry of readEntries(overlayPath())) {
+    if (entry && typeof entry.pkg === 'string') merged.set(entry.pkg, entry)
+  }
+  return Array.from(merged.values())
 }
 
 /** 推断 profile 目录：显式配置 > DSH_HOME > ~/.dsh，默认 desktop。 */
@@ -355,18 +378,110 @@ export async function fetchLatestVersion(name) {
   }
 }
 
-/** 一键更新：经第一方插件管理器执行（自带 profile 锁、兼容预检与失败回滚）。 */
-export async function updateBundle(ctx, pkg) {
-  const pm = getPluginManager(ctx)
-  if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务不可用' }
-  if (typeof pm.installBundle !== 'function') return { ok: false, code: 'manager-unsupported', message: '插件管理器未提供 installBundle' }
+/** 进行中的更新任务：token → 阶段状态。仅内存，重启即清空。 */
+const updateJobs = new Map()
+
+/** 读取 profile 原始清单（需要依赖范围，不只依赖名）。 */
+export function readProfileManifestRaw(profileDir) {
   try {
-    const spec = pkg + '@latest'
-    const result = await pm.installBundle(spec, {})
-    return { ok: true, spec, result }
-  } catch (error) {
-    return { ok: false, code: 'update-failed', message: String((error && error.message) || error) }
+    return JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'))
+  } catch {
+    return undefined
   }
+}
+
+/**
+ * 解析更新该包应当使用的 spec。
+ *
+ * 关键：GitHub 直装的包**不能**加 @latest —— npm 上根本不存在它（我们实测返回 404），
+ * 加了只会落到同一个 git 解析、版本不变。必须原样回传 git spec。
+ */
+export function resolveUpdateSpec(profileDir, pkg) {
+  const raw = readProfileManifestRaw(profileDir)
+  const range = raw && raw.dependencies ? raw.dependencies[pkg] : undefined
+  if (typeof range !== 'string' || range === '') {
+    return { kind: 'unknown', spec: null, range: null, reason: '该包不在 profile 依赖里（可能是内置 bundle），无法更新' }
+  }
+  if (range.startsWith('github:') || range.startsWith('git+') || range.includes('github.com/')) {
+    return { kind: 'git', spec: range, range, reason: null }
+  }
+  if (range.startsWith('file:') || range.startsWith('link:') || range.startsWith('workspace:')) {
+    return { kind: 'local', spec: null, range, reason: '本地路径依赖，请手动更新' }
+  }
+  return { kind: 'registry', spec: pkg + '@latest', range, reason: null }
+}
+
+/** 启动一次更新：立即返回 token，真实进度用 updateJobStatus 轮询（避免长请求卡死界面）。 */
+export function startUpdate(ctx, profileDir, pkg) {
+  const plan = resolveUpdateSpec(profileDir, pkg)
+  if (plan.spec === null) return { ok: false, code: 'unsupported-spec', message: plan.reason }
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务未就绪（重启 DSH 后可用）' }
+  if (typeof pm.installBundle !== 'function') return { ok: false, code: 'manager-unsupported', message: '插件管理器未提供 installBundle' }
+  const token = pkg + ':' + Date.now().toString(36)
+  const base = { pkg, spec: plan.spec, kind: plan.kind, startedAt: Date.now() }
+  updateJobs.set(token, Object.assign({}, base, { stage: 'installing', message: '正在执行安装（pnpm，可能持续数十秒）…', done: false, ok: null }))
+  Promise.resolve()
+    .then(() => pm.installBundle(plan.spec, {}))
+    .then((result) => {
+      const job = updateJobs.get(token) ?? base
+      updateJobs.set(token, Object.assign({}, job, { stage: 'done', message: '安装完成。新版本需刷新页面或重启 DSH 才会加载。', done: true, ok: true, result: result ?? null }))
+    })
+    .catch((error) => {
+      const job = updateJobs.get(token) ?? base
+      updateJobs.set(token, Object.assign({}, job, { stage: 'failed', message: String((error && error.message) || error), done: true, ok: false }))
+    })
+  return { ok: true, token, plan: { kind: plan.kind, spec: plan.spec, range: plan.range } }
+}
+
+/** 查询更新进度。 */
+export function updateJobStatus(token) {
+  const job = typeof token === 'string' ? updateJobs.get(token) : undefined
+  if (job === undefined) return { ok: false, code: 'unknown-token', message: '任务不存在或已过期' }
+  return { ok: true, job }
+}
+
+/**
+ * 为一行数据生成「问题 → 原因 → 解决办法 → 可执行动作」。
+ * 界面不应只丢一个 HTTP 404 给用户。
+ */
+export function describeIssues(row) {
+  const issues = []
+  const latest = row.latest === undefined ? null : row.latest
+  if (row.needsText === true) {
+    issues.push({
+      code: 'needs-text',
+      reason: '该插件没有内置精炼文案。本插件不调用模型，自己无法生成中文。',
+      remedy: '把包名发给 Agent，Agent 会把精炼文案写进覆盖层文件；写好后点「刷新状态」即可生效。',
+      action: { kind: 'open-overlay', label: '打开覆盖层', path: overlayPath() },
+    })
+  }
+  if (row.version && latest === null && typeof row.reason === 'string' && row.reason !== '') {
+    if (row.reason.includes('404')) {
+      issues.push({
+        code: 'not-on-npm',
+        reason: 'npm registry 上找不到这个包（它可能是从 GitHub 直接安装的），所以无法比对版本。',
+        remedy: 'GitHub 直装的包要用 git spec 更新；若要简化以后升级，可改从 npm 安装。',
+        action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' },
+      })
+    } else {
+      issues.push({
+        code: 'registry-unavailable',
+        reason: '查询 npm 版本失败：' + row.reason,
+        remedy: '检查网络或代理后点「检查更新」重试。',
+        action: { kind: 'retry', label: '重试检查' },
+      })
+    }
+  }
+  if (row.error) {
+    issues.push({
+      code: 'bundle-error',
+      reason: '插件管理器报告该 bundle 状态异常：' + row.error,
+      remedy: '在插件页停用再启用该插件；若仍异常，重启 DSH。',
+      action: { kind: 'hint', label: '前往插件页处理' },
+    })
+  }
+  return issues
 }
 
 /** 客户端 ↔ 宿主 bridge：注册只读/幂等的动作。任何失败都不外抛。 */
@@ -410,7 +525,8 @@ export function registerBridge(ctx, dirs) {
             try {
               // 优先用插件管理器（与插件页同源）；不可用时回落到自行扫描
               const viaService = collectStatusViaService(ctx, dirs)
-              writeJson(res, 200, { ok: true, value: viaService ?? collectStatus(dirs) })
+              const rows = viaService ?? collectStatus(dirs)
+              writeJson(res, 200, { ok: true, value: rows.map((row) => Object.assign({}, row, { issues: describeIssues(row) })) })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -446,7 +562,7 @@ export function registerBridge(ctx, dirs) {
                 }
                 out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: r.latest !== row.version, reason: null }))
               }
-              writeJson(res, 200, { ok: true, value: out })
+              writeJson(res, 200, { ok: true, value: out.map((row) => Object.assign({}, row, { issues: describeIssues(row) })) })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -460,12 +576,24 @@ export function registerBridge(ctx, dirs) {
               const body = await readJsonBody(req)
               const pkg = body && typeof body.pkg === 'string' ? body.pkg : ''
               if (pkg === '') {
-                writeJson(res, 200, { ok: false, message: '缺少 pkg' })
+                writeJson(res, 200, { ok: false, code: 'missing-pkg', message: '缺少 pkg 参数' })
                 return
               }
-              writeJson(res, 200, await updateBundle(ctx, pkg))
+              writeJson(res, 200, startUpdate(ctx, Array.isArray(dirs) ? dirs[0] : dirs, pkg))
             } catch (error) {
-              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+              writeJson(res, 200, { ok: false, code: 'update-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/update-status',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              writeJson(res, 200, updateJobStatus(body && body.token))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'status-failed', message: String(error?.message ?? error) })
             }
           },
         },

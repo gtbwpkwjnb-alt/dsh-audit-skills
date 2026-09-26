@@ -88,7 +88,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 5 条 bridge 路由', routes.length === 5, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 6 条 bridge 路由', routes.length === 6, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -138,6 +138,58 @@ m.revertLocale([sandbox], { entries })
 check('revert 不删除被用户改过内容的 locale 文件', fs.existsSync(zhPath))
 const latestScoped = await m.fetchLatestVersion('@furongjun1999/dsh-memory')
 check('作用域包名可正确查询（URL 编码 /）', latestScoped.status === 'ok', JSON.stringify(latestScoped))
+
+// ─────────────────────── A3 覆盖层 / spec 解析 / 更新任务 ───────────────────────
+console.log(String.fromCharCode(10) + 'A3 覆盖层 · spec 解析 · 更新任务 · 问题诊断')
+check('outlayPath 指向 ~/.dsh/dsh-audit-skills/catalog.local.json', /dsh-audit-skills[\\/]catalog\.local\.json$/.test(m.overlayPath()), m.overlayPath())
+const catAll = m.readCatalog()
+const overlayPkgs = ['@changfenhuang/dsh-annotation', 'dsh-computer-use-win', 'dsh-side-chat-plus']
+check('覆盖层条目已并入 catalog', overlayPkgs.every((p) => catAll.some((e) => e.pkg === p)), 'catalog=' + catAll.length)
+check('覆盖层优先于内置（同一 pkg 取覆盖层）', (function () {
+  const hit = catAll.filter((e) => e.pkg === 'dsh-side-chat-plus')
+  return hit.length === 1 && /侧边聊天/.test(hit[0].zh.title)
+})(), JSON.stringify(catAll.filter((e) => e.pkg === 'dsh-side-chat-plus').map((e) => e.zh.title)))
+// spec 解析：三类依赖
+fs.writeFileSync(path.join(sandbox, 'package.json'), JSON.stringify({
+  name: 'sandbox',
+  dependencies: { 'pkg-with-exports': '^1.0.0', 'pkg-git': 'github:owner/repo', 'pkg-local': 'file:../x' },
+  dsh: { profile: { bundles: ['pkg-with-exports'] } },
+}, null, 2))
+const specReg = m.resolveUpdateSpec(sandbox, 'pkg-with-exports')
+const specGit = m.resolveUpdateSpec(sandbox, 'pkg-git')
+const specLoc = m.resolveUpdateSpec(sandbox, 'pkg-local')
+const specUnk = m.resolveUpdateSpec(sandbox, 'not-a-dep')
+check('registry 依赖 → pkg@latest', specReg.kind === 'registry' && specReg.spec === 'pkg-with-exports@latest', JSON.stringify(specReg))
+check('git 依赖 → 原样回传 git spec（不加 @latest）', specGit.kind === 'git' && specGit.spec === 'github:owner/repo', JSON.stringify(specGit))
+check('本地依赖 → 拒绝并说明', specLoc.spec === null && specLoc.kind === 'local', JSON.stringify(specLoc))
+check('未知依赖 → 拒绝并说明', specUnk.spec === null, JSON.stringify(specUnk))
+// 更新任务：有 pluginManager 时拿到 token 并可轮询到 done
+const seenSpecs = []
+const fakePM = {
+  listBundles: () => [],
+  installBundle: (spec) => { seenSpecs.push(spec); return Promise.resolve({ installed: true }) },
+}
+const ctxWithPM = { get: (n) => (n === 'pluginManager' ? fakePM : undefined) }
+const started = m.startUpdate(ctxWithPM, sandbox, 'pkg-with-exports')
+check('startUpdate 立即返回 token 与计划', started.ok === true && typeof started.token === 'string' && started.plan.kind === 'registry', JSON.stringify(started))
+check('startUpdate 对 git 依赖用 git spec', m.startUpdate(ctxWithPM, sandbox, 'pkg-git').plan.spec === 'github:owner/repo')
+await new Promise((r) => setTimeout(r, 80))
+const jr = m.updateJobStatus(started.token)
+check('轮询到 done 且 ok（不再是一次长请求）', jr.ok === true && jr.job.done === true && jr.job.ok === true, JSON.stringify(jr))
+check('installBundle 收到的 spec 正确', seenSpecs.includes('pkg-with-exports@latest'), JSON.stringify(seenSpecs))
+check('未知 token 优雅报错', m.updateJobStatus('nope').ok === false)
+// 失败路径
+const failPM = { listBundles: () => [], installBundle: () => Promise.reject(new Error('boom')) }
+const started2 = m.startUpdate({ get: () => failPM }, sandbox, 'pkg-with-exports')
+await new Promise((r) => setTimeout(r, 80))
+const jr2 = m.updateJobStatus(started2.token)
+check('安装失败时 stage=failed 且带原因', jr2.ok && jr2.job.done === true && jr2.job.ok === false && jr2.job.message === 'boom', JSON.stringify(jr2))
+// 问题诊断
+const diagText = m.describeIssues({ pkg: 'x', needsText: true })
+check('needsText → 给出原因/办法/动作', diagText.length === 1 && diagText[0].code === 'needs-text' && diagText[0].remedy.length > 10 && diagText[0].action.kind === 'open-overlay', JSON.stringify(diagText))
+const diag404 = m.describeIssues({ pkg: 'y', version: '1.2.0', latest: null, reason: 'HTTP 404' })
+check('HTTP 404 → 解释为 GitHub 直装而非裸报错', diag404.length === 1 && diag404[0].code === 'not-on-npm', JSON.stringify(diag404))
+check('正常行无问题项', m.describeIssues({ pkg: 'z', version: '1.0.0', latest: '1.0.0', needsText: false }).length === 0)
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')

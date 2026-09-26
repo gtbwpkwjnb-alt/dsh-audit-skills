@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.5.0 — 2026-09-27 · 可写回文案源 · 真实更新反馈 · 错误可解决
+
+用户反馈三件事，追查后发现**是同一个根因链**：
+
+| 根因 | 后果 |
+|---|---|
+| **R1** `pnpm-lock.yaml` 把 GitHub 直装依赖钉死在旧提交 | 任何 `pnpm install` 都按 lockfile 重新物化 → **手工同步的 1.4.1 被覆盖回 1.2.0（裸 ESM = 会崩）**。点「更新」时的卡顿就是它在跑 pnpm——**它其实执行了** |
+| **R2** `installBundle(pkg + '@latest')` 对 GitHub 直装包无意义 | 本插件 npm 上 404，`@latest` 解析不到 → 落回同一 git 解析 → 版本不变 |
+| **R3** catalog 静态、插件自身不调用模型 | 新装插件**永远补不上**「待补文案」 |
+
+### ① 可写回的文案源：\`~/.dsh/dsh-audit-skills/catalog.local.json\`
+
+`readCatalog()` 现在 = **内置 catalog ∪ 覆盖层**（覆盖层优先，同名取覆盖层）。
+
+覆盖层在 `~/.dsh` 下、**不在 node_modules 里**，所以升级/重装都不会被洗掉。
+这也是「新装插件」唯一的补录通路：Agent 把精炼文案写进去，点「刷新状态」即生效，不必重发插件。
+
+本次已为三个此前无法优化的插件补录：`@changfenhuang/dsh-annotation`、
+`dsh-computer-use-win`、`dsh-side-chat-plus`。
+
+### ② 更新：正确的 spec + 可轮询的进度
+
+- `resolveUpdateSpec()` 按依赖类型分流：**registry → `pkg@latest`**；
+  **git → 原样回传 git spec（绝不加 `@latest`）**；local/未知 → 拒绝并说明原因
+- `/update` **立即返回 token**，实际安装在后台跑；`/update-status` 轮询阶段
+  （installing → done/failed + 原因）
+- UI：进行中显示进度条与阶段文字；完成/失败都有明确文案，**不再卡死又毫无反馈**
+
+### ③ 错误不再是一个裸字符串
+
+新增 `describeIssues()`，每个问题都给出 **原因 → 解决办法 → 可执行动作**：
+
+| code | 呈现 |
+|---|---|
+| `needs-text` | 「本插件不调用模型，自己无法生成中文」+ 提示把包名交给 Agent + 显示覆盖层路径 |
+| `not-on-npm` | 把 `HTTP 404` 翻译成「该包从 GitHub 直装，无法比对 npm 版本」 |
+| `registry-unavailable` | 网络/代理问题 + 「重试」按钮 |
+| `bundle-error` | 插件管理器报告的异常 + 处理建议 |
+
+表格新增「⚠ 问题」按钮，点开显示完整的原因与办法。
+
+### ④ 已打 tag
+
+`v1.4.1` 与 `v1.5.0` 已推送，可用 `github:owner/repo#v1.5.0` 固定版本。
+
+### 回归测试
+
+```
+RESULT  pass=46  fail=0
+```
+
+新增 15 项：覆盖层合并与优先级、三类 spec 解析、更新任务 token 与轮询、
+失败路径、问题诊断映射、路由数 6。
+
 ## 1.4.1 — 2026-09-26 · 回测修缺陷
 
 新增常驻回归测试 **`scripts/regression.mjs`**（30 项断言），覆盖此前**完全没验过**的面：
