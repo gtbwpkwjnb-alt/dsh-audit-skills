@@ -170,6 +170,7 @@ export function inspectPackage(profileDir, entry) {
 
 /** 判断某个已装依赖是否为 DSH bundle（与插件页同判据）。 */
 export function readBundleInfo(profileDir, pkg) {
+  if (!isSafePackageName(pkg)) return undefined
   try {
     const dir = path.join(profileDir, 'node_modules', ...pkg.split('/'))
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
@@ -190,6 +191,32 @@ export function readBundleInfo(profileDir, pkg) {
  * 动态发现**已安装的 bundle**（与插件页口径一致），而不是只列 catalog 条目——
  * 这样用户新装插件后会立刻出现在表里并标为待补文案，也能避免把已卸载的插件列成“未安装”。
  */
+/**
+ * 行构造：全插件**唯一**的行形状来源。
+ *
+ * 两条取数路径（第一方 pluginManager / 自行扫描）都只能经此函数出行。
+ * 此前它们各自拼行，needsText 语义不一致：
+ * 服务路径用 !localized（忽略 inCatalog），于是「已有精选文案但尚未应用」的包
+ * 被判为待优化 -> 白调一次模型，且模型文案会**覆盖**精选文案（覆盖层优先级更高）。
+ *
+ * 语义统一为：需要生成文案 ⟺ 既没有内置文案、也没自带 locale 文件。
+ */
+function buildRow(profileDir, pkg, fields) {
+  const st = inspectPackage(profileDir, { pkg })
+  const inCatalog = fields.inCatalog === true
+  return {
+    profileDir,
+    pkg,
+    installed: fields.installed !== false,
+    enabled: fields.enabled === true,
+    version: fields.version ?? null,
+    error: fields.error ?? null,
+    localized: st.localized,
+    inCatalog,
+    needsText: !inCatalog && !st.localized,
+  }
+}
+
 export function collectStatus(profileDirs) {
   const entries = readCatalog()
   const byPkg = new Map(entries.map((e) => [e.pkg, e]))
@@ -201,21 +228,12 @@ export function collectStatus(profileDirs) {
     for (const pkg of manifest.dependencies) {
       const info = readBundleInfo(profileDir, pkg)
       if (info === undefined) continue
-      const entry = byPkg.get(pkg)
-      const st = inspectPackage(profileDir, { pkg })
-      out.push({
-        profileDir,
-        pkg,
+      out.push(buildRow(profileDir, pkg, {
         installed: true,
         enabled: manifest.bundles.includes(pkg),
-        inCatalog: entry !== undefined,
-        // 没有 catalog 文案、自身也没有 locale 文件 → 需要补文案
-        needsText: entry === undefined && !st.localized,
-        localized: st.localized,
-        title: st.title,
+        inCatalog: byPkg.has(pkg),
         version: info.version,
-        description: info.description,
-      })
+      }))
     }
   }
   return out
@@ -354,22 +372,14 @@ export function collectStatusViaService(ctx, dirs) {
   try {
     const list = pm.listBundles()
     if (!Array.isArray(list)) return undefined
-    return list.map((b) => {
-      const st = inspectPackage(profileDir, { pkg: b.name })
-      return {
-        profileDir,
-        pkg: b.name,
-        installed: b.installed !== false,
-        enabled: b.enabled === true,
-        version: typeof b.version === 'string' ? b.version : null,
-        description: typeof b.description === 'string' ? b.description : '',
-        error: b.error ? String(b.error.code ?? b.error) : null,
-        localized: st.localized,
-        title: st.title,
-        inCatalog: false,
-        needsText: !st.localized,
-      }
-    })
+    const catalogPkgs = new Set(readCatalog().map((e) => e.pkg))
+    return list.map((b) => buildRow(profileDir, b.name, {
+      installed: b.installed !== false,
+      enabled: b.enabled === true,
+      version: typeof b.version === 'string' ? b.version : null,
+      error: b.error ? String(b.error.code ?? b.error) : null,
+      inCatalog: catalogPkgs.has(b.name),
+    }))
   } catch (error) {
     return undefined
   }
@@ -423,6 +433,14 @@ export async function fetchLatestVersion(name) {
 
 /** 进行中的更新任务：token → 阶段状态。仅内存，重启即清空。 */
 const updateJobs = new Map()
+/** 只保留最近若干条已完成任务，避免长时间运行后无限增长。 */
+const UPDATE_JOB_KEEP = 20
+function pruneUpdateJobs() {
+  if (updateJobs.size <= UPDATE_JOB_KEEP) return
+  const finished = []
+  for (const [key, job] of updateJobs) if (job && job.done === true) finished.push(key)
+  while (updateJobs.size > UPDATE_JOB_KEEP && finished.length > 0) updateJobs.delete(finished.shift())
+}
 
 /** 读取 profile 原始清单（需要依赖范围，不只依赖名）。 */
 export function readProfileManifestRaw(profileDir) {
@@ -468,10 +486,12 @@ export function startUpdate(ctx, profileDir, pkg) {
     .then(() => pm.installBundle(plan.spec, {}))
     .then((result) => {
       const job = updateJobs.get(token) ?? base
+      pruneUpdateJobs()
       updateJobs.set(token, Object.assign({}, job, { stage: 'done', message: '安装完成。新版本需刷新页面或重启 DSH 才会加载。', done: true, ok: true, result: result ?? null }))
     })
     .catch((error) => {
       const job = updateJobs.get(token) ?? base
+      pruneUpdateJobs()
       updateJobs.set(token, Object.assign({}, job, { stage: 'failed', message: String((error && error.message) || error), done: true, ok: false }))
     })
   return { ok: true, token, plan: { kind: plan.kind, spec: plan.spec, range: plan.range } }
@@ -482,6 +502,40 @@ export function updateJobStatus(token) {
   const job = typeof token === 'string' ? updateJobs.get(token) : undefined
   if (job === undefined) return { ok: false, code: 'unknown-token', message: '任务不存在或已过期' }
   return { ok: true, job }
+}
+
+/**
+ * 包名白名单。
+ *
+ * /generate 与 /update 的 pkg 来自 HTTP 请求体；此前只校验了 typeof === 'string'，
+ * 于是 pkg='../../evil' 会被 path.join 展开并逃出 node_modules（实测可读到树外
+ * package.json 的 description，并把它喂进 LLM 提示词）。
+ * 只允许 npm 合法包名形态，并显式拒绝 '..'。
+ */
+export function isSafePackageName(pkg) {
+  if (typeof pkg !== 'string' || pkg.length === 0 || pkg.length > 214) return false
+  if (pkg.includes('..')) return false
+  return /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(pkg)
+}
+
+/** 版本号数字段解析；非标准版本返回 undefined。 */
+function parseVersion(value) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(value ?? ''))
+  return m === null ? undefined : [Number(m[1]), Number(m[2]), Number(m[3])]
+}
+
+/**
+ * latest 是否**真的比** current 新。
+ *
+ * 此前用 latest !== current，于是「已装 2.0.0 / npm 最新 1.5.0」也会被判为有更新，
+ * 点下去等于降级。非标准版本号（如 prerelease 标签）退回不等比较。
+ */
+export function isNewerVersion(latest, current) {
+  const a = parseVersion(latest)
+  const b = parseVersion(current)
+  if (a === undefined || b === undefined) return latest !== current
+  for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] > b[i]
+  return false
 }
 
 /** 生成提示词：只依据原文，禁止编造；title 必须保留原包名。 */
@@ -506,6 +560,21 @@ function buildPrompt(pkg, original) {
   ].join('\n')
 }
 
+/**
+ * 强制命名约定：zh.title 必须以原包名开头。
+ *
+ * 提示词里"要求"了，但模型可能不遵守（实测返回过与原包完全无关的标题）。
+ * 一旦不遵守，用户就无法从标题认出原插件——这是用户立下的不可违反约定，
+ * 所以不靠模型自觉，写入前直接补前缀。
+ */
+export function enforceTitle(pkg, title) {
+  const t = String(title ?? '').trim()
+  if (t === '') return pkg
+  if (t.startsWith(pkg)) return t
+  const inner = t.replace(/^[^（(]*[（(]?/, '').replace(/[）)]\s*$/, '').trim()
+  return inner === '' || inner === t ? pkg + '（' + t + '）' : pkg + '（' + inner + '）'
+}
+
 /** 解析模型返回的 JSON：容忍代码块包裹与前后杂讯。 */
 export function parseGenerated(text) {
   if (typeof text !== 'string') return undefined
@@ -522,6 +591,7 @@ export function parseGenerated(text) {
       en: { title: doc.en.title.trim(), description: doc.en.description.trim() },
       zh: { title: doc.zh.title.trim(), description: doc.zh.description.trim() },
     }
+    // 命名约定由 enforceTitle 在写入前强制，不依赖模型自觉
   } catch {
     return undefined
   }
@@ -617,6 +687,8 @@ export async function generateRefinement(ctx, pkg, original) {
     if (parsed === undefined) {
       return { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON', raw: String(text).slice(0, 400) }
     }
+    // 强制命名约定（不依赖模型自觉）
+    parsed.zh.title = enforceTitle(pkg, parsed.zh.title)
     return { ok: true, entry: parsed, selection }
   } catch (error) {
     return { ok: false, code: 'generate-failed', message: String((error && error.message) || error) }
@@ -725,20 +797,6 @@ export function registerBridge(ctx, dirs) {
       const routes = [
         {
           kind: 'exact',
-          path: BRIDGE_PREFIX + '/status',
-          handler: async (req, res) => {
-            try {
-              // 优先用插件管理器（与插件页同源）；不可用时回落到自行扫描
-              const viaService = collectStatusViaService(ctx, dirs)
-              const rows = viaService ?? collectStatus(dirs)
-              writeJson(res, 200, { ok: true, value: rows.map((row) => Object.assign({}, row, { issues: describeIssues(row) })) })
-            } catch (error) {
-              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
-            }
-          },
-        },
-        {
-          kind: 'exact',
           path: BRIDGE_PREFIX + '/apply',
           handler: async (req, res) => {
             try {
@@ -767,7 +825,8 @@ export function registerBridge(ctx, dirs) {
                   out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: r.reason ?? 'unavailable' }))
                   continue
                 }
-                out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: r.latest !== row.version, reason: null }))
+                // 必须用版本序比较：用 !== 会把「已装版本更高」的降级也判成有更新
+                out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: isNewerVersion(r.latest, row.version) ? true : (isNewerVersion(row.version, r.latest) ? false : null), reason: null }))
               }
               writeJson(res, 200, { ok: true, value: out.map((row) => Object.assign({}, row, { issues: describeIssues(row) })) })
             } catch (error) {
@@ -786,6 +845,10 @@ export function registerBridge(ctx, dirs) {
                 writeJson(res, 200, { ok: false, code: 'missing-pkg', message: '缺少 pkg 参数' })
                 return
               }
+              if (!isSafePackageName(pkg)) {
+                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '包名非法，已拒绝（防路径穿越）' })
+                return
+              }
               writeJson(res, 200, startUpdate(ctx, Array.isArray(dirs) ? dirs[0] : dirs, pkg))
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'update-failed', message: String(error?.message ?? error) })
@@ -801,6 +864,10 @@ export function registerBridge(ctx, dirs) {
               const pkg = body && typeof body.pkg === 'string' ? body.pkg : ''
               if (pkg === '') {
                 writeJson(res, 200, { ok: false, code: 'missing-pkg', message: '缺少 pkg 参数' })
+                return
+              }
+              if (!isSafePackageName(pkg)) {
+                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '包名非法，已拒绝（防路径穿越）' })
                 return
               }
               const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
