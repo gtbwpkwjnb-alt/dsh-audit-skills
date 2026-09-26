@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 const REPO = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')))
@@ -88,7 +89,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 13 条 bridge 路由（新增技能优化接口）', routes.length === 13, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 14 条 bridge 路由（新增技能更新接口）', routes.length === 14, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -283,7 +284,9 @@ check('按钮：行内不再有「可点但点了没用」的更新按钮', !cli
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
-check('宿主：批量更新串行 for + await，且无 Promise.all', /for \(let i = 0; i < items\.length; i \+= 1\)/.test(idxSrcA5) && /await installAndWait/.test(idxSrcA5) && !/Promise\.all/.test(idxSrcA5))
+const loopAt = idxSrcA5.indexOf('for (let i = 0; i < items.length; i += 1)')
+const loopAround = loopAt > 0 ? idxSrcA5.slice(Math.max(0, loopAt - 2000), loopAt + 2000) : ''
+check('宿主：插件批量更新串行（循环内 await installAndWait，且附近无 Promise.all）', loopAt > 0 && loopAround.includes('await installAndWait') && !loopAround.includes('Promise.all'))
 check('汇总行由 rows 派生（与表格同源）', clientSrc.includes('function summarize(rows, isSkill)') && clientSrc.includes('summarize(rows, IS_SKILL)'))
 check('客户端：含宿主半体过旧提示', clientSrc.includes('宿主半体版本过旧'))
 check('客户端：显示宿主版本', clientSrc.includes('宿主半体 v'))
@@ -586,6 +589,100 @@ check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundled
 process.env.DSH_HOME = savedHome6
 process.env.DSH_AGENTS_HOME = savedAgentsHome
 fs.rmSync(skillRoot, { recursive: true, force: true })
+
+// ─────────────────────── A13 技能更新（git 快进；只碰临时仓库） ───────────────────────
+console.log(String.fromCharCode(10) + 'A13 技能更新（git 快进）')
+const NL13 = String.fromCharCode(10)
+const gitOk = (() => { try { execFileSync('git', ['--version'], { stdio: 'ignore' }); return true } catch { return false } })()
+if (gitOk !== true) {
+  check('git 不可用 —— 跳过技能更新用例（不谎报通过）', true)
+} else {
+  const gitEnv13 = Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0' })
+  const run = (args, cwd) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t'].concat(args), { cwd, env: gitEnv13, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+  const base13 = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-git-'))
+  const root13 = path.join(base13, 'agents')
+  const skills13 = path.join(root13, 'skills')
+  fs.mkdirSync(skills13, { recursive: true })
+  // 每个技能一个独立远端：seed -> bare -> clone/pusher，互不干扰
+  const mkRepo = (skillName) => {
+    const seed = path.join(base13, skillName + '-seed')
+    const bare = path.join(base13, skillName + '.git')
+    const clone = path.join(skills13, skillName)
+    const pusher = path.join(base13, skillName + '-pusher')
+    fs.mkdirSync(seed, { recursive: true })
+    fs.writeFileSync(path.join(seed, 'SKILL.md'), ['---', 'name: ' + skillName, 'description: v1', '---', '', 'body v1'].join(NL13))
+    fs.writeFileSync(path.join(seed, 'NOTES.md'), 'v1' + NL13)
+    run(['init', '-b', 'master'], seed)
+    run(['add', '-A'], seed)
+    run(['commit', '-m', 'v1'], seed)
+    run(['clone', '--bare', seed, bare], base13)
+    run(['clone', bare, clone], base13)
+    run(['clone', bare, pusher], base13)
+    return { seed, bare, clone, pusher }
+  }
+  const gFast = mkRepo('demo-git')
+  const gDirty = mkRepo('demo-dirty')
+  const gFork = mkRepo('demo-fork')
+  fs.mkdirSync(path.join(skills13, 'demo-plain'), { recursive: true })
+  fs.writeFileSync(path.join(skills13, 'demo-plain', 'SKILL.md'), ['---', 'name: demo-plain', 'description: 本地目录', '---', '', 'body'].join(NL13))
+  const savedHome13 = process.env.DSH_HOME
+  const savedAgents13 = process.env.DSH_AGENTS_HOME
+  process.env.DSH_HOME = path.join(base13, 'no-dsh-home')
+  process.env.DSH_AGENTS_HOME = root13
+  const baseSha = run(['rev-parse', 'HEAD'], gFast.clone)
+  const info = m.skillRepoInfo(gFast.clone)
+  check('git：识别仓库根 / 分支 / 远端 / 未提交数', info.isGit === true && info.branch === 'master' && info.dirty === 0 && info.owned === true && info.url !== '')
+  check('git：非仓库目录如实 isGit=false', m.skillRepoInfo(path.join(base13, 'nope')).isGit === false)
+  const rows0 = m.collectSkills({ get: () => undefined })
+  const rowGit = rows0.find((r) => r.pkg === 'demo-git')
+  const rowPlain = rows0.find((r) => r.pkg === 'demo-plain')
+  check('git：技能行带上仓库事实（HEAD 与仓库根归属）', !!rowGit && rowGit.isGit === true && rowGit.localSha === baseSha && rowGit.repoOwned === true)
+  check('git：非 git 技能行如实标注', !!rowPlain && rowPlain.isGit === false && rowPlain.repoUrl === '' && rowPlain.dirty === 0)
+  const en0 = await m.enrichSkillUpdates(rows0, true)
+  const eGit0 = en0.find((r) => r.pkg === 'demo-git')
+  check('git：远端与本地一致 -> hasUpdate=false 且给出远端 sha', !!eGit0 && eGit0.hasUpdate === false && eGit0.remoteSha === baseSha)
+  check('git：非 git 技能 hasUpdate=null（不猜）', (en0.find((r) => r.pkg === 'demo-plain') || {}).hasUpdate === null)
+  fs.writeFileSync(path.join(gFast.pusher, 'NOTES.md'), 'v2' + NL13)
+  run(['add', '-A'], gFast.pusher)
+  run(['commit', '-m', 'v2'], gFast.pusher)
+  run(['push', 'origin', 'master'], gFast.pusher)
+  const newSha = run(['rev-parse', 'HEAD'], gFast.pusher)
+  const en1 = await m.enrichSkillUpdates(m.collectSkills({ get: () => undefined }), true)
+  const eGit1 = en1.find((r) => r.pkg === 'demo-git')
+  check('git：远端前进 -> hasUpdate=true 且带远端 sha', !!eGit1 && eGit1.hasUpdate === true && eGit1.remoteSha === newSha)
+  const upd1 = await m.updateSkillRepos(['demo-git'])
+  check('git：更新做真快进并汇报 from -> to', upd1.length === 1 && upd1[0].state === 'updated' && upd1[0].from === baseSha && upd1[0].to === newSha, JSON.stringify(upd1))
+  check('git：快进后工作区真的拿到新内容', fs.readFileSync(path.join(gFast.clone, 'NOTES.md'), 'utf8').trim() === 'v2')
+  const upd1b = await m.updateSkillRepos(['demo-git'])
+  check('git：再更新一次 -> unchanged（幂等）', upd1b[0].state === 'unchanged', JSON.stringify(upd1b))
+  const updPlain = await m.updateSkillRepos(['demo-plain'])
+  check('git：非 git 技能拒绝更新且给得出理由', updPlain[0].state === 'failed' && updPlain[0].message.includes('不是 git 仓库'))
+  const updMissing = await m.updateSkillRepos(['not-a-skill'])
+  check('git：不存在的技能如实报失败', updMissing[0].state === 'failed' && updMissing[0].message.includes('不存在'))
+  fs.writeFileSync(path.join(gDirty.clone, 'NOTES.md'), '我的未提交改动' + NL13)
+  const beforeDirty = fs.readFileSync(path.join(gDirty.clone, 'NOTES.md'), 'utf8')
+  fs.writeFileSync(path.join(gDirty.pusher, 'NOTES.md'), 'v2' + NL13)
+  run(['add', '-A'], gDirty.pusher)
+  run(['commit', '-m', 'v2'], gDirty.pusher)
+  run(['push', 'origin', 'master'], gDirty.pusher)
+  const updDirty = await m.updateSkillRepos(['demo-dirty'])
+  check('git：本地未提交改动与远端冲突 -> 拒绝快进', updDirty[0].state === 'failed')
+  check('git：拒绝理由点明「未提交修改」而非含糊失败', /未提交修改|local changes|would be overwritten/i.test(updDirty[0].message), JSON.stringify(updDirty))
+  check('git：拒绝后本地未提交改动逐字节未被动过', fs.readFileSync(path.join(gDirty.clone, 'NOTES.md'), 'utf8') === beforeDirty)
+  fs.writeFileSync(path.join(gFork.clone, 'MINE.md'), 'local only' + NL13)
+  run(['add', '-A'], gFork.clone)
+  run(['commit', '-m', 'local'], gFork.clone)
+  fs.writeFileSync(path.join(gFork.pusher, 'NOTES.md'), 'v2' + NL13)
+  run(['add', '-A'], gFork.pusher)
+  run(['commit', '-m', 'v2'], gFork.pusher)
+  run(['push', 'origin', 'master'], gFork.pusher)
+  const updFork = await m.updateSkillRepos(['demo-fork'])
+  check('git：本地分叉 -> 拒绝（不产生合并提交）', updFork[0].state === 'failed' && /分叉|fast-forward/.test(updFork[0].message), JSON.stringify(updFork))
+  check('git：拒绝后本地提交仍在（没有回退工作）', run(['log', '--oneline', '-1'], gFork.clone).includes('local'))
+  process.env.DSH_HOME = savedHome13
+  process.env.DSH_AGENTS_HOME = savedAgents13
+  fs.rmSync(base13, { recursive: true, force: true })
+}
 check('客户端：插件与技能合并为一页（只注册一个 settings.section）', (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 && clientSrc.includes("'插件与技能审查'"))
 check('客户端：合并页用页内切换区分 插件/技能', clientSrc.includes('function Merged') && clientSrc.includes("tab('plugin'") && clientSrc.includes("tab('skill'") && clientSrc.includes('h(Panel, { key: mode, target: mode })'))
 check('客户端：技能视图如实声明会写入 SKILL.md（含备份与还原）', clientSrc.includes('技能改写会真实写入 SKILL.md') && clientSrc.includes('.dsh-skill.backup') && clientSrc.includes('行为变更'))
@@ -594,9 +691,15 @@ check('客户端：技能视图把 优化状态 与 描述语言 分栏如实呈
   clientSrc.includes("'优化 · 描述'") && clientSrc.includes("'随 DSH 提供'") &&
   clientSrc.includes('r.descriptionLang') && clientSrc.includes('r.bundled !== true'))
 check('客户端：技能侧不再把 needsText 当成「描述为空」', !clientSrc.includes("'描述为空'"))
-check('客户端：技能视图与插件视图的状态互不串门',
-  clientSrc.includes('if (IS_SKILL) return;') && clientSrc.includes('!IS_SKILL && batch &&') &&
-  clientSrc.includes("!IS_SKILL ? h('span', null, '可更新 '"))
+check('客户端：技能视图不继承插件批量状态，两页各自渲染自己的更新结果',
+  clientSrc.includes('if (IS_SKILL) return;') && !clientSrc.includes('!IS_SKILL && batch &&') &&
+  clientSrc.includes("(IS_SKILL ? '技能更新' : '批量更新')") && clientSrc.includes("call('update-skills'"))
+check('客户端：技能页有与插件页同一套一键更新/行内更新',
+  clientSrc.includes("call('update-all'") && clientSrc.includes("call('update-skills'") &&
+  clientSrc.includes("opBtn('all'") && clientSrc.includes("opBtn('u'"))
+check('客户端：技能侧如实显示 远端 sha / 最新 / 未比对 与本地改动',
+  clientSrc.includes('来源 / 远端') && clientSrc.includes('function shortShaOf') &&
+  clientSrc.includes('↑ 远端 ') && clientSrc.includes('本地改动 '))
 check('客户端：加载中的占位文案按视图区分',
   clientSrc.includes("'正在读取技能状态…'") && clientSrc.includes("'正在读取插件状态…'"))
 check('客户端：版本不一致时同时报出两个版本与各自修法',

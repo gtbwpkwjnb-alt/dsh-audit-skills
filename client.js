@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.6.2';
+    var CLIENT_REV = '2.7.0';
 
     /** 比较点分版本号；非数字段按 0 算。 */
     function compareRev(a, b) {
@@ -117,8 +117,11 @@ window.__ModuleLoader__.load({
       var pending = active.filter(function (r) { return r.needsText === true; }).length;
       var toApply = active.filter(function (r) { return r.localized !== true; }).length;
       var upd = rows.filter(function (r) { return r.hasUpdate === true; }).length;
-      var unk = rows.filter(function (r) { return r.hasUpdate === null; }).length;
-      return { total: total, refined: refined, pending: pending, toApply: toApply, upd: upd, unk: unk, bundled: total - active.length };
+      /* 技能侧：非 git 目录压根没有远端可比 —— 那是「本地目录」，不是「比对失败」。
+         两者必须分开计数，否则 8 个本地技能会被说成 8 个「无法比对」。 */
+      var unk = rows.filter(function (r) { return r.hasUpdate === null && (isSkill !== true || r.isGit === true); }).length;
+      var noRepo = isSkill === true ? active.filter(function (r) { return r.isGit !== true; }).length : 0;
+      return { total: total, refined: refined, pending: pending, toApply: toApply, upd: upd, unk: unk, noRepo: noRepo, bundled: total - active.length };
     }
 
     var SEV = { high: '高', medium: '中', low: '低' };
@@ -127,6 +130,11 @@ window.__ModuleLoader__.load({
      * 「不可用」一律表现为**暗下去**（disabled + 降透明度），不允许出现「看起来能点、点了没事发生」。
      * 判定只有两种：① 有操作在跑；② 此刻无待办（更新：无可更新；优化：无待优化；还原：无已优化条目）。 */
     var OUTCOME = { ok: '已更新', updated: '已更新', unchanged: '未变化', fail: '更新失败', failed: '更新失败', done: '已完成' };
+
+    /** 提交号短写（宿主给的是全量 sha）。 */
+    function shortShaOf(sha) {
+      return typeof sha === 'string' && sha.length >= 8 ? sha.slice(0, 8) : (typeof sha === 'string' && sha !== '' ? sha : '—');
+    }
 
     function outcomeLabel(entry) {
       var k = entry && entry.state;
@@ -434,9 +442,48 @@ window.__ModuleLoader__.load({
         });
       }, [absorb]);
 
+      /**
+       * 技能更新：宿主侧只做 git 快进，一个请求回来就是最终结果。
+       * 与插件侧共用同一套收尾：完成态写进 done（按钮按结果暗下去）、结果进卡片、最后取一次快照。
+       */
+      var updateSkills = useCallback(function (pkgs) {
+        setBusy('update:all');
+        setNote({ kind: 'note', text: '正在更新技能（' + pkgs.length + ' 个，git 快进）…' });
+        return call('update-skills', { pkgs: pkgs }).then(absorb).then(function (r) {
+          setBusy('');
+          if (!r || !r.ok) {
+            setNote({ kind: 'err', text: '技能更新未执行：' + ((r && r.message) || '未知') });
+            return null;
+          }
+          var items = Array.isArray(r.value) ? r.value : [];
+          var nUpdated = items.filter(function (x) { return x.state === 'updated'; }).length;
+          var nSame = items.filter(function (x) { return x.state === 'unchanged'; }).length;
+          var nFail = items.filter(function (x) { return x.state === 'failed'; }).length;
+          setDone(function (prev) {
+            var n = Object.assign({}, prev);
+            for (var i = 0; i < items.length; i += 1) n[items[i].pkg] = { state: items[i].state, message: items[i].message };
+            return n;
+          });
+          setBatch({
+            running: false, total: items.length, index: Math.max(0, items.length - 1),
+            items: items, finishedAt: Date.now(),
+            message: '：更新 ' + nUpdated + ' 个，未变化 ' + nSame + ' 个，失败 ' + nFail + ' 个',
+          });
+          return snapshot({ force: true }).then(function () {
+            setNote({ kind: nFail > 0 ? 'err' : (nUpdated > 0 ? 'ok' : 'note'),
+              text: '技能更新完成：更新 ' + nUpdated + ' 个，未变化 ' + nSame + ' 个，失败 ' + nFail + ' 个' + (nFail > 0 ? '（每项失败原因都在卡片里）' : '') });
+            return items;
+          });
+        });
+      }, [absorb, snapshot]);
+
       var doUpdate = useCallback(function (pkg) {
         setBusy('update:' + pkg);
         setNote({ kind: 'note', text: '正在更新 ' + pkg + ' …' });
+        // 技能走 git 快进（一个请求给最终结果）；插件走第一方 pluginManager + 轮询
+        if (IS_SKILL) {
+          return updateSkills([pkg]).then(function () { setBusy(''); });
+        }
         return updateOne(pkg).then(function (res) {
           setBusy('');
           setDone(function (prev) {
@@ -495,6 +542,7 @@ window.__ModuleLoader__.load({
       var noRevert = noRows || s.refined === 0;            // 没有处于已优化状态的条目 → 无待办
       var updatable = noRows ? 0 : s.upd;
       var noUpdate = noRows || updatable === 0 || batchSettled;
+      var updatablePkgs = noRows ? [] : rows.filter(function (r) { return r.hasUpdate === true; }).map(function (r) { return r.pkg; });
 
       var head = h('div', { style: S.bar },
         opBtn('opt', busy === 'optimize' ? '优化中…' : '翻译优化', busyNow || noOptimize, optimize,
@@ -503,13 +551,17 @@ window.__ModuleLoader__.load({
           noRevert ? (noRows ? '状态尚未读取完成' : '当前没有处于「已优化」状态的条目，无需还原') : '撤销全部已应用的改写'),
         opBtn('ref', busy === 'refresh' ? '刷新中…' : '刷新状态', busyNow, refresh,
           '重新取一次完整快照（状态 + 版本 + 更新检查）'),
-        !IS_SKILL
-          ? opBtn('all', busy === 'update:all' ? '批量更新中…' : '一键更新（' + updatable + '）', busyNow || noUpdate,
-              function () { updateAll(rows); },
-              noRows ? '状态尚未读取完成'
-                : (updatable === 0 ? '当前没有可更新的插件'
-                  : (batchSettled ? '本轮批量更新已完成；点「刷新状态」可重新判定' : '按顺序更新全部可更新插件')))
-          : null);
+        opBtn('all', busy === 'update:all' ? (IS_SKILL ? '技能更新中…' : '批量更新中…') : '一键更新（' + updatable + '）',
+          busyNow || noUpdate,
+          function () {
+            if (IS_SKILL) updateSkills(updatablePkgs);
+            else updateAll(rows);
+          },
+          noRows ? '状态尚未读取完成'
+            : (updatable === 0
+              ? (IS_SKILL ? '当前没有可更新的技能（非 git 目录没有远端可比）' : '当前没有可更新的插件')
+              : (batchSettled ? '本轮更新已完成；点「刷新状态」可重新判定'
+                : (IS_SKILL ? '按顺序 git 快进全部可更新技能' : '按顺序更新全部可更新插件')))));
 
       var revGap = hostRev !== '' && hostRev !== CLIENT_REV;
       var staleEl = (stale || revGap)
@@ -531,8 +583,9 @@ window.__ModuleLoader__.load({
             h('span', null, '已优化 ' + s.refined),
             h('span', null, '待应用 ' + s.toApply),
             h('span', null, '待生成文案 ' + s.pending),
-            !IS_SKILL ? h('span', null, '可更新 ' + s.upd) : null,
-            !IS_SKILL && s.unk ? h('span', null, '无法比对 ' + s.unk) : null,
+            h('span', { title: IS_SKILL ? '远端比本地新的 git 技能数' : '有更新的插件数' }, '可更新 ' + s.upd),
+            s.unk ? h('span', { title: IS_SKILL ? '是 git 仓库但远端查不到（不可比）' : '最新版本查询失败（不可比）' }, '无法比对 ' + s.unk) : null,
+            IS_SKILL && s.noRepo > 0 ? h('span', { title: '不是 git 仓库，没有远端可比' }, '本地目录 ' + s.noRepo) : null,
             IS_SKILL && s.bundled > 0 ? h('span', null, '随 DSH 提供 ' + s.bundled) : null,
             audit && (audit.counts.fact + audit.counts.inferred) > 0
               ? h('button', { type: 'button', style: S.mini, onClick: function () { setOnlyFlagged(!onlyFlagged); } },
@@ -540,13 +593,13 @@ window.__ModuleLoader__.load({
               : h('span', null, '审查 无发现'))
         : null;
 
-      // 技能视图不渲染批量更新卡片（它是插件专属动作的状态，别让两页看起来共用一份状态）
-      var batchEl = !IS_SKILL && batch && Array.isArray(batch.items) && batch.items.length > 0
+      // 两页各自渲染自己那一份：插件页读宿主侧的批量状态文件，技能页读本次 git 更新的结果
+      var batchEl = batch && Array.isArray(batch.items) && batch.items.length > 0
         ? h('div', { style: S.card },
             h('div', { style: { fontWeight: 600 } },
-              '批量更新' + (batch.running === true ? '（进行中 ' + (batch.index + 1) + '/' + batch.total + '）' : '（已完成）')),
+              (IS_SKILL ? '技能更新' : '批量更新') + (batch.running === true ? '（进行中 ' + (batch.index + 1) + '/' + batch.total + '）' : '（已完成）')),
             batch.items.map(function (it) {
-              var line = '· ' + it.pkg + '  [' + it.state + ']' + (it.message ? '  ' + it.message : '') + (it.refined === true ? '  精炼已保持' : '')
+              var line = '· ' + it.pkg + '  [' + (OUTCOME[it.state] || it.state) + ']' + (it.message ? '  ' + it.message : '') + (it.refined === true ? '  精炼已保持' : '')
               var d = it.delta
               var deltaLine = null
               if (d) {
@@ -571,7 +624,7 @@ window.__ModuleLoader__.load({
               h('th', { style: S.th }, IS_SKILL ? '技能' : '插件'),
               h('th', { style: S.th }, IS_SKILL ? '优化 · 描述' : '优化'),
               h('th', { style: S.th }, '版本'),
-              h('th', { style: S.th }, IS_SKILL ? '来源' : '最新'),
+              h('th', { style: S.th }, IS_SKILL ? '来源 / 远端' : '最新'),
               h('th', { style: S.th }, '操作'))),
             h('tbody', null, (onlyFlagged
               ? rows.filter(function (r) { return (r.issues || []).length > 0 || (r.findings || []).length > 0; })
@@ -598,7 +651,11 @@ window.__ModuleLoader__.load({
                   })()),
                 h('td', { style: S.td }, r.version || '—'),
                 h('td', { style: S.td }, IS_SKILL
-                  ? (r.source || '—') + (r.isGit ? ' · git 来源' : ' · 本地目录')
+                  ? (r.source || '—') + (r.isGit === true
+                    ? ' · ' + (r.hasUpdate === true ? '↑ 远端 ' + shortShaOf(r.remoteSha)
+                      : (r.hasUpdate === false ? '最新 ' + shortShaOf(r.localSha) : '未比对（' + (r.reason || '未知') + '）'))
+                      + (r.dirty > 0 ? ' · 本地改动 ' + r.dirty + ' 个文件' : '')
+                    : ' · 本地目录')
                   : (r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'))),
               ];
               var op = [];
@@ -607,7 +664,8 @@ window.__ModuleLoader__.load({
               // 本会话已处理过这一行：按结果暗下去（未变化/失败也不允许重复点击，重试先「刷新状态」）
               else if (finished) op.push(opBtn('u', outcomeLabel(finished), true, null,
                 (finished.message ? finished.message + ' · ' : '') + '本轮已处理；点「刷新状态」可重新判定'));
-              else if (upd) op.push(opBtn('u', '更新', false, function () { doUpdate(r.pkg); }, '更新到 ' + (r.latest || '最新版'), true));
+              else if (upd) op.push(opBtn('u', '更新', busyNow, function () { doUpdate(r.pkg); },
+                IS_SKILL ? 'git 快进到远端 ' + shortShaOf(r.remoteSha) : '更新到 ' + (r.latest || '最新版'), true));
               if (issues.length || (r.findings || []).length) op.push(h('button', { key: 'i', type: 'button', style: S.mini, onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); } }, '⚠ 详情'));
               cells.push(h('td', { style: S.td }, op.length ? op : null));
               return h('tr', { key: r.profileDir + '|' + r.pkg, style: r.installed === false ? S.dim : undefined }, cells);

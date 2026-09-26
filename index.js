@@ -7,7 +7,8 @@
  * 设计边界（见 docs/design-boundaries.md）
  * - 零第三方依赖；apply() 全量 try/catch，任何异常都不外抛（T1 自指崩溃防护）。
  * - 写 node_modules 内文件会被升级/重装覆盖（T2），因此每处写入都留 .dsh-locale.backup。
- * - 只做「精炼 + 汇总 + 报告」；更新检查 / 推荐 / 守护一律委托生态既有插件。
+ * - 只做「精炼 + 汇总 + 报告」；插件更新交给第一方 pluginManager 执行，技能更新只做 git 快进。
+ *   推荐 / 守护仍委托生态既有插件。
  * - 不注册 skill：本插件是插件形态，不是技能形态。
  *
  * 开关语义（T3）：bundle 启用 → apply() 应用精炼；停用 → dispose() 默认还原。
@@ -15,6 +16,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
@@ -949,6 +951,205 @@ export function auditPackages(ctx, profileDir) {
 //      → 改写它是**行为变更**：必须由用户显式点击，且写前留 .dsh-skill.backup 备份、可逐字节还原
 //   3. 发现规则是"仅顶层 <name>/SKILL.md 或 <name>.md"，嵌套的不会被发现
 
+// ───────────────────────── git：技能的「更新」─────────────────────────
+//
+// 技能不是 npm 包，没有 registry 可比版本；只有 **git 仓库形态**的技能才有更新可言。
+// 这里只用 git 自身的语义，不发明版本号：
+//   ls-remote      → 远端分支此刻指向哪个提交（只读，不动本地任何东西）
+//   pull --ff-only → 只做快进；本地分叉就如实失败，绝不产生合并提交或冲突标记
+//   工作区         → 有未提交修改时由 git 自己拒绝，我们把它的原话转述出来，不代你 stash
+//
+// 所有 git 调用都带 GIT_TERMINAL_PROMPT=0：宁可立刻失败，也不能让宿主的 HTTP 请求
+// 卡在凭据提示上（那会让整个设置页看起来死掉）。
+const GIT_BIN = process.env.DSH_GIT_BIN ?? 'git'
+const GIT_TIMEOUT_MS = 20000
+const PULL_TIMEOUT_MS = 60000
+const GIT_ENV = Object.assign({}, process.env, {
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_ASKPASS: '',
+  GCM_INTERACTIVE: 'Never',
+})
+
+/** 运行 git（异步，带限时）；永不抛错，失败也是一份可读结果。 */
+function gitRun(args, cwd, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value) => { if (settled !== true) { settled = true; resolve(value) } }
+    try {
+      execFile(GIT_BIN, args, {
+        cwd,
+        timeout: timeoutMs ?? GIT_TIMEOUT_MS,
+        env: GIT_ENV,
+        windowsHide: true,
+        maxBuffer: 4 * 1024 * 1024,
+      }, (error, stdout, stderr) => {
+        const failed = error !== null && error !== undefined
+        finish({
+          ok: failed !== true,
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+          timedOut: failed === true && (error.killed === true || (error.signal !== undefined && error.signal !== null)),
+        })
+      })
+    } catch (error) {
+      finish({ ok: false, stdout: '', stderr: String((error && error.message) || error), timedOut: false })
+    }
+  })
+}
+
+/** 同步版：只用于**本地**查询（不联网），免得为每个技能都开一圈 Promise。 */
+function gitSync(args, cwd, timeoutMs) {
+  try {
+    const out = execFileSync(GIT_BIN, args, {
+      cwd,
+      timeout: timeoutMs ?? GIT_TIMEOUT_MS,
+      env: GIT_ENV,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return { ok: true, stdout: String(out ?? '') }
+  } catch {
+    return { ok: false, stdout: '' }
+  }
+}
+
+/** 路径比较：Windows 上分隔符与大小写都不敏感。 */
+function samePath(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false
+  const norm = (p) => path.resolve(p).replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+  return norm(a) === norm(b)
+}
+
+/** 短提交号（对外展示用）。 */
+export function shortSha(sha) {
+  return typeof sha === 'string' && sha.length >= 8 ? sha.slice(0, 8) : (typeof sha === 'string' ? sha : '')
+}
+
+/**
+ * 一个技能目录的 git 事实（只读、本地、不问网络）。
+ * @param dir - 技能目录（不是 SKILL.md）
+ * @returns isGit 为 false 时只有这一个字段；否则给出仓库根、分支、HEAD、远端、未提交文件数
+ */
+export function skillRepoInfo(dir) {
+  const top = gitSync(['rev-parse', '--show-toplevel'], dir)
+  if (top.ok !== true) return { isGit: false }
+  const repoRoot = top.stdout.trim()
+  const branch = gitSync(['rev-parse', '--abbrev-ref', 'HEAD'], dir).stdout.trim()
+  const status = gitSync(['status', '--porcelain'], dir)
+  return {
+    isGit: true,
+    repoRoot,
+    /** 仓库根就是这个技能目录吗？否则一次 pull 会连带改掉同仓库里的其他技能。 */
+    owned: samePath(repoRoot, dir),
+    branch: branch === 'HEAD' ? '' : branch,
+    head: gitSync(['rev-parse', 'HEAD'], dir).stdout.trim(),
+    url: gitSync(['remote', 'get-url', 'origin'], dir).stdout.trim(),
+    upstream: gitSync(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], dir).stdout.trim(),
+    dirty: status.ok === true ? status.stdout.split('\n').filter((line) => line.trim() !== '').length : 0,
+  }
+}
+
+const REMOTE_TTL_OK_MS = 5 * 60 * 1000
+const REMOTE_TTL_FAIL_MS = 30 * 1000
+const remoteShaCache = new Map()
+
+/**
+ * 远端分支现在指向哪个提交；带 TTL 缓存，失败不猜（sha 为 null 时 reason 说明为什么）。
+ * @param row - 含 repoRoot/branch/url 的技能行
+ * @param force - true 时绕过缓存（「刷新状态」走这条）
+ */
+export async function remoteShaFor(row, force) {
+  const key = String(row.repoRoot) + '|' + String(row.branch)
+  const hit = remoteShaCache.get(key)
+  if (force !== true && hit !== undefined) {
+    const ttl = hit.sha === null ? REMOTE_TTL_FAIL_MS : REMOTE_TTL_OK_MS
+    if (Date.now() - hit.at < ttl) return hit
+  }
+  let entry
+  if (row.url === '') {
+    entry = { sha: null, reason: '未配置 origin 远端', at: Date.now() }
+  } else if (row.branch === '') {
+    entry = { sha: null, reason: '处于游离 HEAD，未知分支', at: Date.now() }
+  } else {
+    const r = await gitRun(['ls-remote', '--heads', 'origin', 'refs/heads/' + row.branch], row.repoRoot)
+    const first = r.stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '')[0] ?? ''
+    const sha = first.split(/\s+/)[0] ?? ''
+    if (r.ok === true && /^[0-9a-f]{7,40}$/.test(sha)) {
+      entry = { sha, reason: null, at: Date.now() }
+    } else {
+      const firstErr = r.stderr.split('\n').map((line) => line.trim()).filter((line) => line !== '')[0] ?? '未知原因'
+      entry = { sha: null, reason: r.timedOut === true ? '远端查询超时' : ('远端不可达：' + firstErr), at: Date.now() }
+    }
+  }
+  remoteShaCache.set(key, entry)
+  return entry
+}
+
+/**
+ * 给技能行补上「远端是否已变化」。只对 git 行联网，其余原样返回。
+ * @param rows - collectSkills 的结果
+ * @param force - 绕过远端缓存
+ */
+export async function enrichSkillUpdates(rows, force) {
+  return Promise.all(rows.map(async (row) => {
+    if (row.isGit !== true) return Object.assign({}, row, { hasUpdate: null, remoteSha: null })
+    const info = await remoteShaFor(row, force)
+    const hasUpdate = info.sha === null ? null : (row.localSha !== '' && info.sha !== row.localSha)
+    return Object.assign({}, row, { remoteSha: info.sha, hasUpdate, reason: info.reason })
+  }))
+}
+
+/** git 的失败原话 → 人话；永远保留原话，不编造结论。 */
+export function describeGitFailure(result) {
+  const text = (String(result.stderr) + '\n' + String(result.stdout)).trim()
+  const first = text.split('\n').map((line) => line.trim()).filter((line) => line !== '')[0] ?? ''
+  if (result.timedOut === true) return '超时：git 未在限时内返回（可能仍在后台执行）'
+  if (/not possible to fast-forward|divergent branches|non-fast-forward/i.test(text)) return '本地与远端已分叉，不能快进 —— 需要你手动处理（本插件不会自动合并）'
+  if (/local changes|would be overwritten/i.test(text)) return '本地有未提交修改，快进会覆盖它们，git 已中止 —— 请先提交或暂存（本插件不动你的工作区）'
+  if (/could not resolve host|unable to access|connection|network|authentication/i.test(text)) return '远端不可达（网络或凭据）：' + first
+  return first === '' ? 'git 失败（无输出）' : first
+}
+
+/** 单个技能的更新：只做快进；每一种「不能更新」都给得出理由。 */
+async function updateOneSkill(row, pkg) {
+  if (row === undefined) return { pkg, state: 'failed', message: '技能不存在（可能已被移除）' }
+  if (row.isGit !== true) return { pkg, state: 'failed', message: '不是 git 仓库：本地目录无远端可比，需要你手动维护' }
+  if (row.repoOwned !== true) return { pkg, state: 'failed', message: '所在仓库是 ' + row.repoRoot + '（含多个技能）：请在仓库根更新，本插件不代你动整个仓库' }
+  if (row.url === '') return { pkg, state: 'failed', message: '没有 origin 远端' }
+  const before = row.localSha
+  const args = ['pull', '--ff-only']
+  if (row.upstream === '') args.push('origin', row.branch)
+  const pull = await gitRun(args, row.repoRoot, PULL_TIMEOUT_MS)
+  const after = gitSync(['rev-parse', 'HEAD'], row.repoRoot).stdout.trim()
+  if (pull.ok === true) {
+    if (after !== '' && before !== '' && after !== before) {
+      return { pkg, state: 'updated', message: shortSha(before) + ' → ' + shortSha(after), from: before, to: after }
+    }
+    return { pkg, state: 'unchanged', message: '已是最新（' + shortSha(before) + '）', from: before, to: after === '' ? before : after }
+  }
+  return { pkg, state: 'failed', message: describeGitFailure(pull), from: before, to: after }
+}
+
+/**
+ * 更新 git 形态的技能。只快进，不合并，不动工作区。
+ * @param pkgs - 技能名列表（行里的 pkg）
+ * @returns 每个技能一项 {pkg, state: updated|unchanged|failed, message, from, to}
+ */
+export async function updateSkillRepos(pkgs) {
+  const wanted = []
+  for (const raw of Array.isArray(pkgs) ? pkgs : []) {
+    const name = skillBaseName(String(raw))
+    if (name !== '' && !wanted.includes(name)) wanted.push(name)
+  }
+  // collectSkills 只用第一方服务的可见性来补「随 DSH 提供」的行；更新路径不需要它。
+  const rows = collectSkills({ get: () => undefined })
+  const results = []
+  for (const pkg of wanted) {
+    results.push(await updateOneSkill(rows.find((r) => r.pkg === pkg), pkg))
+  }
+  return results
+}
+
 /** DSH 的技能根目录（按优先级）。rank 越小优先级越高。 */
 function skillRoots() {
   const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
@@ -1339,7 +1540,23 @@ export function collectSkills(ctx) {
       frontmatter: top.frontmatter,
       dirMismatch: top.name !== top.dirName,
       nestedSkillFiles: top.nestedSkillFiles,
-      isGit: top.isGit,
+      // git 事实：技能不是 npm 包，「更新」只对 git 形态有意义
+      ...(() => {
+        const repo = top.isGit === true ? skillRepoInfo(path.dirname(top.path)) : { isGit: false }
+        return {
+          isGit: repo.isGit === true,
+          repoRoot: repo.isGit === true ? repo.repoRoot : null,
+          repoOwned: repo.isGit === true ? repo.owned === true : false,
+          repoUrl: repo.isGit === true ? repo.url : '',
+          branch: repo.isGit === true ? repo.branch : '',
+          upstream: repo.isGit === true ? repo.upstream : '',
+          localSha: repo.isGit === true ? repo.head : '',
+          dirty: repo.isGit === true ? repo.dirty : 0,
+          // 远端比对由 enrichSkillUpdates 补齐（要联网）；这里先如实置空
+          remoteSha: null,
+          hasUpdate: null,
+        }
+      })(),
       shadowed: shadowed.map((s) => 'rank ' + s.rank + ' · ' + s.path),
     })
   }
@@ -2007,7 +2224,9 @@ export function registerBridge(ctx, dirs) {
           path: BRIDGE_PREFIX + '/skills',
           handler: async (req, res) => {
             try {
-              const rows = collectSkills(ctx)
+              const body = await readJsonBody(req)
+              // force（「刷新状态」）绕过远端比对缓存；只有 git 形态的技能需要联网
+              const rows = await enrichSkillUpdates(collectSkills(ctx), body !== undefined && body.force === true)
               const ignored = new Set(readIgnored())
               const visible = auditSkills(rows).filter((f) => !ignored.has(f.id))
               const byPkg = new Map()
@@ -2032,6 +2251,24 @@ export function registerBridge(ctx, dirs) {
                 },
                 value: rows.map((r) => Object.assign({}, r, { issues: [], findings: byPkg.get(r.pkg) ?? [] })),
               })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/update-skills',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              if (pkgs === null || pkgs.length === 0) {
+                writeJson(res, 200, { ok: false, code: 'bad-request', message: '需要非空的 pkgs 列表（技能名）' })
+                return
+              }
+              // 只做 git 快进（pull --ff-only）：等真实结果再回，客户端据此把按钮按结果暗下去
+              writeJson(res, 200, { ok: true, value: await updateSkillRepos(pkgs) })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
