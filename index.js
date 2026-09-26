@@ -1,286 +1,220 @@
 /**
- * skills-summarize-audit-skill — minimal dsh bundle shim.
+ * dsh-audit-skills — DSH 插件体系审查（宿主半体）
  *
- * The only code this package ships. Registers a read-only skill provider on
- * `ctx.skills` that serves the SKILL.md bundle at this package root.
+ * 主要功能：把插件页（内置 Plugins 页 / 侧边栏）的说明文字精炼为中文。
+ * 命名约定（不可违反）：title 保留原包名，中文名以全角括号附加，否则无法识别原插件。
  *
- * Deliberate boundaries:
- * - Registers no tools, manages no credentials, performs no network requests.
- * - Injects no resident system prompt: the skill appears in the catalog as
- *   name + description and loads only when invoked (progressive disclosure).
+ * 设计边界（见 docs/design-boundaries.md）
+ * - 零第三方依赖；apply() 全量 try/catch，任何异常都不外抛（T1 自指崩溃防护）。
+ * - 写 node_modules 内文件会被升级/重装覆盖（T2），因此每处写入都留 .dsh-locale.backup。
+ * - 只做「精炼 + 汇总 + 报告」；更新检查 / 推荐 / 守护一律委托生态既有插件。
+ * - 不注册 skill：本插件是插件形态，不是技能形态。
  *
- * The provider follows the same list/get contract as
- * `@deepseek-ai/dsh-skill-filesystem`, so bundled skills behave like
- * filesystem skills: bodies are re-read on each get() and relative
- * references/scripts/ paths resolve against the skill's own directory.
+ * 开关语义（T3）：bundle 启用 → apply() 应用精炼；停用 → dispose() 默认还原。
  */
-
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'dsh-audit-skills'
-export const inject = ['skills']
+
+/** 无需外部服务即可工作；不注入任何阻塞型服务。 */
+export const inject = []
+
+export const Config = z.object({
+  /** bundle 启用时自动应用精炼结果。 */
+  autoApply: z.boolean().default(true),
+  /** bundle 停用时还原已写入的 locale 文件。 */
+  revertOnDisable: z.boolean().default(true),
+  /** 目标 profile 目录；留空按 DSH_HOME 推断并默认 desktop profile。 */
+  profileDir: z.string().default(''),
+  /** 额外扫描的 profile 目录（多 profile 用户）。 */
+  extraProfileDirs: z.array(z.string()).default([]),
+})
 
 const PACKAGE_ROOT = fileURLToPath(new URL('./', import.meta.url))
-const SKILL_FILE = join(PACKAGE_ROOT, 'SKILL.md')
-const PROVIDER_NAME = 'dsh-audit-skills'
-// Packaged skills rank below project/user/custom roots (100–500) so a user's
-// own skill with the same name wins; matches the bundled rank used by
-// @deepseek-ai/dsh-skill.
-const PACK_RANK = 600
-const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const CATALOG_FILE = path.join(PACKAGE_ROOT, 'references', 'dsh-plugin-locale-catalog.json')
+const BACKUP_SUFFIXES = ['.dsh-locale.backup', '.dsh-locale.bak']
+const LOCALE_EXPORT_KEY = './locale/*'
+const LOCALE_EXPORT_VALUE = './locale/*'
 
-const TRUE_FORMS = new Set(['true', 'yes', 'on', '1'])
-const FALSE_FORMS = new Set(['false', 'no', 'off', '0'])
+/** 读取精炼目录；任何失败都返回空目录而不是抛错。 */
+export function readCatalog() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf8'))
+    return Array.isArray(raw.entries) ? raw.entries : []
+  } catch {
+    return []
+  }
+}
 
-/**
- * Parse YAML frontmatter: plain scalars, quoted values (including multiline),
- * `|`/`>` block scalars with chomping/indent indicators, and inline comments.
- * Returns `{ fields, body }` or `undefined` when the file is not a valid
- * frontmatter document.
- */
-function parseSkillText(text) {
-  if (typeof text !== 'string') return undefined
-  // Strip a UTF-8 BOM; it silently breaks the `---` opener on Windows.
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
-  if (!text.startsWith('---')) return undefined
-  const firstNewline = text.indexOf('\n')
-  if (firstNewline < 0) return undefined
-  const closing = findClosingFrontmatter(text, firstNewline + 1)
-  if (closing < 0) return undefined
-  const lines = text.slice(firstNewline + 1, closing).split('\n')
-  const fields = Object.create(null)
-  let i = 0
-  while (i < lines.length) {
-    const trimmed = lines[i].trim()
-    if (trimmed === '' || trimmed.startsWith('#')) { i += 1; continue }
-    const match = /^([A-Za-z0-9_-]+):(.*)$/.exec(trimmed)
-    if (match === null) { i += 1; continue }
-    const key = match[1]
-    const rest = stripInlineComment(match[2].trim())
-    const blockStyle = /^[|>][-+]?[0-9]*$/.test(rest) ? rest[0] : null
-    if (blockStyle !== null) {
-      const block = []
-      i += 1
-      while (i < lines.length && (lines[i].trim() === '' || /^\s+\S/.test(lines[i]))) {
-        block.push(lines[i].trim())
-        i += 1
+/** 推断 profile 目录：显式配置 > DSH_HOME > ~/.dsh，默认 desktop。 */
+export function resolveProfileDirs(config = {}) {
+  const dirs = []
+  const push = (p) => {
+    if (typeof p === 'string' && p !== '' && !dirs.includes(p)) dirs.push(p)
+  }
+  push(config.profileDir)
+  if (Array.isArray(config.extraProfileDirs)) for (const p of config.extraProfileDirs) push(p)
+  if (dirs.length === 0) {
+    const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+    push(path.join(home, 'profiles', 'desktop'))
+  }
+  return dirs
+}
+
+/** 该 profile 里已安装的插件包名与启用态。 */
+function readProfileManifest(profileDir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'))
+    return {
+      dependencies: Object.keys(pkg.dependencies ?? {}),
+      bundles: Array.isArray(pkg.dsh?.profile?.bundles) ? pkg.dsh.profile.bundles : [],
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function backupOnce(file) {
+  const b = file + BACKUP_SUFFIXES[0]
+  if (!fs.existsSync(b)) fs.copyFileSync(file, b)
+  return b
+}
+
+function writeJson(file, value) {
+  if (fs.existsSync(file)) backupOnce(file)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
+}
+
+/** 单包状态：是否安装 / 启用 / 已有本插件精炼 / 当前中文标题。 */
+export function inspectPackage(profileDir, entry) {
+  const dir = path.join(profileDir, 'node_modules', ...entry.pkg.split('/'))
+  const manifest = readProfileManifest(profileDir)
+  const enabled = manifest ? manifest.bundles.includes(entry.pkg) : undefined
+  const installed = fs.existsSync(path.join(dir, 'package.json'))
+  let localized = false
+  let title = null
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(dir, 'locale', 'zh.json'), 'utf8'))
+    title = j?.meta?.title ?? null
+    localized = typeof title === 'string' && title.length > 0
+  } catch {
+    localized = false
+  }
+  return { pkg: entry.pkg, installed, enabled, localized, title }
+}
+
+/** 汇总：只读，不写任何文件。 */
+export function collectStatus(profileDirs) {
+  const entries = readCatalog()
+  const dirs = Array.isArray(profileDirs) ? profileDirs : [profileDirs]
+  const out = []
+  for (const profileDir of dirs) {
+    for (const entry of entries) {
+      try {
+        out.push(Object.assign({ profileDir }, inspectPackage(profileDir, entry)))
+      } catch {
+        /* 单条失败不影响整表 */
       }
-      // Folded scalars (>) collapse single newlines between non-blank lines;
-      // literal scalars (|) keep every line break.
-      let value = blockStyle === '>' ? foldBlock(block) : block.join('\n')
-      // Chomping: default clip keeps one trailing newline, `|-`/`>-` strip
-      // them, `|+`/`>+` keep all.
-      if (rest.includes('-')) value = value.replace(/\n+$/, '')
-      else if (!rest.includes('+')) value = value.replace(/\n+$/, '\n')
-      fields[key] = value
-    } else if (rest === '') {
-      // Explicit null value; never swallow following indented lines.
-      fields[key] = ''
-      i += 1
-    } else {
-      fields[key] = readValue(rest, lines, i, (index) => { i = index })
-      i += 1
     }
-  }
-  return { fields, body: text.slice(closing + 4).trim() }
-}
-
-function findClosingFrontmatter(text, start) {
-  let lineStart = start
-  while (lineStart <= text.length) {
-    const nextNewline = text.indexOf('\n', lineStart)
-    const lineEnd = nextNewline < 0 ? text.length : nextNewline
-    if (text.slice(lineStart, lineEnd).replace(/\r$/, '') === '---') return lineStart
-    if (nextNewline < 0) return -1
-    lineStart = nextNewline + 1
-  }
-  return -1
-}
-
-/** Continue a quoted scalar onto following lines until its quote closes. */
-function readValue(first, lines, fromIndex, advance) {
-  const quote = first[0] === '"' || first[0] === "'" ? first[0] : null
-  if (quote === null || isQuoteClosed(first, quote)) return first
-  let value = first
-  let i = fromIndex + 1
-  while (i < lines.length) {
-    const nextLine = lines[i].trim()
-    if (nextLine === '') break
-    value += '\n' + nextLine
-    i += 1
-    if (isQuoteClosed(value, quote)) break
-  }
-  advance(i - 1)
-  return value
-}
-
-function isQuoteClosed(value, quote) {
-  if (value.length < 2 || value[value.length - 1] !== quote) return false
-  if (quote === '"') {
-    let backslashes = 0
-    for (let j = value.length - 2; j >= 0 && value[j] === '\\'; j -= 1) backslashes += 1
-    return backslashes % 2 === 0
-  }
-  return value[value.length - 2] !== quote
-}
-
-function foldBlock(block) {
-  let out = ''
-  let pendingBlank = false
-  for (const line of block) {
-    if (line === '') { pendingBlank = true; continue }
-    if (out !== '') {
-      out += pendingBlank ? '\n' : ' '
-    }
-    out += line
-    pendingBlank = false
   }
   return out
 }
 
-/** Strip a trailing ` # comment` that is outside any quoted value. */
-function stripInlineComment(value) {
-  const quote = value[0] === '"' || value[0] === "'" ? value[0] : null
-  if (quote !== null) {
-    for (let k = 1; k < value.length; k += 1) {
-      if (value[k] === quote && !(quote === '"' && value[k - 1] === '\\') && !(quote === "'" && value[k + 1] === "'")) {
-        const tail = value.slice(k + 1)
-        return /^\s+#/.test(tail) ? value.slice(0, k + 1) : value
+/** 应用精炼：写入 locale/{en,zh}.json，必要时补 exports 的 ./locale/*。幂等，不抛错。 */
+export function applyLocale(profileDirs, options = {}) {
+  const entries = options.entries ?? readCatalog()
+  const dirs = Array.isArray(profileDirs) ? profileDirs : [profileDirs]
+  const results = []
+  for (const profileDir of dirs) {
+    for (const entry of entries) {
+      try {
+        const dir = path.join(profileDir, 'node_modules', ...entry.pkg.split('/'))
+        const pkgFile = path.join(dir, 'package.json')
+        if (!fs.existsSync(pkgFile)) {
+          results.push({ pkg: entry.pkg, state: 'skipped-not-installed' })
+          continue
+        }
+        const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
+        let exportNote = 'no-exports-map'
+        const hasExports = pkg.exports !== undefined && typeof pkg.exports === 'object' && pkg.exports !== null && !Array.isArray(pkg.exports)
+        const hasLocaleExport = hasExports && Object.keys(pkg.exports).some((k) => k.startsWith('./locale'))
+        if (hasExports && !hasLocaleExport) {
+          backupOnce(pkgFile)
+          pkg.exports[LOCALE_EXPORT_KEY] = LOCALE_EXPORT_VALUE
+          fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n')
+          exportNote = 'added-locale-export'
+        } else if (hasExports) {
+          exportNote = 'already-exported'
+        }
+        writeJson(path.join(dir, 'locale', 'en.json'), { meta: entry.en })
+        writeJson(path.join(dir, 'locale', 'zh.json'), { meta: entry.zh })
+        results.push({ pkg: entry.pkg, state: 'applied', exportNote })
+      } catch (error) {
+        results.push({ pkg: entry.pkg, state: 'failed', message: String(error?.message ?? error) })
       }
     }
-    return value
   }
-  const m = /\s+#/.exec(value)
-  return m === null ? value : value.slice(0, m.index)
+  return results
 }
 
-function scalar(value) {
-  if (value === undefined) return undefined
-  const v = value.trim()
-  if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
-    const inner = v.slice(1, -1)
-    return v[0] === '"' ? inner.replace(/\\"/g, '"').replace(/\\\\/g, '\\') : inner.replace(/''/g, "'")
-  }
-  return v
-}
-
-function parseBoolean(value) {
-  const normalized = String(value).trim().toLowerCase()
-  if (TRUE_FORMS.has(normalized)) return true
-  if (FALSE_FORMS.has(normalized)) return false
-  return undefined
-}
-
-function parseInvocation(fields) {
-  const disabled = parseBoolean(fields['disable-model-invocation'])
-  const userInvocable = parseBoolean(fields['user-invocable'])
-  return {
-    modelInvocable: disabled === undefined ? true : !disabled,
-    userInvocable: userInvocable === undefined ? true : userInvocable,
-  }
-}
-
-function parseMetadata(fields) {
-  const metadata = {}
-  for (const [key, value] of Object.entries(fields)) {
-    if (['name', 'description', 'whenToUse', 'disable-model-invocation', 'user-invocable'].includes(key)) continue
-    if (value === undefined) continue
-    metadata[key] = value
-  }
-  return Object.keys(metadata).length === 0 ? undefined : metadata
-}
-
-class PackSkillProvider {
-  constructor(ctx) {
-    this.ctx = ctx
-    this.name = PROVIDER_NAME
-  }
-
-  async list() {
-    const skill = await this.readSkill(SKILL_FILE)
-    if (skill === undefined) {
-      this.ctx.logger?.warn?.(`${PROVIDER_NAME}: no valid SKILL.md at ${SKILL_FILE}; skill pack skipped`)
-      return []
-    }
-    if (!SKILL_NAME.test(skill.name)) {
-      this.ctx.logger?.warn?.(`${PROVIDER_NAME}: skill ${JSON.stringify(skill.name)} ignored: invalid skill name`)
-      return []
-    }
-    return [{
-      name: skill.name,
-      description: skill.description,
-      ...(skill.whenToUse !== undefined ? { whenToUse: skill.whenToUse } : {}),
-      invocation: skill.invocation,
-      source: 'bundled',
-      provider: PROVIDER_NAME,
-      rank: PACK_RANK,
-      locator: { dir: PACKAGE_ROOT },
-      resourceBase: { kind: 'directory', path: PACKAGE_ROOT },
-      path: SKILL_FILE,
-      ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
-    }]
-  }
-
-  async get(candidate) {
-    // Only serve candidates this provider published.
-    if (candidate?.provider !== PROVIDER_NAME || typeof candidate?.locator?.dir !== 'string') return undefined
-    const skill = await this.readSkill(join(candidate.locator.dir, 'SKILL.md'))
-    if (skill === undefined || skill.name !== candidate.name) return undefined
-    return {
-      name: skill.name,
-      description: skill.description,
-      ...(skill.whenToUse !== undefined ? { whenToUse: skill.whenToUse } : {}),
-      invocation: skill.invocation,
-      source: candidate.source,
-      provider: candidate.provider,
-      resourceBase: candidate.resourceBase,
-      path: candidate.path,
-      ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
-      content: skill.body,
+/** 还原：从 .dsh-locale.backup 恢复。不抛错。 */
+export function revertLocale(profileDirs, options = {}) {
+  const entries = options.entries ?? readCatalog()
+  const dirs = Array.isArray(profileDirs) ? profileDirs : [profileDirs]
+  const results = []
+  for (const profileDir of dirs) {
+    for (const entry of entries) {
+      try {
+        const dir = path.join(profileDir, 'node_modules', ...entry.pkg.split('/'))
+        let restored = 0
+        const files = [
+          path.join(dir, 'package.json'),
+          path.join(dir, 'locale', 'en.json'),
+          path.join(dir, 'locale', 'zh.json'),
+        ]
+        for (const file of files) {
+          for (const suffix of BACKUP_SUFFIXES) {
+            const b = file + suffix
+            if (fs.existsSync(b)) {
+              fs.copyFileSync(b, file)
+              fs.unlinkSync(b)
+              restored += 1
+            }
+          }
+        }
+        results.push({ pkg: entry.pkg, state: restored > 0 ? 'restored' : 'no-backup', restored })
+      } catch (error) {
+        results.push({ pkg: entry.pkg, state: 'failed', message: String(error?.message ?? error) })
+      }
     }
   }
+  return results
+}
 
-  async readSkill(file) {
-    let raw
+/** 宿主半体入口：按配置应用，绝不抛错。 */
+export function apply(ctx, config = {}) {
+  const dirs = resolveProfileDirs(config)
+  ctx.effect(() => {
     try {
-      raw = await readFile(file, 'utf8')
+      if (config.autoApply !== false) {
+        const results = applyLocale(dirs)
+        const applied = results.filter((r) => r.state === 'applied').length
+        ctx.logger?.info?.('dsh-audit-skills: applied plugin description localization, wrote ' + applied + ' item(s)')
+      }
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return undefined
-      throw error
+      ctx.logger?.warn?.('dsh-audit-skills: apply failed, degraded to read-only: ' + String(error?.message ?? error))
     }
-    const parsed = parseSkillText(raw)
-    if (parsed === undefined) {
-      this.ctx.logger?.warn?.(`${PROVIDER_NAME}: ${file} ignored: missing YAML frontmatter`)
-      return undefined
+    return () => {
+      try {
+        if (config.revertOnDisable !== false) revertLocale(dirs)
+      } catch (error) {
+        ctx.logger?.warn?.('dsh-audit-skills: revert failed: ' + String(error?.message ?? error))
+      }
     }
-    const { fields, body } = parsed
-    const name = scalar(fields.name)
-    const description = scalar(fields.description)
-    if (name === undefined || description === undefined || name === '' || description === '') {
-      this.ctx.logger?.warn?.(`${PROVIDER_NAME}: ${file} ignored: frontmatter requires name and description`)
-      return undefined
-    }
-    const whenToUse = scalar(fields.whenToUse)
-    return {
-      name,
-      description,
-      ...(whenToUse !== undefined ? { whenToUse } : {}),
-      invocation: parseInvocation(fields),
-      ...(parseMetadata(fields) !== undefined ? { metadata: parseMetadata(fields) } : {}),
-      body,
-    }
-  }
+  }, 'dsh-audit-skills: plugin description localization')
 }
-
-export const apply = (ctx) => {
-  if (ctx?.skills?.registerProvider === undefined) {
-    ctx?.logger?.warn?.(`${PROVIDER_NAME}: ctx.skills.registerProvider unavailable; skill pack not registered`)
-    return
-  }
-  ctx.skills.registerProvider(() => new PackSkillProvider(ctx))
-}
-
-// Parser helpers exported for tests and reuse.
-export { parseSkillText, scalar, parseInvocation }

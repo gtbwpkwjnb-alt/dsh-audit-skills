@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-audit-skills",
+    "description": "Reviews installed DSH plugins: refines plugin-page text into clear Chinese (package name preserved, Chinese name in parentheses), summarizes plugin status, and flags conflicts. Read-only by default; it never disables other plugins."
+  }
+}

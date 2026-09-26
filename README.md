@@ -21,7 +21,11 @@ dsh plugin --profile web add github:gtbwpkwjnb-alt/dsh-audit-skills
 github:gtbwpkwjnb-alt/dsh-audit-skills
 ```
 
-安装后 **重启 DSH**，会话技能目录出现 `dsh-audit-skills`。
+安装后 **重启 DSH**：侧边栏 **Plugins 页**出现 `dsh-audit-skills（插件审查）` 卡片，
+卡片上的开关就是效果开关——**启用即应用精炼，停用即还原**。
+
+> v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。宿主半体已实现并可本地验证；
+> 设置页按钮组与侧边栏卡片见 `docs/client-ui-plan.md`，待真机验证后发布。
 
 ---
 
