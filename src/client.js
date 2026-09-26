@@ -1,6 +1,21 @@
 /**
- * dsh-audit-skills — 客户端半体（Web）
+ * dsh-audit-skills — 客户端半体【源码，尚不可直接加载】
  *
+ * ⚠️ 重要（v1.2.1 事故结论）：
+ * DSH 的客户端半体必须是被打包成**传统脚本**的产物（rolldown/tsdown 输出），
+ * 加载方式等同 <script>，没有 type="module"。
+ * 直接以裸 ESM（含顶层 import）作为 client.js 会抛
+ *   Uncaught SyntaxError: Cannot use import statement outside a module
+ * 且该失败是**致命**的：web 端 "1 entry did not activate" → web-boot 崩溃，
+ * 整个 GUI 起不来（宿主半体失败只是 warning，两者严重度不同）。
+ *
+ * 因此本文件默认不随包发布、也不在 package.json 里声明 dsh.client。
+ * 恢复路径：引入 rolldown/tsdown 构建链，产出 bundle 后的 lib/client.js，
+ * 再在 package.json 声明
+ *   "dsh.client": { "platform": "web", "inject": [...] }
+ * 与 "exports": { "./client": "./lib/client.js" }。
+ *
+ * 原始设计：
  * 三个入口，全部经 ErrorBoundary 隔离：渲染失败只影响本插件，不拖垮设置页/插件页。
  * - settings.section  → 设置页「技能审查」分区（按钮组 + 状态表）
  * - plugins.row.config → 插件页本插件行的卡片（同一面板）

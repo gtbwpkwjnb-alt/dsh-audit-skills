@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.2.1 — 2026-09-26 · 🔥 事故修复：客户端半体导致 web-boot 崩溃
+
+### 事故
+
+v1.2.0 安装后重启，**DSH GUI 无法启动**。
+
+```
+crash-…-web-boot.log
+Error: web boot: 1 entry did not activate
+dsh-audit-skills: import failed (see console for the import error)
+
+renderer console:
+dsh-app://app/plugins/??dsh-audit-skills/client.js:11
+Uncaught SyntaxError: Cannot use import statement outside a module
+```
+
+### 根因
+
+**DSH 的客户端半体必须是打包后的传统脚本**（rolldown/tsdown 产物），加载方式等同
+`<script>`，没有 `type="module"`。v1.2.0 直接以**裸 ESM**（顶层 `import ... from 'react'`）
+作为 `client.js`，浏览器按传统脚本解析 → 语法错误 → 该 client entry 无法激活。
+
+### 一个被纠正的错误认知
+
+此前我以为"某个 bundle 加载失败只会产生 warning"。这只对**宿主半体**成立。
+**客户端/web 半体失败是致命的**：`web boot: 1 entry did not activate` → 整个 GUI 起不来。
+
+### 修复
+
+- **移除 `dsh.client` 声明与 `./client` export** → 不再加载客户端半体，恢复为 v1.1.0 的
+  纯宿主形态（已本机实测、不会崩）。
+- 客户端源码移入 `src/client.js`，文件头写明"**尚不可直接加载**"及恢复路径（需引入构建链）。
+- 事故恢复手册（用户侧）：在 `~/.dsh/profiles/<profile>/package.json` 的
+  `dsh.profile.bundles` 中删掉本插件行 → 下次启动即不再加载。
+
+### 状态
+
+宿主半体能力（插件页中文化、开关即应用/还原、新装插件自动纳入）**不受影响，继续可用**。
+按钮式 UI 需先补构建链，见 `docs/client-ui-plan.md`。
+
 ## 1.2.0 — 2026-09-26
 
 ### 客户端半体（需真机验证）

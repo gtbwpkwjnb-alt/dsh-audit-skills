@@ -26,16 +26,16 @@ github:gtbwpkwjnb-alt/dsh-audit-skills
 
 > v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。
 >
-> **v1.2.0** 加入三个 UI 入口，全部经 ErrorBoundary 隔离：
-> - 设置页 **「技能审查」分区** —— 按钮组：应用翻译精炼 / 还原翻译 / 刷新状态
-> - **插件页本插件卡片** —— 与设置页同一面板（key `dsh-audit-skills#dsh-audit-skills`）
-> - **侧边栏卡片**（可选，需 `dsh-better-sidebar`）—— 不存在时静默跳过
+> **v1.2.1 —— UI 半体已撤回，本插件回归纯宿主形态。**
 >
-> 按钮作用：**应用翻译精炼** 会扫描 profile，把新装/未精炼插件的说明写入 `locale/{en,zh}.json`；
-> 新装插件后**只需点一次这个按钮**，无需重装本插件。
+> v1.2.0 曾加入设置页按钮组 / 插件页卡片 / 侧边栏卡片，但**导致 DSH GUI 无法启动**并已撤回：
+> DSH 的客户端半体必须是被打包成**传统脚本**的产物，而 v1.2.0 发的是裸 ESM，
+> 浏览器抛 `Cannot use import statement outside a module` → `web boot: 1 entry did not activate`。
+> 完整复盘见 `docs/incident-web-boot-crash.md`。客户端源码留在 `src/client.js`（标注"尚不可直接加载"）。
 >
-> ⚠️ 宿主半体已本机实测；**UI 半体待真机验证**（见 `docs/client-ui-plan.md`）。
-> 若设置页异常，在 Plugins 页停用本插件即可完全恢复。
+> **当前可用能力（宿主半体，已本机实测）**：启用本插件即自动把已装插件的插件页说明精炼为中文；
+> **新装插件后停用再启用本插件**（或重启 DSH）即会自动补上，无需重装。
+> 开启/关闭开关就是效果开关：关闭即还原。
 
 ---
 
