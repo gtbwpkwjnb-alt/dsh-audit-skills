@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.3.0 — 2026-09-26 · 客户端半体以**正确格式**回归 + 发布闸门
+
+### 根因彻底解决
+
+v1.2.1 复盘时发现：DSH 的客户端**不是**必须用打包器产出——生态插件的 `client.js` 用的是
+**手写即可的传统脚本格式**：
+
+```js
+window.__ModuleLoader__.load({
+  id: '<plugin-id>',
+  factory: (require) => {
+    var module = { exports: {} }
+    var react = require('react')
+    // ...
+    exports.apply = apply
+    exports.inject = inject
+    return module.exports
+  },
+})
+```
+
+关键是**不得有顶层 `import`**，依赖经 factory 收到的 `require` 获取。
+
+### 新增发布闸门 `scripts/preflight-client.mjs`
+
+以**传统脚本**方式在 Node `vm` 中执行 `client.js`——任何顶层 `import/export` 都会当场抛
+`SyntaxError`，正是 v1.2.0 崩溃的那个错误。随后校验 `load()` 调用、`factory` 执行、
+`exports` 契约（name/inject/apply）以及 `apply()` 不抛错。
+
+**此后任何客户端改动，必须先过此闸门才允许发布。**
+
+### 恢复的能力
+
+- 设置页 **「技能审查」分区**：应用翻译精炼 / 还原翻译 / 刷新状态 + 状态表
+- **插件页本插件卡片**（key `dsh-audit-skills#dsh-audit-skills`）
+- **侧边栏卡片**（可选，需 dsh-better-sidebar；缺失时静默跳过）
+- 全部经 ErrorBoundary 隔离；三个入口的注册各自 try/catch，失败只影响本插件
+
+### 仍未覆盖的风险
+
+闸门只能证明**脚本格式与注册路径正确**，不能证明真机渲染无误。
+首次启用请先确认设置页与 Plugins 页其余部分正常。
+
 ## 1.2.1 — 2026-09-26 · 🔥 事故修复：客户端半体导致 web-boot 崩溃
 
 ### 事故

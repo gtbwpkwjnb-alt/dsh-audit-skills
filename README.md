@@ -26,12 +26,13 @@ github:gtbwpkwjnb-alt/dsh-audit-skills
 
 > v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。
 >
-> **v1.2.1 —— UI 半体已撤回，本插件回归纯宿主形态。**
+> **v1.3.0 —— UI 半体以正确格式回归。** 关键：DSH 客户端必须是**无顶层 import 的传统脚本**
+> （`window.__ModuleLoader__.load({ id, factory: (require) => ... })`），不是裸 ESM，也**不需要打包器**。
 >
-> v1.2.0 曾加入设置页按钮组 / 插件页卡片 / 侧边栏卡片，但**导致 DSH GUI 无法启动**并已撤回：
-> DSH 的客户端半体必须是被打包成**传统脚本**的产物，而 v1.2.0 发的是裸 ESM，
-> 浏览器抛 `Cannot use import statement outside a module` → `web boot: 1 entry did not activate`。
-> 完整复盘见 `docs/incident-web-boot-crash.md`。客户端源码留在 `src/client.js`（标注"尚不可直接加载"）。
+> ⚠️ **v1.2.1 事故（已修复）**：v1.2.0 发的是裸 ESM，被按传统脚本加载 →
+> `Cannot use import statement outside a module` → `web boot: 1 entry did not activate` → **GUI 起不来**。
+> 复盘见 [docs/incident-web-boot-crash.md](docs/incident-web-boot-crash.md)。
+> 此后**任何客户端改动都必须先过** `scripts/preflight-client.mjs`（以传统脚本方式执行 + exports 契约校验）。
 >
 > **当前可用能力（宿主半体，已本机实测）**：启用本插件即自动把已装插件的插件页说明精炼为中文；
 > **新装插件后停用再启用本插件**（或重启 DSH）即会自动补上，无需重装。
