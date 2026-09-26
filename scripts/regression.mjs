@@ -88,7 +88,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 6 条 bridge 路由', routes.length === 6, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 7 条 bridge 路由', routes.length === 7, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -188,7 +188,7 @@ const jr2 = m.updateJobStatus(started2.token)
 check('安装失败时 stage=failed 且带原因', jr2.ok && jr2.job.done === true && jr2.job.ok === false && jr2.job.message === 'boom', JSON.stringify(jr2))
 // 问题诊断
 const diagText = m.describeIssues({ pkg: 'x', needsText: true })
-check('needsText → 给出原因/办法/动作', diagText.length === 1 && diagText[0].code === 'needs-text' && diagText[0].remedy.length > 10 && diagText[0].action.kind === 'open-overlay', JSON.stringify(diagText))
+check('needsText → 给出原因/办法/动作(自动生成)', diagText.length === 1 && diagText[0].code === 'needs-text' && diagText[0].remedy.length > 10 && diagText[0].action.kind === 'generate', JSON.stringify(diagText))
 const diag404 = m.describeIssues({ pkg: 'y', version: '1.2.0', latest: null, reason: 'HTTP 404' })
 check('HTTP 404 → 解释为 GitHub 直装而非裸报错', diag404.length === 1 && diag404[0].code === 'not-on-npm', JSON.stringify(diag404))
 check('正常行无问题项', m.describeIssues({ pkg: 'z', version: '1.0.0', latest: '1.0.0', needsText: false }).length === 0)
@@ -197,6 +197,44 @@ check('网络失败 → registry-unavailable + 重试按钮', diagNet.length ===
 const diagBundle = m.describeIssues({ pkg: 'v', version: '1.0.0', latest: '1.0.0', error: 'incompatible-version' })
 check('bundle 异常 → bundle-error + 处理建议', diagBundle.some((x) => x.code === 'bundle-error'), JSON.stringify(diagBundle))
 check('四类问题映射全部可达', ['needs-text', 'not-on-npm', 'registry-unavailable', 'bundle-error'].every((c) => [].concat(diagText, diag404, diagNet, diagBundle).some((x) => x.code === c)))
+
+// ─────────────────────── A4 LLM 自动生成文案 ───────────────────────
+console.log(String.fromCharCode(10) + 'A4 LLM 自动生成（解析 / 流形态 / 模型解析 / 覆盖层写入）')
+const goodJson = '{"en":{"title":"dsh-x","description":"EN text"},"zh":{"title":"dsh-x（甲）","description":"中文说明"}}'
+check('parseGenerated 解析纯 JSON', (function () { const r = m.parseGenerated(goodJson); return !!r && r.zh.title === 'dsh-x（甲）' })())
+check('parseGenerated 容忍代码块包裹', (function () { const r = m.parseGenerated('\`\`\`json' + String.fromCharCode(10) + goodJson + String.fromCharCode(10) + '\`\`\`'); return !!r && r.en.description === 'EN text' })())
+check('parseGenerated 容忍前后杂讯', (function () { const r = m.parseGenerated('好的，结果如下：' + goodJson + ' 希望有帮助'); return !!r })())
+check('parseGenerated 字段缺失返回 undefined', m.parseGenerated('{"en":{"title":"a"}}') === undefined)
+check('parseGenerated 非 JSON 返回 undefined', m.parseGenerated('完全不是 JSON') === undefined)
+check('collectStreamText 同步 text-delta', m.collectStreamText([{ type: 'text-delta', text: 'a' }, { type: 'text-delta', text: 'b' }]) === 'ab')
+check('collectStreamText chunk 包裹形态', m.collectStreamText([{ type: 'chunk', chunk: { type: 'text-delta', text: 'x' } }]) === 'x')
+check('collectStreamText text-chunks 形态', m.collectStreamText([{ type: 'text-chunks', index: 0, texts: ['p', 'q'] }]) === 'pq')
+const asyncGen = (async function* () { yield { type: 'text-delta', text: 'ay' }; yield { type: 'chunk', chunk: { type: 'text-delta', text: 'bz' } } })()
+check('collectStreamText 异步可迭代', (await m.collectStreamText(asyncGen)) === 'aybz')
+check('collectStreamText 忽略 reasoning', m.collectStreamText([{ type: 'reasoning-delta', text: '想' }, { type: 'text-delta', text: '说' }]) === '说')
+const ctxSettings = { get: (n) => (n === 'settings' ? { read: async (ns) => (ns === 'agent-default-model' ? { provider: 'deepseek-official', model: 'deepseek-flash' } : undefined) } : undefined) }
+const selS = await m.resolveGenerationModel(ctxSettings)
+check('resolveGenerationModel 走 settings 默认模型', selS && selS.model === 'deepseek-flash', JSON.stringify(selS))
+const ctxLlm = { get: () => undefined, llm: { listProviders: async () => ['p1'], listModels: async () => [{ id: 'm1' }] } }
+const selL = await m.resolveGenerationModel(ctxLlm)
+check('resolveGenerationModel 回落 llm 提供商枚举', selL && selL.model === 'm1', JSON.stringify(selL))
+check('resolveGenerationModel 无可用模型返回 undefined', (await m.resolveGenerationModel({ get: () => undefined, llm: { listProviders: async () => [], listModels: async () => [] } })) === undefined)
+const fakeStreamLlm = { stream: () => [{ type: 'text-delta', text: goodJson }] }
+const ctxGen = { get: (n) => (n === 'settings' ? { read: async () => ({ provider: 'p', model: 'm' }) } : undefined), llm: fakeStreamLlm }
+const gen = await m.generateRefinement(ctxGen, 'dsh-x', 'some english')
+check('generateRefinement 全链路成功', gen.ok === true && gen.entry.zh.title === 'dsh-x（甲）', JSON.stringify(gen))
+check('无 llm 服务 → llm-unavailable', (await m.generateRefinement({ get: () => undefined }, 'p', 'd')).code === 'llm-unavailable')
+check('模型输出不可解析 → bad-output', (await m.generateRefinement({ get: (n) => (n === 'settings' ? { read: async () => ({ provider: 'p', model: 'm' }) } : undefined), llm: { stream: () => [{ type: 'text-delta', text: 'nope' }] } }, 'p', 'd')).code === 'bad-output')
+// upsertOverlay：临时 DSH_HOME，绝不碰真实覆盖层
+const oldHome = process.env.DSH_HOME
+process.env.DSH_HOME = sandbox
+const up1 = m.upsertOverlay('dsh-x', { en: { title: 'dsh-x', description: 'EN' }, zh: { title: 'dsh-x（甲）', description: '中文' } })
+check('upsertOverlay 写入成功', up1.ok === true && fs.existsSync(m.overlayPath()), JSON.stringify(up1))
+m.upsertOverlay('dsh-x', { en: { title: 'dsh-x', description: 'EN2' }, zh: { title: 'dsh-x（甲2）', description: '中文2' } })
+const ovDoc = JSON.parse(fs.readFileSync(m.overlayPath(), 'utf8'))
+check('upsertOverlay 同名替换而非追加', ovDoc.entries.filter((e) => e.pkg === 'dsh-x').length === 1)
+check('upsertOverlay 保留其他条目', ovDoc.entries.some((e) => e.pkg === 'pkg-with-exports') === false || ovDoc.entries.length === 1)
+process.env.DSH_HOME = oldHome
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')

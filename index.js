@@ -441,6 +441,167 @@ export function updateJobStatus(token) {
   return { ok: true, job }
 }
 
+/** 生成提示词：只依据原文，禁止编造；title 必须保留原包名。 */
+function buildPrompt(pkg, original) {
+  return [
+    '你是 DSH 插件文案精炼器。为下面的 DSH 插件写精炼说明。',
+    '',
+    '插件包名：' + pkg,
+    '插件原始说明：',
+    '"""',
+    String(original || '').slice(0, 2000),
+    '"""',
+    '',
+    '要求：',
+    '1. 只输出严格 JSON，不要 markdown 代码块，不要任何多余文字。',
+    '2. 结构：{"en":{"title":"...","description":"..."},"zh":{"title":"...","description":"..."}}',
+    '3. title 规则（不可违反）：zh.title 必须以原包名开头，中文名用全角括号附加在包名之后，例如 dsh-free-search（免费搜索）；en.title 就是原包名本身。',
+    '4. description：一到两句。先说「做什么」，再说「边界」——不做什么、依赖什么、会不会改数据。中文 40~110 字，英文 1~2 句。不要营销词，不要罗列全部细节。',
+    '5. 只依据给出的原文，绝不编造原文未提及的能力。',
+    '',
+    '只输出 JSON。',
+  ].join('\n')
+}
+
+/** 解析模型返回的 JSON：容忍代码块包裹与前后杂讯。 */
+export function parseGenerated(text) {
+  if (typeof text !== 'string') return undefined
+  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '')
+  const first = cleaned.indexOf('{')
+  const last = cleaned.lastIndexOf('}')
+  if (first < 0 || last <= first) return undefined
+  try {
+    const doc = JSON.parse(cleaned.slice(first, last + 1))
+    if (!doc || typeof doc !== 'object') return undefined
+    const ok = (side) => side && typeof side.title === 'string' && typeof side.description === 'string'
+    if (!ok(doc.en) || !ok(doc.zh)) return undefined
+    return {
+      en: { title: doc.en.title.trim(), description: doc.en.description.trim() },
+      zh: { title: doc.zh.title.trim(), description: doc.zh.description.trim() },
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** 解析生成用的 provider/model：优先 settings 里的默认模型，其次 llm 提供商枚举。 */
+export async function resolveGenerationModel(ctx) {
+  try {
+    const settings = ctx.get('settings')
+    if (settings) {
+      for (const ns of ['agent-default-model', 'agentDefaultModel']) {
+        let value
+        try {
+          value = typeof settings.read === 'function' ? await settings.read(ns) : undefined
+        } catch {
+          value = undefined
+        }
+        if (value === undefined && typeof settings.get === 'function') value = settings.get(ns)
+        const provider = value && value.provider
+        const model = value && value.model
+        if (typeof provider === 'string' && typeof model === 'string') {
+          return { provider, model, source: 'settings:' + ns }
+        }
+      }
+    }
+  } catch {
+    /* 继续回落 */
+  }
+  try {
+    const providers = await ctx.llm.listProviders()
+    for (const provider of Array.isArray(providers) ? providers : []) {
+      const id = typeof provider === 'string' ? provider : provider && provider.id
+      if (typeof id !== 'string') continue
+      const models = await ctx.llm.listModels(id)
+      for (const model of Array.isArray(models) ? models : []) {
+        const modelId = typeof model === 'string' ? model : model && (model.id ?? model.model)
+        if (typeof modelId === 'string' && modelId !== '') return { provider: id, model: modelId, source: 'llm:' + id }
+      }
+    }
+  } catch {
+    /* 无可用模型 */
+  }
+  return undefined
+}
+
+/** 把流里的可见文本收集出来（同时兼容同步/异步可迭代与多种记录形状）。 */
+export function collectStreamText(records) {
+  let text = ''
+  const take = (record) => {
+    if (!record || typeof record !== 'object') return
+    if (record.type === 'text-chunks' && Array.isArray(record.texts)) {
+      text += record.texts.join('')
+      return
+    }
+    if (record.type === 'text-delta' && typeof record.text === 'string') {
+      text += record.text
+      return
+    }
+    const chunk = record.chunk
+    if (chunk && typeof chunk === 'object' && chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+      text += chunk.text
+    }
+  }
+  if (records && typeof records[Symbol.asyncIterator] === 'function') {
+    return (async () => {
+      for await (const record of records) take(record)
+      return text
+    })()
+  }
+  if (records && typeof records[Symbol.iterator] === 'function') {
+    for (const record of records) take(record)
+  }
+  return text
+}
+
+/** 让模型生成一条精炼文案；任何不确定都转成可读的失败原因。 */
+export async function generateRefinement(ctx, pkg, original) {
+  if (!ctx.llm || typeof ctx.llm.stream !== 'function') {
+    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注入或未注册 llm 服务）' }
+  }
+  const selection = await resolveGenerationModel(ctx)
+  if (selection === undefined) {
+    return { ok: false, code: 'no-model', message: '找不到可用的默认模型；请先在设置中选定默认模型' }
+  }
+  try {
+    const prompt = buildPrompt(pkg, original)
+    const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
+    let raw = ctx.llm.stream({ provider: selection.provider, model: selection.model, messages })
+    if (raw && typeof raw.then === 'function') raw = await raw
+    const stream = raw && raw.stream !== undefined ? raw.stream : raw
+    const text = await collectStreamText(stream)
+    const parsed = parseGenerated(typeof text === 'string' ? text : '')
+    if (parsed === undefined) {
+      return { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON', raw: String(text).slice(0, 400) }
+    }
+    return { ok: true, entry: parsed, selection }
+  } catch (error) {
+    return { ok: false, code: 'generate-failed', message: String((error && error.message) || error) }
+  }
+}
+
+/** 把一条生成结果写入覆盖层（覆盖层优先，等于永久生效）。 */
+export function upsertOverlay(pkg, entry) {
+  try {
+    const file = overlayPath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    let doc = { schema_version: 1, note: '本文件由用户或 Agent 维护，优先级高于包内内置 catalog。', entries: [] }
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (raw && Array.isArray(raw.entries)) doc = raw
+    } catch {
+      /* 首次创建 */
+    }
+    const next = doc.entries.filter((e) => !(e && e.pkg === pkg))
+    next.push({ pkg, en: entry.en, zh: entry.zh })
+    doc.entries = next
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n')
+    return { ok: true, path: file, total: next.length }
+  } catch (error) {
+    return { ok: false, code: 'overlay-write-failed', message: String((error && error.message) || error) }
+  }
+}
+
 /**
  * 为一行数据生成「问题 → 原因 → 解决办法 → 可执行动作」。
  * 界面不应只丢一个 HTTP 404 给用户。
@@ -451,9 +612,9 @@ export function describeIssues(row) {
   if (row.needsText === true) {
     issues.push({
       code: 'needs-text',
-      reason: '该插件没有内置精炼文案。本插件不调用模型，自己无法生成中文。',
-      remedy: '把包名发给 Agent，Agent 会把精炼文案写进覆盖层文件；写好后点「刷新状态」即可生效。',
-      action: { kind: 'open-overlay', label: '打开覆盖层', path: overlayPath() },
+      reason: '该插件没有内置精炼文案，需要生成一条中文说明。',
+      remedy: '点「自动生成」让模型写一条并存入覆盖层；也可把包名发给 Agent 手动补录。',
+      action: { kind: 'generate', label: '自动生成文案' },
     })
   }
   if (row.version && latest === null && typeof row.reason === 'string' && row.reason !== '') {
@@ -582,6 +743,35 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, startUpdate(ctx, Array.isArray(dirs) ? dirs[0] : dirs, pkg))
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'update-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/generate',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkg = body && typeof body.pkg === 'string' ? body.pkg : ''
+              if (pkg === '') {
+                writeJson(res, 200, { ok: false, code: 'missing-pkg', message: '缺少 pkg 参数' })
+                return
+              }
+              const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
+              const info = readBundleInfo(profileDir, pkg)
+              if (info === undefined) {
+                writeJson(res, 200, { ok: false, code: 'not-installed', message: '该包未安装或不是 DSH bundle' })
+                return
+              }
+              const generated = await generateRefinement(ctx, pkg, info.description)
+              if (generated.ok !== true) {
+                writeJson(res, 200, generated)
+                return
+              }
+              const saved = upsertOverlay(pkg, generated.entry)
+              writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'generate-failed', message: String(error?.message ?? error) })
             }
           },
         },

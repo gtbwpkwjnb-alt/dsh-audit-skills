@@ -79,7 +79,9 @@ window.__ModuleLoader__.load({
             issue.action
               ? (issue.action.kind === 'retry'
                   ? h('button', { type: 'button', style: S.mini, onClick: props.onRetry }, issue.action.label)
-                  : h('span', { style: S.note }, '[ ' + issue.action.label + (issue.action.path ? '：' + issue.action.path : '') + ' ]'))
+                  : issue.action.kind === 'generate'
+                    ? h('button', { type: 'button', style: S.mini, disabled: props.busy, onClick: function () { props.onGenerate(props.pkg); } }, props.busy ? '生成中…' : issue.action.label)
+                    : h('span', { style: S.note }, '[ ' + issue.action.label + (issue.action.path ? '：' + issue.action.path : '') + ' ]'))
               : null);
         }));
     }
@@ -177,11 +179,61 @@ window.__ModuleLoader__.load({
         });
       }, []);
 
+      var generate = useCallback(function (pkg) {
+        setBusy('gen:' + pkg);
+        setNote({ kind: 'note', text: '正在让模型为 ' + pkg + ' 生成精炼文案…（会消耗 token）' });
+        return call('generate', { pkg: pkg }).then(function (r) {
+          setBusy('');
+          if (r && r.ok) {
+            setNote({ kind: 'ok', text: pkg + ' 文案已生成并写入覆盖层：' + ((r.entry && r.entry.zh && r.entry.zh.title) || '') });
+            refresh();
+          } else {
+            var code = (r && r.code) || 'unknown';
+            var fix = code === 'llm-unavailable'
+              ? 'LLM 服务不可用，请确认 DSH 已挂载 llm 服务。'
+              : code === 'no-model'
+                ? '找不到默认模型，请先在设置中选定默认模型。'
+                : code === 'bad-output'
+                  ? '模型输出不是约定 JSON，可重试；若反复失败请手动补录。'
+                  : '可重试，或把包名发给 Agent 手动补录。';
+            setNote({ kind: 'err', text: pkg + ' 生成失败：' + ((r && r.message) || '未知') + ' → ' + fix });
+          }
+        });
+      }, [refresh]);
+
+      var generateAll = useCallback(function (rowsNow) {
+        var pending = (rowsNow || []).filter(function (r) { return r.needsText === true; });
+        if (pending.length === 0) { setNote({ kind: 'ok', text: '没有待补文案的插件。' }); return; }
+        setBusy('gen:all');
+        var i = 0;
+        var okCount = 0;
+        var failCount = 0;
+        var step = function () {
+          if (i >= pending.length) {
+            setBusy('');
+            setNote({ kind: failCount ? 'err' : 'ok', text: '批量生成完成：成功 ' + okCount + ' 项，失败 ' + failCount + ' 项。' + (failCount ? ' 失败项可单独重试。' : '') });
+            refresh();
+            return;
+          }
+          var pkg = pending[i].pkg;
+          i += 1;
+          setNote({ kind: 'note', text: '正在生成 ' + i + '/' + pending.length + '：' + pkg + ' …' });
+          call('generate', { pkg: pkg }).then(function (r) {
+            if (r && r.ok) okCount += 1; else failCount += 1;
+            step();
+          });
+        };
+        step();
+      }, [refresh]);
+
       var head = h('div', { style: S.bar },
         h('button', { type: 'button', disabled: !!busy, onClick: function () { act('apply', '应用翻译精炼'); } }, '应用翻译精炼'),
         h('button', { type: 'button', disabled: !!busy, onClick: function () { act('revert', '还原翻译'); } }, '还原翻译'),
         h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'status' ? '读取中…' : '刷新状态'),
-        h('button', { type: 'button', disabled: !!busy, onClick: checkUpdates }, busy === 'updates' ? '检查中…' : '检查更新'));
+        h('button', { type: 'button', disabled: !!busy, onClick: checkUpdates }, busy === 'updates' ? '检查中…' : '检查更新'),
+        (rows && rows.some(function (r) { return r.needsText === true; }))
+          ? h('button', { type: 'button', disabled: !!busy, onClick: function () { generateAll(rows); } }, busy === 'gen:all' ? '批量生成中…' : '自动生成全部文案（消耗 token）')
+          : null);
 
       var noteEl = note
         ? h('div', { style: note.kind === 'err' ? S.err : note.kind === 'ok' ? S.ok : S.note }, note.text)
@@ -211,7 +263,8 @@ window.__ModuleLoader__.load({
               var op = [];
               if (job && !job.done) op.push(h('span', { key: 'j', style: S.note }, job.stage + '…'));
               else if (upd) op.push(h('button', { key: 'u', type: 'button', style: S.mini, disabled: !!busy, onClick: function () { doUpdate(r.pkg); } }, '更新'));
-              if (issues.length) op.push(h('button', { key: 'i', type: 'button', style: S.mini, onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); } }, '⚠ 问题'));
+              if (r.needsText === true) op.push(h('button', { key: 'g', type: 'button', style: S.mini, disabled: !!busy, onClick: function () { generate(r.pkg); } }, busy === 'gen:' + r.pkg ? '生成中…' : '自动生成'));
+              else if (issues.length) op.push(h('button', { key: 'i', type: 'button', style: S.mini, onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); } }, '⚠ 问题'));
               cells.push(h('td', { style: S.td }, op.length ? op : null));
               var tr = h('tr', { key: r.profileDir + '|' + r.pkg, style: r.installed === false ? S.dim : undefined }, cells);
               if (job && !job.done) {
@@ -222,7 +275,7 @@ window.__ModuleLoader__.load({
 
       var openRow = rows ? rows.filter(function (r) { return r.pkg === openPkg; })[0] : null;
       var detail = openRow && (openRow.issues || []).length
-        ? h(IssueCard, { pkg: openRow.pkg, issues: openRow.issues, onRetry: checkUpdates })
+        ? h(IssueCard, { pkg: openRow.pkg, issues: openRow.issues, onRetry: checkUpdates, onGenerate: generate, busy: busy === 'gen:' + openRow.pkg })
         : null;
 
       return h('div', { style: S.box },

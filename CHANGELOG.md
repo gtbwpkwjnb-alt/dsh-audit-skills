@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.6.0 — 2026-09-27 · LLM 自动生成文案（用户同意后实施）
+
+### 为什么必须调模型
+
+1.5.0 的覆盖层给了「可写回」的通路，但**写的人**还是 Agent/用户。
+插件自身不调模型就永远补不上文案——这是结构性的，不是交互问题。经用户同意，接入 DSH 自身的 LLM 服务。
+
+### 摸清的 API（不是猜的）
+
+| 事实 | 值 |
+|---|---|
+| 服务 | `ctx.llm`（来自 `@deepseek-ai/dsh-llm`） |
+| 入口 | `ctx.llm.stream({ provider, model, messages, maxTokens? })` |
+| 默认模型 | 由 `@deepseek-ai/dsh-agent-default-model` 经 `settings` 命名空间提供（本机为 `deepseek-official / deepseek-flash`） |
+| 流记录类型 | `chunk / text-chunks / text-delta / reasoning-delta / tool-call* / finish` |
+| 官方助手 | 导出 `assembleAssistantStream`、`assistantStreamChunks` |
+
+### 实现
+
+- `resolveGenerationModel()`：先读 `settings` 的默认模型；读不到则遍历 `llm.listProviders()/listModels()`。
+  **两条路都失败就明确报 `no-model`**，不瞎猜。
+- `generateRefinement()`：提示词要求严格 JSON（`{en,zh}`），并硬性约束
+  **`zh.title` 必须保留原包名、中文名用全角括号附加**；明确禁止编造原文未提及的能力。
+- `collectStreamText()`：**同时兼容同步可迭代、异步可迭代，以及三种记录形状**
+  （`text-delta` / `chunk` 包裹 / `text-chunks`）——因为 `stream()` 的确切返回形态
+  无法在应用进程外复现，只能两头都兜。`reasoning-delta` 被忽略。
+- `parseGenerated()`：容忍代码块包裹与前后杂讯；字段缺失即判失败，不半信半疑地写盘。
+- `upsertOverlay()`：写入 `~/.dsh/dsh-audit-skills/catalog.local.json`，**同名替换**而非追加。
+
+### UI
+
+- 表内「待补文案」行出现 **「自动生成」** 按钮（单条）
+- 顶部出现 **「自动生成全部文案（消耗 token）」** 按钮，逐条串行执行并显示 `i/n` 进度
+- 失败按 code 给不同处置建议（`llm-unavailable` / `no-model` / `bad-output` / 其他）
+
+### 诚实标注
+
+**真实 LLM 调用无法在应用进程外验证**。已验证的是：模型解析的两条路径、三种流形态的消费、
+JSON 解析的全部边界、覆盖层写入、以及全部失败分支（用假流与假服务）。
+真实调用需你在界面上点一次才能确认。
+
+### 回归测试
+
+```
+RESULT  pass=70  fail=0
+```
+
+新增 19 项：解析 5、流形态 5、模型解析 3、全链路 3、覆盖层 3。
+
 ## 1.5.0 — 2026-09-27 · 可写回文案源 · 真实更新反馈 · 错误可解决
 
 用户反馈三件事，追查后发现**是同一个根因链**：
