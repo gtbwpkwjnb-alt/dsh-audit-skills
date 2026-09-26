@@ -26,8 +26,15 @@ export const inject = []
 export const Config = z.object({
   /** bundle 启用时自动应用精炼结果。 */
   autoApply: z.boolean().default(true),
-  /** bundle 停用时还原已写入的 locale 文件。 */
-  revertOnDisable: z.boolean().default(true),
+  /**
+   * 关闭本插件时是否还原精炼结果。
+   *
+   * 默认 false —— Cordis 的 dispose 在「停用插件」和「退出 DSH」两种情况下都会触发。
+   * 若在退出时还原，会把已修好的 exports 与 locale 一并撤掉，下次启动时宿主在
+   * 读完插件元数据之后（约 +1s）才等到本插件重新写入，导致插件页永远显示上一轮状态。
+   * 需要还原请用设置页的「还原翻译」按钮（显式、可控）。
+   */
+  revertOnDisable: z.boolean().default(false),
   /** 目标 profile 目录；留空按 DSH_HOME 推断并默认 desktop profile。 */
   profileDir: z.string().default(''),
   /** 额外扫描的 profile 目录（多 profile 用户）。 */
@@ -88,9 +95,17 @@ function backupOnce(file) {
 }
 
 function writeJson(file, value) {
+  const next = JSON.stringify(value, null, 2) + '\n'
+  try {
+    // 内容已一致就不写：避免每次启动刷新 mtime，也避免与宿主读元数据抢时序
+    if (fs.readFileSync(file, 'utf8') === next) return false
+  } catch {
+    /* 文件不存在/不可读 → 继续写 */
+  }
   if (fs.existsSync(file)) backupOnce(file)
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
+  fs.writeFileSync(file, next)
+  return true
 }
 
 /** 单包状态：是否安装 / 启用 / 已有本插件精炼 / 当前中文标题。 */

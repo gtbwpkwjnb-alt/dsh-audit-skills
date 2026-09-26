@@ -26,6 +26,10 @@ github:gtbwpkwjnb-alt/dsh-audit-skills
 
 > v1.1.0 起本插件是**纯插件形态**（不再注册 skill）。
 >
+> **v1.3.2 —— 修复「插件页慢一拍」。** 此前 `revertOnDisable` 默认 true，退出 DSH 时会把
+> `package.json` 的 `./locale/*.json` 导出撤掉，下次启动宿主在读取元数据之后（+1s）才等到本插件重写，
+> 导致插件页永远落后一轮。现已默认不还原（需要还原请用设置页的「还原翻译」按钮），并改为幂等写入。
+>
 > **v1.3.1 —— 修复 locale 导出键 / 新装插件 / 设置页口径。**
 >
 > DSH 要求 exports 用 **`./locale/*.json`**（`./locale/*` 无效）；本插件会自动迁移旧键。

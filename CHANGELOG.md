@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.3.2 — 2026-09-26 · 🔁 修复「插件页慢一拍」的自伤循环
+
+### 现象
+
+重启后部分插件变中文（better-sidebar / dsh-context / whale-widget / 本插件），
+但 **free-search / memory / find-plugins 仍是英文**。
+
+### 根因：默认开启的退出还原，造成无限循环
+
+实机时间戳是铁证：
+
+| 包 | package.json mtime | 插件页 |
+|---|---|---|
+| whale-widget / better-sidebar | 13:47–13:48（**从未被本插件改过**） | ✅ 中文 |
+| free-search / memory / find-plugins | **23:16:10**（应用 23:16:09 启动后 **1 秒**） | ❌ 英文 |
+
+循环过程：
+
+1. 退出 DSH → Cordis `dispose()` 触发 → 因 `revertOnDisable: true` **还原**，
+   把我加进 `package.json` 的 `./locale/*.json` 导出**撤掉**
+2. 下次启动 → 宿主在 T+0 读插件元数据（此时导出缺失 → 英文）
+3. T+1s → 本插件 `apply()` 又把导出加回来
+
+⇒ **插件页永远显示上一轮的状态。** 而 whale-widget（无 exports）与
+better-sidebar / dsh-context（作者本就有该导出）从未被我改过 `package.json`，
+所以不受影响——与观测完全吻合。
+
+### 修复
+
+- `revertOnDisable` **默认改为 `false`**。`dispose` 无法区分「停用插件」与「退出 DSH」，
+  在退出时还原是错误的默认值。需要还原请用设置页的**「还原翻译」按钮**（显式、可控）。
+- `writeJson` 改为**内容一致就不写**，不再每次启动刷新 mtime，消除与宿主读元数据的时序竞争。
+
+### 验证
+
+```
+第一次 applyLocale 是否改动文件: false
+第二次 applyLocale 是否改动文件（应为 false）: false
+revertOnDisable 默认值 = false
+```
+
+### 附带修复
+
+`VERSION` 文件此前停留在 1.3.0，与 `package.json` 不一致 —— 已同步为 1.3.2。
+
 ## 1.3.1 — 2026-09-26 · 三个实机问题修复
 
 用户实测反馈：① 本插件自己的卡片是英文 ② 新装的插件没被翻译 ③ 设置页列了未安装插件，与插件页不统一。
