@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "naming_convention": "title 必须保留原包名（英文代码名）以便识别；中文名以全角括号附加在包名之后。description 按语言直接替换为精炼文案。",
+  "mechanism": "DSH readPluginMeta() 读 <pkg>/locale/en.json（英语资源，定义同目录语言文件集合）的 meta.title/meta.description；缺失才回落 package.json.name/description。路径经包 specifier 解析，故 exports 必须导出 ./locale/*。",
+  "source_ref": "dsh-app-boot lib/index.js:1968",
+  "entries": [
+    {
+      "pkg": "dsh-better-sidebar",
+      "en": {
+        "title": "dsh-better-sidebar",
+        "description": "File tree, editor, changes, tasks and side chat in one right column, separate per conversation. UI only — it does not change model capability."
+      },
+      "zh": {
+        "title": "dsh-better-sidebar（增强侧边栏）",
+        "description": "右侧栏提供文件树、编辑器、文件变动、任务与侧边对话，每个会话独立。仅改变界面，不改变模型能力。"
+      }
+    },
+    {
+      "pkg": "dsh-context",
+      "en": {
+        "title": "dsh-context",
+        "description": "Context insight and management: dashboard, browser, dynamics and the /context command. Read-only analysis — it does not rewrite session content."
+      },
+      "zh": {
+        "title": "dsh-context（上下文洞察）",
+        "description": "上下文洞察与管理：仪表盘、上下文浏览器、上下文动态与 /context 命令，看清上下文的构成与演变。只做分析，不改写会话内容。"
+      }
+    },
+    {
+      "pkg": "dsh-free-search",
+      "en": {
+        "title": "dsh-free-search",
+        "description": "Takes over the built-in web_search: 13 engines with automatic fallback, keyless by default, plus time filtering and platform search. It does not touch web_fetch."
+      },
+      "zh": {
+        "title": "dsh-free-search（免费搜索）",
+        "description": "接管内置 web_search：13 个引擎自动降级，默认免 API key，支持时间过滤与平台搜索。只负责搜索，不接管网页抓取。"
+      }
+    },
+    {
+      "pkg": "dsh-web-fetch-playwright",
+      "en": {
+        "title": "dsh-web-fetch-playwright",
+        "description": "Browser backend for web_fetch: real-browser rendering, then Readability denoising, returning Markdown. Fetch only — it is not a search provider."
+      },
+      "zh": {
+        "title": "dsh-web-fetch-playwright（浏览器抓取）",
+        "description": "为 web_fetch 提供浏览器后端：真实浏览器渲染后经 Readability 去噪返回 Markdown。只负责抓取，不是搜索提供方。"
+      }
+    },
+    {
+      "pkg": "@linxin666/dsh-remote-web-ui",
+      "en": {
+        "title": "@linxin666/dsh-remote-web-ui",
+        "description": "Scan-to-pair remote access that puts phones and PCs on one Web GUI, with one-time tokens, revocable device sessions, a LAN bind toggle and an optional Cloudflare tunnel."
+      },
+      "zh": {
+        "title": "@linxin666/dsh-remote-web-ui（远程访问）",
+        "description": "扫码把手机与电脑配对到同一个 Web GUI：一次性令牌、可撤销设备会话、局域网绑定开关与可选的 Cloudflare 隧道。"
+      }
+    },
+    {
+      "pkg": "@furongjun1999/dsh-memory",
+      "en": {
+        "title": "@furongjun1999/dsh-memory",
+        "description": "Long-term memory and a knowledge flywheel: conversations settle into an md_cg cognitive graph, with self-model and recursive reflection. It injects memory context every turn."
+      },
+      "zh": {
+        "title": "@furongjun1999/dsh-memory（灵枢记忆）",
+        "description": "长期记忆与知识飞轮：对话自动沉淀为 md_cg 认知图，带自我认知与递归反思。会在每轮对话注入记忆上下文。"
+      }
+    },
+    {
+      "pkg": "dsh-whale-widget",
+      "en": {
+        "title": "dsh-whale-widget",
+        "description": "Corner widget showing DeepSeek balance, today's usage and peak/off-peak pricing, with customisable bubbles, characters and sound. Front-end display only."
+      },
+      "zh": {
+        "title": "dsh-whale-widget（余额小鲸鱼）",
+        "description": "右下角挂件：显示 DeepSeek 余额、今日用量与峰谷定价，可自定义气泡、角色与音效。纯前端展示，不参与对话。"
+      }
+    }
+  ]
+}

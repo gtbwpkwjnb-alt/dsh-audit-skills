@@ -1,0 +1,45 @@
+{
+  "name": "dsh-audit-skills",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness audit plugin: DSH-scoped skill/plugin review, plugin-page Chinese localization, and market search with comparison recommendations.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "SKILL.md",
+    "config.yaml",
+    "platforms",
+    "references",
+    "scripts",
+    "agents",
+    "requirements.txt",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "VERSION"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/gtbwpkwjnb-alt/dsh-audit-skills",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gtbwpkwjnb-alt/dsh-audit-skills.git"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "audit",
+    "skill-manager",
+    "localization",
+    "plugin-i18n"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

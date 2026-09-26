@@ -1,0 +1,8 @@
+# dsh-audit-skills — DSH profile bundle.
+# Registers the SKILL.md at this package root on ctx.skills (read-only provider,
+# pack rank 600, so a user's own skill with the same name wins).
+# Applied after @deepseek-ai/dsh-base, which already mounts the skill registry
+# and the model-facing skill loader.
+- insert:
+    - id: dsh-audit-skills
+      name: 'dsh-audit-skills'

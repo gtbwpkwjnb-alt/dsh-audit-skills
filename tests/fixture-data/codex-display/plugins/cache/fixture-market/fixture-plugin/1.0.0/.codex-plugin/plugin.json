@@ -1,0 +1,10 @@
+{
+  "name": "fixture-plugin",
+  "version": "1.0.0",
+  "description": "Fixture plugin metadata.",
+  "interface": {
+    "displayName": "Fixture Plugin",
+    "shortDescription": "Create reusable artifact templates",
+    "longDescription": "Create reusable artifact templates."
+  }
+}

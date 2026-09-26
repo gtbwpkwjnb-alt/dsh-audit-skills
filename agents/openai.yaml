@@ -1,0 +1,5 @@
+version: "1.0.0"
+interface:
+  display_name: "DSH Audit Skills"
+  short_description: "DSH 技能审查 → 插件页中文化·市场对比推荐·范围自动收敛"
+  default_prompt: "使用 $dsh-audit-skills 审查 DeepSeek Harness 的技能与插件：默认只覆盖 DSH 范围，先取证再结论；插件说明精炼必须保留原包名、中文名以（）附加；需要新能力时用市场检索给出兼容/成本/冲突对比。"

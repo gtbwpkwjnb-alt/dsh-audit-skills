@@ -1,0 +1,57 @@
+platform: dsh
+# DeepSeek Harness 平台特征配置（本地适配补丁，非上游内容）
+# ⚠️ scan_paths 唯一来源为 config.yaml，此文件仅存平台特征。
+# ⚠️ 触发词权威来源：SKILL.md 触发词矩阵。此文件不重复定义触发词。
+project_scan_default_depth: 10
+archive_dir: "~/.agents/skills-archived/"
+
+# DSH 平台特征（供 Agent 取证时定位真实来源）
+dsh:
+  # Harness home 与 profile
+  home: "~/.dsh/"
+  profiles_dir: "~/.dsh/profiles/"
+  default_profile: "desktop"
+  profile_dir: "~/.dsh/profiles/desktop/"
+  profile_manifest: "~/.dsh/profiles/desktop/package.json"
+  bundles_field: "dsh.profile.bundles"
+  patch_file: "~/.dsh/profiles/desktop/cordis.patch.yml"
+  plugin_dir: "~/.dsh/profiles/desktop/node_modules/"
+  plugin_manifest_lock: "~/.dsh/profiles/desktop/pnpm-lock.yaml"
+
+  # 技能来源（DSH 由 dsh-skill-filesystem 按 rank 顺序扫描）
+  skill_roots:
+    - rank: 100
+      source: project-dsh
+      path: "<projectRoot>/.dsh/skills/"
+    - rank: 200
+      source: project-agents
+      path: "<projectRoot>/.agents/skills/"
+    - rank: 300
+      source: custom
+      path: "<dsh-skill-filesystem customSkillDirs>"
+    - rank: 400
+      source: user-dsh
+      path: "~/.dsh/skills/"
+    - rank: 500
+      source: user-agents
+      path: "~/.agents/skills/"
+    - rank: 600
+      source: bundled
+      path: "<DSH_INSTALL>/resources/runtime/office-skills/"
+  # 只发现扫描根「顶层」的 <name>/SKILL.md 或 <name>.md；嵌套 **/SKILL.md 不发现
+  discover_rule: "top_level_only"
+
+  # 插件页展示文字机制（已核实：dsh-app-boot readPluginMeta）
+  plugin_display:
+    locale_dir: "<plugin_pkg>/locale/"
+    english_resource: "en.json"
+    schema: "{ meta: { title, description } }"
+    fallback: "package.json.name / package.json.description"
+    exports_constraint: "locale 文件经包 specifier 解析，受 package.json.exports 约束"
+
+  # MCP 状态：dsh-mcp-client 与 dsh-mcp-resources 均随包分发，
+  # 但 dsh-base 仅挂载 mcp-resources，未挂载 mcp-client → MCP 默认不可用
+  mcp:
+    packages_present: ["@deepseek-ai/dsh-mcp-client", "@deepseek-ai/dsh-mcp-resources"]
+    client_mounted_by_default: false
+    config_surface: "profile cordis.patch.yml（无第一方设置页）"
