@@ -154,8 +154,8 @@
 1. **不做**：市场、排行、守护、更新执行 —— 全部已有轮子
 2. **复用**：第一方 Plugins 页（卡片+启停）· `dsh-client-ui-settings` 槽 · `readPluginInventory` · free-search 的 settings 卡范式 · 已发布的 `dsh_plugin_locale.mjs` 逻辑
 3. **新增仅 3 个文件**：
-   - `client.js` —— 设置页「技能审查」按钮组 + 只读状态表
-   - `index.js` 扩展 —— locale 应用/还原 + 只读状态工具（**零依赖**）
+   - `client.js` —— 设置页「插件与技能审查」（页内上方切换插件/技能）+ 状态表 + 翻译优化
+   - `index.js` 扩展 —— locale 应用/还原 + 状态/审查工具 + 技能 SKILL.md 改写与还原（**零依赖**）
    - `locale/{en,zh}.json` —— 本插件自身也遵循同一命名约定
 4. **交付** v1.1.0
 

@@ -946,7 +946,7 @@ export function auditPackages(ctx, profileDir) {
 // 但三点本质不同，必须区别对待（照搬会出错）：
 //   1. 技能不是 npm 包 —— 没有 registry 可比版本；只有 git 来源的目录能比对远端
 //   2. 技能的 description 是**给模型看的**（技能选择依据），不是纯展示
-//      → 所以本版本对技能**只读**：不写任何 SKILL.md（写入会改变模型行为）
+//      → 改写它是**行为变更**：必须由用户显式点击，且写前留 .dsh-skill.backup 备份、可逐字节还原
 //   3. 发现规则是"仅顶层 <name>/SKILL.md 或 <name>.md"，嵌套的不会被发现
 
 /** DSH 的技能根目录（按优先级）。rank 越小优先级越高。 */
@@ -1405,7 +1405,7 @@ export function auditSkills(rows) {
       add({ kind: 'interaction', key: 'lang-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
         title: '描述为英文（中文用户的可读性较低）',
         evidence: 'description 语言判定：英文',
-        remedy: '仅影响你阅读时的直观度。注意：description 是**模型选择技能的依据**，本插件对它只读、不代你改写。' })
+        remedy: '仅影响你阅读时的直观度。注意：description 是**模型选择技能的依据**，改它属于行为变更——「翻译优化」会真实写入 SKILL.md（写前留 .dsh-skill.backup 备份，「还原翻译」可逐字节恢复），请自行确认生成内容。' })
     }
     if (r.nestedSkillFiles > 0) {
       add({ kind: 'interaction', key: 'nested-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',

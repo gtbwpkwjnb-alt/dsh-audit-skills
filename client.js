@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
     var useState = react.useState;
 
     var BRIDGE = '/api/dsh-audit-skills';
-    var LABEL = '技能审查';
+    var LABEL = '插件与技能审查';
     var POLL_MS = 1500;
     var POLL_MAX = 240;
 
@@ -84,6 +84,9 @@ window.__ModuleLoader__.load({
       dim: { opacity: 0.45 },
       mini: { fontSize: '11px', padding: '2px 8px' },
       card: { border: '1px solid rgba(128,128,128,0.3)', borderRadius: '6px', padding: '8px 10px', fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '4px' },
+      tabs: { display: 'flex', gap: '2px', borderBottom: '1px solid rgba(128,128,128,0.25)' },
+      tab: { fontSize: '12px', padding: '4px 12px', border: 'none', borderBottom: '2px solid transparent', background: 'none', color: 'inherit', opacity: 0.6, cursor: 'pointer' },
+      tabOn: { fontSize: '12px', padding: '4px 12px', border: 'none', borderBottom: '2px solid currentColor', background: 'none', color: 'inherit', opacity: 1, fontWeight: 600, cursor: 'default' },
     };
 
     function summarize(rows) {
@@ -501,8 +504,8 @@ window.__ModuleLoader__.load({
       return h('div', { style: S.box },
         head,
         h('div', { style: S.note }, IS_SKILL
-          ? '技能页与插件页同构：一源数据、一套规则。技能不是 npm 包，因此没有可比的「最新版本」——「来源」列显示它来自哪个根目录与优先级。'
-          : '命名约定：标题保留原包名，中文名以（）附加。刷新即包含状态、版本与更新检查（同一份快照）。'),
+          ? '技能视图与插件视图同构（用上方按钮切换）：一源数据、一套规则。技能不是 npm 包，因此没有可比的「最新版本」——「来源」列显示它来自哪个根目录与优先级。'
+          : '插件视图（用上方按钮切到技能视图）：命名约定为标题保留原包名、中文名以（）附加。刷新即包含状态、版本与更新检查（同一份快照）。'),
         staleEl,
         summaryEl,
         noteEl,
@@ -510,8 +513,35 @@ window.__ModuleLoader__.load({
         table,
         detail,
         h('div', { style: S.note }, IS_SKILL
-          ? '技能页**只读**：技能的 description 是模型选择技能的依据，改写它属于行为变更而非展示变更，因此本页不代你改写 SKILL.md（如需翻译，用「技能翻译精炼」类技能或直接编辑）。' + (hostRev ? '  宿主半体 v' + hostRev : '')
+          ? '技能改写会真实写入 SKILL.md：name 保留原文、中文名以（）附加，description 替换为「触发词 → 精炼说明」；改写前留 .dsh-skill.backup 备份，「还原翻译」逐字节恢复原文件。注意 description 是模型选择技能的依据，改它属于行为变更而非展示变更，请自行确认生成内容。' + (hostRev ? '  宿主半体 v' + hostRev : '')
           : '翻译优化会调用模型为缺失文案的插件生成中文（消耗 token），结果存入覆盖层，重装不丢；更新经第一方插件管理器执行，会真实运行 pnpm 并可能触发重载。' + (hostRev ? '  宿主半体 v' + hostRev : '')));
+    }
+
+    /* 合并页：插件与技能共用一个设置页，切换按钮在页面上方。
+     *
+     * key={mode} 让被切走的视图卸载、切回的视图重新挂载 —— 于是**每个视图只读取自己那一份快照**，
+     * 两个数据源不会互相污染（沿用单一快照原则）。
+     * 批量更新的进度不依赖组件状态：它由宿主侧的 update-batch.json 承载，重新挂载时会自行恢复，
+     * 因此切换标签页不会丢失正在进行的批量进度。 */
+    function Merged() {
+      var modeState = useState('plugin'); var mode = modeState[0]; var setMode = modeState[1];
+      var tab = function (key, text, hint) {
+        var on = mode === key;
+        return h('button', {
+          key: key,
+          type: 'button',
+          role: 'tab',
+          'aria-selected': on ? 'true' : 'false',
+          title: hint,
+          style: on ? S.tabOn : S.tab,
+          onClick: function () { setMode(key); },
+        }, text);
+      };
+      return h('div', { style: { display: 'flex', flexDirection: 'column' } },
+        h('div', { style: S.tabs, role: 'tablist' },
+          tab('plugin', '插件', '插件半体：翻译优化、版本与更新、冲突与兼容审查'),
+          tab('skill', '技能', '技能 SKILL.md：翻译优化、来源与审查')),
+        h(Panel, { key: mode, target: mode }));
     }
 
     function safe(what, fn) {
@@ -530,14 +560,8 @@ window.__ModuleLoader__.load({
               name: 'settings.section',
               id: 'dsh-audit-skills',
               order: 200,
-              label: function () { return '插件审查'; },
-            }, function () { return h(Boundary, null, h(Panel, { target: 'plugin' })); }),
-            sctx.slots.register({
-              name: 'settings.section',
-              id: 'dsh-audit-skills-skills',
-              order: 201,
-              label: function () { return '技能审查'; },
-            }, function () { return h(Boundary, null, h(Panel, { target: 'skill' })); }),
+              label: function () { return '插件与技能审查'; },
+            }, function () { return h(Boundary, null, h(Merged)); }),
           ];
         });
       });
@@ -567,7 +591,7 @@ window.__ModuleLoader__.load({
             return svc.registerTab({
               id: 'dsh-audit-skills',
               title: LABEL,
-              component: function () { return h(Boundary, null, h(Panel)); },
+              component: function () { return h(Boundary, null, h(Merged)); },
             });
           });
         });

@@ -562,7 +562,7 @@ check('S1：缺 frontmatter -> 事实级高', hasF('demo-nofm', '缺少 frontmat
 check('S2：name 与目录名不一致 -> 报出', hasF('another-name', '不一致'))
 check('S3：description 为空 -> 报出', hasF('demo-nodesc', '为空'))
 check('S4：嵌套 SKILL.md 不会被发现 -> 报出', hasF('demo-nested', '不会被发现'))
-check('S5：纯英文描述 -> 提示可读性且明确只读', (function () { const f = skFind.find((x) => x.pkg === 'demo-flat'); return !!f && f.remedy.includes('只读') })())
+check('S5：纯英文描述 -> 提示可读性且如实说明改写属行为变更', (function () { const f = skFind.find((x) => x.pkg === 'demo-flat'); return !!f && f.remedy.includes('行为变更') && f.remedy.includes('.dsh-skill.backup') })())
 check('S6：同名被遮蔽 -> 事实级高', (function () { const f = skFind.find((x) => x.pkg === 'demo-good' && x.title.includes('遮蔽')); return !!f && f.severity === 'high' })())
 check('demo-good 只报「被遮蔽」一条（无 frontmatter/名称/描述问题）', (function () { const g2 = skFind.filter((x) => x.pkg === 'demo-good'); return g2.length === 1 && g2[0].title.includes('遮蔽') })())
 const withBundled = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx' }] } : undefined) })
@@ -571,8 +571,9 @@ check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundled
 process.env.DSH_HOME = savedHome6
 process.env.DSH_AGENTS_HOME = savedAgentsHome
 fs.rmSync(skillRoot, { recursive: true, force: true })
-check('客户端：注册了插件审查与技能审查两页', clientSrc.includes("'插件审查'") && clientSrc.includes("'技能审查'"))
-check('客户端：技能页只读并说明原因', clientSrc.includes('IS_SKILL') && clientSrc.includes('技能页**只读**'))
+check('客户端：插件与技能合并为一页（只注册一个 settings.section）', (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 && clientSrc.includes("'插件与技能审查'"))
+check('客户端：合并页用页内切换区分 插件/技能', clientSrc.includes('function Merged') && clientSrc.includes("tab('plugin'") && clientSrc.includes("tab('skill'") && clientSrc.includes('h(Panel, { key: mode, target: mode })'))
+check('客户端：技能视图如实声明会写入 SKILL.md（含备份与还原）', clientSrc.includes('技能改写会真实写入 SKILL.md') && clientSrc.includes('.dsh-skill.backup') && clientSrc.includes('行为变更'))
 check('客户端：技能页列头为 技能/描述/版本/来源', clientSrc.includes("'描述'") && clientSrc.includes("'来源'"))
 
 // ─────────────────────── A12 技能改写（直接动 SKILL.md，必须最严格） ───────────────────────
