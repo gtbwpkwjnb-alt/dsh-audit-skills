@@ -1,8 +1,10 @@
 # dsh-audit-skills — DSH profile bundle.
-# Registers the SKILL.md at this package root on ctx.skills (read-only provider,
-# pack rank 600, so a user's own skill with the same name wins).
-# Applied after @deepseek-ai/dsh-base, which already mounts the skill registry
-# and the model-facing skill loader.
+#
+# 纯插件形态（v1.1.0 起不再注册 skill）。
+#   host 半体: index.js —— 精炼插件页说明、汇总状态、提供 /api bridge
+#   web  半体: client.js —— 由 package.json 的 dsh.client 声明，提供
+#              设置页「技能审查」分区、插件页卡片、可选侧边栏卡片
+# 依赖 @deepseek-ai/dsh-base 已挂载的基础服务；webServer / slots 缺失时自动降级。
 - insert:
     - id: dsh-audit-skills
       name: 'dsh-audit-skills'
