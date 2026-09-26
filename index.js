@@ -42,6 +42,19 @@ export const Config = z.object({
 })
 
 const PACKAGE_ROOT = fileURLToPath(new URL('./', import.meta.url))
+
+/**
+ * 本插件自身版本。会随每个 bridge 响应回传，客户端据此判断**宿主半体是否过旧**——
+ * 客户端半体有 HMR 会热更新，宿主半体只在进程启动时加载一次，两者可能版本不一致，
+ * 表现就是「按钮是新的、接口是旧的」。
+ */
+export const OWN_REV = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
 const CATALOG_FILE = path.join(PACKAGE_ROOT, 'references', 'dsh-plugin-locale-catalog.json')
 const BACKUP_SUFFIXES = ['.dsh-locale.backup', '.dsh-locale.bak']
 const LOCALE_EXPORT_KEY = './locale/*.json'
@@ -613,8 +626,8 @@ export function describeIssues(row) {
     issues.push({
       code: 'needs-text',
       reason: '该插件没有内置精炼文案，需要生成一条中文说明。',
-      remedy: '点「自动生成」让模型写一条并存入覆盖层；也可把包名发给 Agent 手动补录。',
-      action: { kind: 'generate', label: '自动生成文案' },
+      remedy: '点「翻译优化」会自动让模型写一条并存入覆盖层，无需单独操作；也可把包名发给 Agent 手动补录。',
+      action: { kind: 'hint', label: '由「翻译优化」自动处理' },
     })
   }
   if (row.version && latest === null && typeof row.reason === 'string' && row.reason !== '') {
@@ -673,7 +686,8 @@ export function registerBridge(ctx, dirs) {
       const writeJson = (res, status, body) => {
         try {
           res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify(body))
+          // 每个响应都带上本插件版本，供客户端检测宿主半体是否过旧
+          res.end(JSON.stringify(Object.assign({ rev: OWN_REV }, body)))
         } catch {
           /* 响应已结束等情况忽略 */
         }

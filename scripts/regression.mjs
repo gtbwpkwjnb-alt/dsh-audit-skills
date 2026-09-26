@@ -103,6 +103,7 @@ const post = async (action, body) => {
 }
 const st = await post('status')
 check('POST /status 返回 ok 与数组', st.ok === true && Array.isArray(st.value), JSON.stringify(st).slice(0, 120))
+check('端到端：每个 bridge 响应带 rev 且与本插件版本一致', typeof st.rev === 'string' && st.rev === m.OWN_REV, JSON.stringify({ rev: st.rev, own: m.OWN_REV }))
 check('POST /status 命中沙箱的两个包', st.value.length === 2, JSON.stringify(st.value.map((r) => r.pkg)))
 const up = await post('updates')
 check('POST /updates 返回 ok 与数组', up.ok === true && Array.isArray(up.value))
@@ -188,7 +189,7 @@ const jr2 = m.updateJobStatus(started2.token)
 check('安装失败时 stage=failed 且带原因', jr2.ok && jr2.job.done === true && jr2.job.ok === false && jr2.job.message === 'boom', JSON.stringify(jr2))
 // 问题诊断
 const diagText = m.describeIssues({ pkg: 'x', needsText: true })
-check('needsText → 给出原因/办法/动作(自动生成)', diagText.length === 1 && diagText[0].code === 'needs-text' && diagText[0].remedy.length > 10 && diagText[0].action.kind === 'generate', JSON.stringify(diagText))
+check('needsText → 给出原因/办法/动作(由翻译优化处理)', diagText.length === 1 && diagText[0].code === 'needs-text' && diagText[0].remedy.length > 10 && diagText[0].action.kind === 'hint', JSON.stringify(diagText))
 const diag404 = m.describeIssues({ pkg: 'y', version: '1.2.0', latest: null, reason: 'HTTP 404' })
 check('HTTP 404 → 解释为 GitHub 直装而非裸报错', diag404.length === 1 && diag404[0].code === 'not-on-npm', JSON.stringify(diag404))
 check('正常行无问题项', m.describeIssues({ pkg: 'z', version: '1.0.0', latest: '1.0.0', needsText: false }).length === 0)
@@ -235,6 +236,22 @@ const ovDoc = JSON.parse(fs.readFileSync(m.overlayPath(), 'utf8'))
 check('upsertOverlay 同名替换而非追加', ovDoc.entries.filter((e) => e.pkg === 'dsh-x').length === 1)
 check('upsertOverlay 保留其他条目', ovDoc.entries.some((e) => e.pkg === 'pkg-with-exports') === false || ovDoc.entries.length === 1)
 process.env.DSH_HOME = oldHome
+
+// ─────────────────────── A5 设计契约（锁死交互，防回归） ───────────────────────
+console.log(String.fromCharCode(10) + 'A5 设计契约 / 客户端静态检查')
+const clientSrc = fs.readFileSync(path.join(REPO, 'client.js'), 'utf8')
+const optimizeBody = clientSrc.slice(clientSrc.indexOf('var optimize ='), clientSrc.indexOf('var revert ='))
+// 用户报告的 bug：点「翻译优化」后页面内容错乱，根因是把 /apply 的返回当成了表格行
+check('客户端：apply/revert 后不得把返回值当表格行', !/call\('(apply|revert)'\)[\s\S]{0,500}?setRows\(/.test(clientSrc))
+check('客户端：apply/revert 后必须重新取状态', /call\('apply'\)[\s\S]{0,500}?loadStatus\(/.test(clientSrc) && /call\('revert'\)[\s\S]{0,500}?loadStatus\(/.test(clientSrc))
+check('客户端：三个按钮且职责互不重叠', clientSrc.includes("'翻译优化'") && clientSrc.includes("'还原翻译'") && clientSrc.includes("'刷新'"))
+check('客户端：已删除重复的「刷新状态」「检查更新」', !clientSrc.includes("'刷新状态'") && !clientSrc.includes("'检查更新'"))
+check('客户端：已删除单独的「自动生成」按钮（并入翻译优化）', !clientSrc.includes("'自动生成'") && clientSrc.includes("call('generate'"))
+check('客户端：翻译优化内置生成流程', clientSrc.includes('needsText === true') && optimizeBody.includes("call('generate'") && optimizeBody.includes("call('apply'") && optimizeBody.includes('stepGen'))
+check('客户端：含宿主半体过旧提示', clientSrc.includes('宿主半体版本过旧'))
+check('客户端：显示宿主版本', clientSrc.includes('宿主半体 v'))
+check('宿主：每个 bridge 响应带 rev', /{ rev: OWN_REV }/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
+check('宿主：OWN_REV 形如版本号', /^\d+\.\d+\.\d+/.test(m.OWN_REV), String(m.OWN_REV))
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')
