@@ -502,6 +502,13 @@ export async function finishAfterUpdate(profileDir, pkg, from, to) {
 }
 
 export function startUpdate(ctx, profileDir, pkg) {
+  /* 批量互斥：批量更新在宿主侧串行跑 pnpm；单包更新若并行进入，就会有两条 pnpm
+     同时改同一个 profile（实测风险：客户端一次轮询抖动就会把按钮放开）。
+     只有 startUpdateAll 有幂等，这里必须自己挡。 */
+  const running = updateAllStatus()
+  if (running && running.running === true) {
+    return { ok: false, code: 'batch-running', message: '批量更新正在进行（' + (running.index + 1) + '/' + running.total + '）：等它结束后再更新这一项，避免两条 pnpm 并发安装' }
+  }
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, code: 'unsupported-spec', message: plan.reason }
   const pm = getPluginManager(ctx)
@@ -1432,10 +1439,57 @@ export function revertSkillLocale(_dirs, options = {}) {
   return results
 }
 
+/**
+ * 取 llm 服务。
+ *
+ * 为什么必须走 get()：本插件的宿主半体声明 `inject = []`，而 Cordis 上下文的属性访问
+ * 需要显式 inject —— 直接读 `ctx.llm` 会抛 `cannot get property "llm" without inject`。
+ * 实测证据：POST /generate-skill 返回 `{ok:false, code:'generate-failed',
+ * message:'cannot get property "llm" without inject'}`，于是插件页与技能页的「翻译优化」
+ * 一次都没有真正调用过模型（覆盖层文件从未生成）。
+ *
+ * 属性直读只作为**测试替身**兜底，且必须包在 try 里（Cordis 下它就会抛）。
+ */
+export function llmOf(ctx) {
+  try {
+    const svc = ctx && typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+    if (svc !== undefined && svc !== null) return svc
+  } catch (error) {
+    /* Cordis 未注册或未 inject：继续回落。但要留痕 —— 否则「provider 重复注册」这类
+       真实错误会被静默吞成「LLM 服务不可用」，用户拿不到任何线索。 */
+    try { ctx?.logger?.warn?.('dsh-audit-skills: ctx.get("llm") 失败: ' + String((error && error.message) || error)) } catch { /* ignore */ }
+  }
+  try {
+    const direct = ctx ? ctx.llm : undefined
+    if (direct !== undefined && direct !== null) return direct
+  } catch {
+    /* Cordis 未 inject 时读属性会抛，必须吞掉 */
+  }
+  return undefined
+}
+
+/** 取 settings 服务：与 llmOf 同一原因，同一写法。 */
+export function settingsOf(ctx) {
+  try {
+    const svc = ctx && typeof ctx.get === 'function' ? ctx.get('settings') : undefined
+    if (svc !== undefined && svc !== null) return svc
+  } catch (error) {
+    try { ctx?.logger?.warn?.('dsh-audit-skills: ctx.get("settings") 失败: ' + String((error && error.message) || error)) } catch { /* ignore */ }
+  }
+  try {
+    const direct = ctx ? ctx.settings : undefined
+    if (direct !== undefined && direct !== null) return direct
+  } catch {
+    /* 同上 */
+  }
+  return undefined
+}
+
 /** 让模型为技能生成中文名与中文说明（格式：主要触发词 → 精炼说明）。 */
 export async function generateSkillRefinement(ctx, name, originalDescription) {
-  if (!ctx.llm || typeof ctx.llm.stream !== 'function') {
-    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用' }
+  const llm = llmOf(ctx)
+  if (!llm || typeof llm.stream !== 'function') {
+    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）' }
   }
   const selection = await resolveGenerationModel(ctx)
   if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型' }
@@ -1461,7 +1515,7 @@ export async function generateSkillRefinement(ctx, name, originalDescription) {
       '',
       '只输出 JSON。',
     ].join('\n')
-    let raw = ctx.llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    let raw = llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
     if (raw && typeof raw.then === 'function') raw = await raw
     const stream = raw && raw.stream !== undefined ? raw.stream : raw
     const text = await collectStreamText(stream)
@@ -1907,7 +1961,7 @@ export function parseGenerated(text) {
 /** 解析生成用的 provider/model：优先 settings 里的默认模型，其次 llm 提供商枚举。 */
 export async function resolveGenerationModel(ctx) {
   try {
-    const settings = ctx.get('settings')
+    const settings = settingsOf(ctx)
     if (settings) {
       for (const ns of ['agent-default-model', 'agentDefaultModel']) {
         let value
@@ -1928,11 +1982,13 @@ export async function resolveGenerationModel(ctx) {
     /* 继续回落 */
   }
   try {
-    const providers = await ctx.llm.listProviders()
+    const llm = llmOf(ctx)
+    if (llm === undefined) return undefined
+    const providers = await llm.listProviders()
     for (const provider of Array.isArray(providers) ? providers : []) {
       const id = typeof provider === 'string' ? provider : provider && provider.id
       if (typeof id !== 'string') continue
-      const models = await ctx.llm.listModels(id)
+      const models = await llm.listModels(id)
       for (const model of Array.isArray(models) ? models : []) {
         const modelId = typeof model === 'string' ? model : model && (model.id ?? model.model)
         if (typeof modelId === 'string' && modelId !== '') return { provider: id, model: modelId, source: 'llm:' + id }
@@ -1976,8 +2032,9 @@ export function collectStreamText(records) {
 
 /** 让模型生成一条精炼文案；任何不确定都转成可读的失败原因。 */
 export async function generateRefinement(ctx, pkg, original) {
-  if (!ctx.llm || typeof ctx.llm.stream !== 'function') {
-    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注入或未注册 llm 服务）' }
+  const llm = llmOf(ctx)
+  if (!llm || typeof llm.stream !== 'function') {
+    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）' }
   }
   const selection = await resolveGenerationModel(ctx)
   if (selection === undefined) {
@@ -1986,7 +2043,7 @@ export async function generateRefinement(ctx, pkg, original) {
   try {
     const prompt = buildPrompt(pkg, original)
     const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
-    let raw = ctx.llm.stream({ provider: selection.provider, model: selection.model, messages })
+    let raw = llm.stream({ provider: selection.provider, model: selection.model, messages })
     if (raw && typeof raw.then === 'function') raw = await raw
     const stream = raw && raw.stream !== undefined ? raw.stream : raw
     const text = await collectStreamText(stream)

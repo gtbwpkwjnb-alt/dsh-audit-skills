@@ -1,6 +1,6 @@
 {
   "name": "dsh-audit-skills",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "DeepSeek Harness plugin that refines plugin-page descriptions into clear Chinese (package name preserved), summarizes plugin status, and flags conflicts. Delegates updates/recommendations/guardianship to existing ecosystem plugins.",
   "type": "module",
   "main": "index.js",
@@ -57,9 +57,10 @@
     "@deepseek-ai/schemastery": ">=3.18.2 <4"
   },
   "scripts": {
-    "check": "node scripts/preflight-client.mjs && node scripts/crash-rehearsal.mjs && node scripts/regression.mjs",
+    "check": "node scripts/preflight-client.mjs && node scripts/crash-rehearsal.mjs && node scripts/render-smoke.mjs && node scripts/regression.mjs",
     "preflight": "node scripts/preflight-client.mjs",
     "rehearsal": "node scripts/crash-rehearsal.mjs",
+    "smoke": "node scripts/render-smoke.mjs",
     "regression": "node scripts/regression.mjs"
   }
 }

@@ -82,12 +82,23 @@ check('revert 后 exports 回到旧形态', Object.hasOwn(manAfter.exports, './l
 console.log(String.fromCharCode(10) + 'B bridge：真实 HTTP 打到 route handler')
 const routes = []
 const services = { webServer: { register: (route) => { routes.push(route); return () => {} } } }
-const fakeCtx = {
+const fakeCtxBase = {
   logger: { info() {}, warn() {} },
   effect(fn) { const d = fn(); return () => { if (typeof d === 'function') d() } },
   get: (n) => services[n],
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
+// Cordis 语义：未 inject 的服务名**读属性就抛**。用 Proxy 复刻，
+// 于是本节每条 route handler 都在真实上下文语义下被验证 ——
+// 裸读 ctx.llm 的老代码会当场变成 'cannot get property "llm" without inject'。
+const fakeCtx = new Proxy(fakeCtxBase, {
+  get(target, key) {
+    if (key === 'llm' || key === 'settings' || key === 'skills' || key === 'pluginManager') {
+      throw new Error('cannot get property "' + String(key) + '" without inject')
+    }
+    return target[key]
+  },
+})
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
 check('注册了 14 条 bridge 路由（新增技能更新接口）', routes.length === 14, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
@@ -121,6 +132,20 @@ const gone = await fetch(base + '/status', { method: 'POST', headers: { 'content
 check('端到端：/status 已移除（HTTP 404）', gone.status === 404, String(gone.status))
 const noMgr = await post('update', { pkg: 'pkg-no-exports' })
 check('POST /update 无 pluginManager 时优雅降级', noMgr.ok === false && noMgr.code === 'manager-unavailable', JSON.stringify(noMgr))
+// 端到端复现真机 bug：宿主 ctx 没有 llm 服务时，/generate-skill 必须给出可读的
+// llm-unavailable，而**不是** Cordis 的 'cannot get property "llm" without inject'。
+const savedHomeB = process.env.DSH_HOME
+const savedAgentsB = process.env.DSH_AGENTS_HOME
+process.env.DSH_HOME = path.join(sandbox, 'no-dsh-home')
+process.env.DSH_AGENTS_HOME = path.join(sandbox, 'no-agents-home')
+const e2eSkillDir = path.join(process.env.DSH_AGENTS_HOME, 'skills', 'demo-e2e')
+fs.mkdirSync(e2eSkillDir, { recursive: true })
+fs.writeFileSync(path.join(e2eSkillDir, 'SKILL.md'), ['---', 'name: demo-e2e', 'description: EN only desc', '---', 'body'].join(String.fromCharCode(10)))
+const genNoLlm = await post('generate-skill', { pkg: 'demo-e2e' })
+check('端到端：/generate-skill 在无 llm 服务时给可读原因（不是 without inject）',
+  genNoLlm.ok === false && genNoLlm.code === 'llm-unavailable', JSON.stringify(genNoLlm))
+process.env.DSH_HOME = savedHomeB
+process.env.DSH_AGENTS_HOME = savedAgentsB
 const rv = await post('revert')
 check('POST /revert 返回 ok', rv.ok === true)
 await new Promise((resolve) => server.close(resolve))
@@ -234,6 +259,30 @@ const gen = await m.generateRefinement(ctxGen, 'dsh-x', 'some english')
 check('generateRefinement 全链路成功', gen.ok === true && gen.entry.zh.title === 'dsh-x（甲）', JSON.stringify(gen))
 check('无 llm 服务 → llm-unavailable', (await m.generateRefinement({ get: () => undefined }, 'p', 'd')).code === 'llm-unavailable')
 check('模型输出不可解析 → bad-output', (await m.generateRefinement({ get: (n) => (n === 'settings' ? { read: async () => ({ provider: 'p', model: 'm' }) } : undefined), llm: { stream: () => [{ type: 'text-delta', text: 'nope' }] } }, 'p', 'd')).code === 'bad-output')
+// 真机 bug（v2.7.0 实测）：宿主半体 inject = []，代码却直接读 ctx.llm →
+// Cordis 抛 'cannot get property "llm" without inject'，于是「翻译优化」一次都没真正调用过模型
+// （实测证据：POST /generate-skill 返回该 message，且 skill-catalog.local.json 从未生成）。
+// 这里用 Proxy 复刻 Cordis 的属性访问语义：未 inject 的服务名一读就抛。
+const cordisLike = (services) => new Proxy({
+  get: (n) => services[n],
+}, {
+  get(target, key) {
+    if (key === 'llm' || key === 'settings' || key === 'skills' || key === 'pluginManager') {
+      throw new Error('cannot get property "' + String(key) + '" without inject')
+    }
+    return target[key]
+  },
+})
+const strictPluginCtx = cordisLike({ llm: fakeStreamLlm, settings: { read: async () => ({ provider: 'p', model: 'm' }) } })
+const genStrict = await m.generateRefinement(strictPluginCtx, 'dsh-x', 'some english')
+check('Cordis 语义（未 inject）下也能生成 —— 修掉 cannot get property "llm" without inject', genStrict.ok === true, JSON.stringify(genStrict))
+const skillJson = '{"zhName":"demo（甲）","description":"触发X → 做什么与不做什么"}'
+const strictSkillCtx = cordisLike({ llm: { stream: () => [{ type: 'text-delta', text: skillJson }] }, settings: { read: async () => ({ provider: 'p', model: 'm' }) } })
+const genSkillStrict = await m.generateSkillRefinement(strictSkillCtx, 'demo', 'EN desc')
+check('技能侧生成同样不再依赖 ctx.llm 直读', genSkillStrict.ok === true, JSON.stringify(genSkillStrict))
+check('llmOf / settingsOf：未注册时返回 undefined 而不抛错', m.llmOf({ get: () => undefined }) === undefined && m.settingsOf({ get: () => undefined }) === undefined)
+check('llmOf：属性读取抛错时仍能取到服务（属性直读只作测试替身兜底）', m.llmOf(cordisLike({ llm: { stream: () => [] } })) !== undefined)
+check('宿主：不再有裸读 ctx.llm 的调用点', !/await ctx\.llm|ctx\.llm\.stream/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
 // upsertOverlay：临时 DSH_HOME，绝不碰真实覆盖层
 const oldHome = process.env.DSH_HOME
 process.env.DSH_HOME = sandbox
@@ -281,6 +330,51 @@ check('按钮：更新完成后按结果暗下去（不是消失），刷新才�
   clientSrc.includes("n[pkg] = { state: res.ok ? 'ok' : 'fail'") && clientSrc.includes('absorbBatch(b)') &&
   clientSrc.includes('setDone({})') && clientSrc.includes('setBatchSettled(false)'))
 check('按钮：行内不再有「可点但点了没用」的更新按钮', !clientSrc.includes("op.push(h('button', { key: 'u'"))
+// ── A5b：本轮结果 / 行锁口径（用户报告「状态栏说完成、行里还能点更新」） ──
+check('口径：批量记录与行锁是同一份状态，且页面自己讲明差异',
+  clientSrc.includes('function lockNote(') && clientSrc.includes('不再约束下表') &&
+  clientSrc.includes('锁定保鲜期') && clientSrc.includes('var LOCK_MS = 10 * 60 * 1000'))
+check('口径：记录仍在、锁已超期时只作记录（旧实现把记录与锁一起按 10 分钟处理，超期后只留下矛盾）',
+  clientSrc.includes("if (fresh) absorbBatch(b); else absorbResults('update', b.items)"))
+check('口径：批量 / 单行 / 技能三种更新都会置位本轮锁定（否则一键更新与行锁互相打脸）',
+  (clientSrc.match(/setBatchSettled\(true\)/g) || []).length >= 3 && clientSrc.includes('setBatchSettled(fresh)'))
+check('本轮结果：逐项结果 + 失败原因的下一步动作（修「状态栏红色、功能状态未知」）',
+  clientSrc.includes('function ResultsPanel(') && clientSrc.includes('var ACTION_TEXT =') &&
+  clientSrc.includes('isBad(entry.state) && entry.fix') && clientSrc.includes("'重试'"))
+check('口径：中断的批量不得被说成「已完成」',
+  clientSrc.includes("'已中断（未完成）'") && clientSrc.includes('没有完成时间') && clientSrc.includes('未跑完'))
+check('口径：只有真拿到逐项结果才置位行锁（避免「一键更新已禁用、行锁却不存在」）',
+  (clientSrc.match(/items\.length > 0\) \{ setBatchSettled\(true\); setLockedAt\(Date\.now\(\)\); absorbBatch\(/g) || []).length >= 1 &&
+  clientSrc.includes('if (bb && Array.isArray(bb.items) && bb.items.length > 0)'))
+// ── A5c：对抗复查抓到的两条（都在口径文案里，且都靠「反推」产生） ──
+check('口径：刷新释放行锁不得被说成「超期」（released 与 expired 必须分开）',
+  clientSrc.includes("reason === 'released'") && clientSrc.includes("reason === 'expired'") &&
+  clientSrc.includes('主动释放了行锁'))
+check('口径：行锁时间取自锁本身，不借用批量记录的完成时间（否则「刚刚完成」与「已中断」同屏打架）',
+  clientSrc.includes('var lockedAtState = useState(0)') && clientSrc.includes('setLockedAt(Date.now())') &&
+  clientSrc.includes("(lockedAt > 0 ? agoText(lockedAt) : '刚刚')"))
+check('口径：原因由 Panel 显式判定（lockReason），不让 lockNote 靠 finishedAt 反推',
+  clientSrc.includes("var lockReason = 'session'") && clientSrc.includes("lockReason = 'released'") &&
+  clientSrc.includes("lockReason = 'expired'") && clientSrc.includes("lockReason = 'interrupted'"))
+check('轮询失败必须退避重试（一次抖动就放开按钮会导致并发安装）',
+  clientSrc.includes('var POLL_RETRY_MAX =') && clientSrc.includes('pollBatch(tries + 1)') &&
+  clientSrc.includes('已停止轮询'))
+check('技能更新：宿主静默过滤掉的对象要如实补一条失败说明（而不是「点了没反应」）',
+  clientSrc.includes('宿主没有回应该技能'))
+check('宿主：批量进行中时单包更新被拒绝（batch-running，避免两条 pnpm 并发）',
+  /code: 'batch-running'/.test(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')) && clientSrc.includes("c === 'batch-running'"))
+check('本轮结果：每个失败码都有对应的下一步动作', clientSrc.includes("c === 'generate-failed'") && clientSrc.includes('fixOf(it.code)'))
+check('技能版本列：version → git 提交号 → 未声明 的回落链，不留「—」',
+  clientSrc.includes('function skillRevision(') && clientSrc.includes("'git ' + shortShaOf(r.localSha)") && clientSrc.includes("'未声明'"))
+check('技能来源：根目录压缩成 .dsh/skills、.agents/skills',
+  clientSrc.includes('function shortRoot(') && /shortRoot\(r\.source\)/.test(clientSrc))
+check('数据网格：KPI 露线法 + 表头吸顶 + 横向可滚（信息容纳量优先）',
+  clientSrc.includes('repeat(auto-fit, minmax(94px, 1fr))') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap'))
+check('样式命名空间化，只用 DSH token 并带回落（亮/暗主题都跟随）',
+  clientSrc.includes('--dsw-alias-border-l1,') && clientSrc.includes('--dsw-font-mono,') && clientSrc.includes('prefers-reduced-motion'))
+check('无表情符号（gpt-tasteskill 硬规则：不得使用 emoji）',
+  (clientSrc.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu) || []).length === 0,
+  (clientSrc.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu) || []).join(''))
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
@@ -355,6 +449,9 @@ check('无插件管理器时逐项如实报失败', !!stB1 && stB1.items.every((
 check('非法包名被过滤而不进入批次', m.startUpdateAll(noMgrCtx, sandbox, ['../../evil']).ok === false)
 fs.writeFileSync(batchFile, JSON.stringify({ running: true, startedAt: Date.now(), items: [], total: 0, index: 0, message: 'x' }))
 check('进行中时幂等返回、不重复启动', m.startUpdateAll(noMgrCtx, sandbox, ['pkg-with-exports']).alreadyRunning === true)
+const blockedSingle = m.startUpdate(noMgrCtx, sandbox, 'pkg-with-exports')
+check('批量进行中时单包更新被拒绝（否则两条 pnpm 并发改同一个 profile）',
+  blockedSingle.ok === false && blockedSingle.code === 'batch-running', JSON.stringify(blockedSingle))
 fs.writeFileSync(batchFile, JSON.stringify({ running: true, startedAt: Date.now() - 11 * 60 * 1000, items: [], total: 0, index: 0, message: 'x' }))
 check('超过 10 分钟无进展的 running 视为中断（不卡死后续批量）', m.updateAllStatus().running === false)
 const targetPkgJson = path.join(nm, 'pkg-with-exports', 'package.json')
