@@ -88,7 +88,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 10 条 bridge 路由（新增技能接口）', routes.length === 10, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 13 条 bridge 路由（新增技能优化接口）', routes.length === 13, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -574,6 +574,68 @@ fs.rmSync(skillRoot, { recursive: true, force: true })
 check('客户端：注册了插件审查与技能审查两页', clientSrc.includes("'插件审查'") && clientSrc.includes("'技能审查'"))
 check('客户端：技能页只读并说明原因', clientSrc.includes('IS_SKILL') && clientSrc.includes('技能页**只读**'))
 check('客户端：技能页列头为 技能/描述/版本/来源', clientSrc.includes("'描述'") && clientSrc.includes("'来源'"))
+
+// ─────────────────────── A12 技能改写（直接动 SKILL.md，必须最严格） ───────────────────────
+console.log(String.fromCharCode(10) + 'A12 技能改写与还原')
+check('enforceSkillName 强制「原名（中文）」', m.enforceSkillName('demo', '完全无关') === 'demo（完全无关）')
+check('enforceSkillName 已合规则保留', m.enforceSkillName('demo', 'demo（甲）') === 'demo（甲）')
+check('enforceSkillName 空值退回原名', m.enforceSkillName('demo', '') === 'demo')
+check('parseGeneratedSkill 解析正常', (function () { const g = m.parseGeneratedSkill('{"zhName":"a（甲）","description":"触发 → 说明"}'); return !!g && g.zhName === 'a（甲）' })())
+check('parseGeneratedSkill 字段缺失返回 undefined', m.parseGeneratedSkill('{"zhName":"a"}') === undefined)
+check('skillBaseName 去掉本插件附加的中文名', m.skillBaseName('ponytail（YAGNI 极简）') === 'ponytail' && m.skillBaseName('plain') === 'plain')
+const skRoot2 = fs.mkdtempSync(path.join(os.tmpdir(), 'skillw-'))
+const dshH = path.join(skRoot2, 'dsh')
+const agH = path.join(skRoot2, 'agents')
+const hi2 = path.join(dshH, 'skills')
+const oneSrc = ['---', 'name: demo-one', 'description: Use when X happens', 'license: MIT', 'argument-hint: "[a|b]"', '---', '', '# Body', 'text here'].join(String.fromCharCode(10))
+const blkSrc = ['---', 'name: demo-block', 'description: |', '  第一行说明', '  第二行说明', 'metadata:', '  version: "1.0.0"', '---', '', '# Block Body'].join(String.fromCharCode(10))
+const noFmSrc = 'no frontmatter at all'
+fs.mkdirSync(path.join(hi2, 'demo-one'), { recursive: true })
+fs.writeFileSync(path.join(hi2, 'demo-one', 'SKILL.md'), oneSrc)
+fs.mkdirSync(path.join(hi2, 'demo-block'), { recursive: true })
+fs.writeFileSync(path.join(hi2, 'demo-block', 'SKILL.md'), blkSrc)
+fs.mkdirSync(path.join(hi2, 'demo-nofm2'), { recursive: true })
+fs.writeFileSync(path.join(hi2, 'demo-nofm2', 'SKILL.md'), noFmSrc)
+const savedH7 = process.env.DSH_HOME
+const savedA7 = process.env.DSH_AGENTS_HOME
+process.env.DSH_HOME = dshH
+process.env.DSH_AGENTS_HOME = agH
+const wEntries = [
+  { pkg: 'demo-one', zh: { name: 'demo-one（甲）', description: 'Use when X、触发词X → 做什么与不做 什么的精炼说明' } },
+  { pkg: 'demo-block', zh: { name: 'demo-block（乙）', description: '触发乙 → 乙的说明' } },
+]
+m.upsertSkillOverlay('demo-one', wEntries[0].zh)
+m.upsertSkillOverlay('demo-block', wEntries[1].zh)
+check('技能文案写入覆盖层后可读回', m.readSkillCatalog().some((e) => e.pkg === 'demo-one'))
+const applied1 = m.applySkillLocale([])
+check('应用：两个技能都成功', applied1.filter((r) => r.state === 'applied').length === 2, JSON.stringify(applied1))
+const oneAfter = fs.readFileSync(path.join(hi2, 'demo-one', 'SKILL.md'), 'utf8')
+check('改写：name 变为「原名（中文名）」', oneAfter.includes('name: demo-one（甲）'))
+check('改写：description 被替换为中文', oneAfter.indexOf('description: ') >= 0 && oneAfter.indexOf('Use when X happens') < 0)
+check('改写：其他 frontmatter 字段逐字保留', oneAfter.includes('license: MIT') && oneAfter.includes('argument-hint: "[a|b]"'))
+check('改写：正文逐字保留', oneAfter.includes('# Body') && oneAfter.includes('text here'))
+const blkAfter = fs.readFileSync(path.join(hi2, 'demo-block', 'SKILL.md'), 'utf8')
+check('块标量 description 被整体吃掉（无残行）', blkAfter.indexOf('第一行说明') < 0 && blkAfter.indexOf('第二行说明') < 0)
+check('块标量后的 metadata 段被完整保留', blkAfter.includes('metadata:') && blkAfter.includes('version: "1.0.0"'))
+const rowsAfter = m.collectSkills({ get: () => undefined })
+check('版本读取支持 metadata.version', (rowsAfter.find((r) => r.pkg === 'demo-block') || {}).version === '1.0.0')
+check('应用后仍以原名成行（稳定标识）', rowsAfter.some((r) => r.pkg === 'demo-one'))
+check('应用后判定为已优化', (rowsAfter.find((r) => r.pkg === 'demo-one') || {}).localized === true)
+check('应用后 displayName 是带中文名的形态', (rowsAfter.find((r) => r.pkg === 'demo-one') || {}).displayName === 'demo-one（甲）')
+const applied2 = m.applySkillLocale([])
+check('二次应用幂等（仍能找到目标）', applied2.filter((r) => r.state === 'applied').length === 2, JSON.stringify(applied2))
+m.upsertSkillOverlay('demo-nofm2', { name: 'x（x）', description: 'y' })
+const badWrite = m.applySkillLocale([])
+check('无 frontmatter 时拒绝改写且不动文件', (function () { const r0 = badWrite.find((x) => x.pkg === 'demo-nofm2'); return !!r0 && r0.state === 'failed' && fs.readFileSync(path.join(hi2, 'demo-nofm2', 'SKILL.md'), 'utf8') === noFmSrc })())
+const reverted = m.revertSkillLocale([])
+check('还原：两项均为 restored', reverted.filter((r) => r.state === 'restored').length === 2, JSON.stringify(reverted))
+check('还原：单行文件与原文逐字节一致', fs.readFileSync(path.join(hi2, 'demo-one', 'SKILL.md'), 'utf8') === oneSrc)
+check('还原：块标量文件与原文逐字节一致', fs.readFileSync(path.join(hi2, 'demo-block', 'SKILL.md'), 'utf8') === blkSrc)
+process.env.DSH_HOME = savedH7
+process.env.DSH_AGENTS_HOME = savedA7
+fs.rmSync(skRoot2, { recursive: true, force: true })
+check('客户端：技能页已启用翻译优化与还原翻译', clientSrc.includes("call('apply-skills'") && clientSrc.includes("call('revert-skills'") && clientSrc.includes("call('generate-skill'"))
+check('客户端：技能优化也跳过已优化', clientSrc.includes('个技能均已优化，无需处理'))
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')

@@ -212,6 +212,46 @@ window.__ModuleLoader__.load({
       var optimize = useCallback(function () {
         setBusy('optimize');
         setNote({ kind: 'note', text: '正在读取状态…' });
+        if (IS_SKILL) {
+          return snapshot().then(function (cur) {
+            if (!cur) { setBusy(''); return; }
+            var pend = cur.filter(function (r) { return r.needsText === true; });
+            var toApplyS = cur.filter(function (r) { return r.localized !== true; });
+            if (toApplyS.length === 0) {
+              setBusy('');
+              setNote({ kind: 'ok', text: '全部 ' + cur.length + ' 个技能均已优化，无需处理。' });
+              return;
+            }
+            var gOk = 0;
+            var gFail = [];
+            var si = 0;
+            var stepSkill = function () {
+              if (si >= pend.length) {
+                setNote({ kind: 'note', text: '正在应用（' + toApplyS.length + ' 个，跳过已优化 ' + (cur.length - toApplyS.length) + ' 个）…' });
+                return call('apply-skills', { pkgs: toApplyS.map(function (r) { return r.pkg; }) }).then(absorb).then(function (ap) {
+                  var applied = ap && Array.isArray(ap.value) ? ap.value.filter(function (x) { return x.state === 'applied'; }).length : 0;
+                  return snapshot({ force: true }).then(function (v) {
+                    setBusy('');
+                    if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用失败：' + ((ap && ap.message) || '未知') }); return; }
+                    var ss = v ? summarize(v) : null;
+                    setNote({ kind: gFail.length ? 'err' : 'ok',
+                      text: '技能优化完成：新生成 ' + gOk + ' 条，应用 ' + applied + ' 项，跳过已优化 ' + (cur.length - toApplyS.length) + ' 个' +
+                        (ss ? '；当前已优化 ' + ss.refined + '/' + ss.total : '') +
+                        (gFail.length ? '；生成失败 ' + gFail.length + ' 个：' + gFail.join('、') : '') });
+                  });
+                });
+              }
+              var pkg = pend[si].pkg;
+              si += 1;
+              setNote({ kind: 'note', text: '生成技能文案 ' + si + '/' + pend.length + '：' + pkg + ' …（调用模型，消耗 token）' });
+              return call('generate-skill', { pkg: pkg }).then(absorb).then(function (g) {
+                if (g && g.ok) gOk += 1; else gFail.push(pkg + '（' + ((g && g.message) || '未知') + '）');
+                return stepSkill();
+              });
+            };
+            return stepSkill();
+          });
+        }
         return snapshot().then(function (cur) {
           if (!cur) { setBusy(''); return; }
           // 跳过已优化的：needsText = 压根没有文案（要生成）；未 localized = 有文案但未落盘（要应用）
@@ -258,6 +298,16 @@ window.__ModuleLoader__.load({
       var revert = useCallback(function () {
         setBusy('revert');
         setNote({ kind: 'note', text: '正在还原…' });
+        if (IS_SKILL) {
+          return call('revert-skills').then(absorb).then(function (r) {
+            var restored = r && Array.isArray(r.value) ? r.value.filter(function (x) { return x.state === 'restored'; }).length : 0;
+            return snapshot({ force: true }).then(function () {
+              setBusy('');
+              if (r && r.ok) setNote({ kind: 'ok', text: '技能还原完成：' + restored + ' 项（SKILL.md 已按备份恢复）' });
+              else setNote({ kind: 'err', text: '还原失败：' + ((r && r.message) || '未知') });
+            });
+          });
+        }
         return call('revert').then(absorb).then(function (r) {
           var restored = r && Array.isArray(r.value) ? r.value.filter(function (x) { return x.state === 'restored'; }).length : 0;
           return snapshot({ force: true }).then(function (v) {
@@ -346,15 +396,9 @@ window.__ModuleLoader__.load({
       var s = rows ? summarize(rows) : null;
 
       var head = h('div', { style: S.bar },
-        IS_SKILL
-          ? h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态')
-          : h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
-        IS_SKILL
-          ? null
-          : h('button', { type: 'button', disabled: !!busy, onClick: revert }, busy === 'revert' ? '还原中…' : '还原翻译'),
-        IS_SKILL
-          ? null
-          : h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态'),
+        h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
+        h('button', { type: 'button', disabled: !!busy, onClick: revert }, busy === 'revert' ? '还原中…' : '还原翻译'),
+        h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态'),
         (!IS_SKILL && s && s.upd > 0)
           ? h('button', { type: 'button', disabled: !!busy, onClick: function () { updateAll(rows); } },
               busy === 'update:all' ? '批量更新中…' : '一键更新（' + s.upd + '）')

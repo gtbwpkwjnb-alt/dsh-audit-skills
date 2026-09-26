@@ -1024,7 +1024,13 @@ export function scanSkillCandidates() {
           bytes: text.length,
           frontmatter: fm.present,
           description: typeof fm.fields.description === 'string' ? fm.fields.description : '',
-          version: typeof fm.fields.version === 'string' ? fm.fields.version : null,
+          version: typeof fm.fields.version === 'string' && fm.fields.version !== ''
+            ? fm.fields.version
+            : (function () {
+                // 版本也可能写在 metadata.version 下（实测 agent-reach 就是）
+                const nested = /^\s+version:\s*["']?([^"'\r\n]+)["']?\s*$/m.exec(text.slice(0, text.indexOf('---', 3)))
+                return nested === null ? null : nested[1].trim()
+              })(),
           nestedSkillFiles: nested,
           isGit: fs.existsSync(path.join(dir, '.git')),
         })
@@ -1071,6 +1077,12 @@ export function visibleSkillNames(ctx) {
   }
 }
 
+/** 稳定标识：去掉本插件附加的「（中文名）」后的原名。 */
+export function skillBaseName(name) {
+  const m = /^(.+?)（[^（）]*）$/.exec(String(name ?? ''))
+  return m === null ? String(name ?? '') : m[1]
+}
+
 /** 判定描述语言：中文 / 英文 / 混合 / 空。 */
 export function descriptionLanguage(text) {
   const s = String(text ?? '')
@@ -1082,17 +1094,229 @@ export function descriptionLanguage(text) {
   return cjk >= latin / 3 ? '中文为主' : '英文为主'
 }
 
+/** 技能文案覆盖层（与插件侧同构：内置 catalog ∪ 用户覆盖层）。 */
+export function skillOverlayPath() {
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  return path.join(home, 'dsh-audit-skills', 'skill-catalog.local.json')
+}
+
+const SKILL_CATALOG_FILE = path.join(PACKAGE_ROOT, 'references', 'dsh-skill-locale-catalog.json')
+
+/** 内置技能文案 ∪ 覆盖层（覆盖层优先）。 */
+export function readSkillCatalog() {
+  const merged = new Map()
+  for (const file of [SKILL_CATALOG_FILE, skillOverlayPath()]) {
+    for (const entry of readEntries(file)) {
+      if (entry && typeof entry.pkg === 'string') merged.set(entry.pkg, entry)
+    }
+  }
+  return Array.from(merged.values())
+}
+
+/** YAML 安全输出：统一用双引号标量，避免出现会破坏严格解析的 ": "。 */
+function yamlQuote(value) {
+  return JSON.stringify(String(value ?? ''))
+}
+
+/**
+ * 改写 SKILL.md 的 frontmatter：只动 name 与 description，**其余字段逐字保留**。
+ *
+ * 真实文件里 description 有单行、块标量（| / >）、以及"键后换行"三种形态，
+ * 必须都能正确吃掉原文，否则会把 description 的残行留在文件里造成 YAML 损坏。
+ */
+export function rewriteSkillFrontmatter(text, opts) {
+  const src = String(text ?? '')
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(src)
+  if (m === null) return undefined
+  const body = src.slice(m[0].length)
+  const lines = m[1].split(/\r?\n/)
+  const out = []
+  let sawName = false
+  let sawDesc = false
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (/^name:\s*/.test(line)) {
+      out.push('name: ' + String(opts.name))
+      sawName = true
+      i += 1
+      continue
+    }
+    if (/^description:\s*/.test(line)) {
+      sawDesc = true
+      i += 1
+      // 吃掉原值：块标量（后续缩进行）或折叠的续行
+      while (i < lines.length && /^\s+\S/.test(lines[i])) i += 1
+      out.push('description: ' + yamlQuote(opts.description))
+      continue
+    }
+    out.push(line)
+    i += 1
+  }
+  if (!sawName) out.unshift('name: ' + String(opts.name))
+  if (!sawDesc) out.push('description: ' + yamlQuote(opts.description))
+  return '---\n' + out.join('\n') + '\n---' + body
+}
+
+/** 应用技能文案：改写 name 与 description，写前留一次备份。 */
+export function applySkillLocale(_dirs, options = {}) {
+  const entries = options.entries ?? readSkillCatalog()
+  const results = []
+  const cands = scanSkillCandidates()
+  const byName = new Map()
+  for (const c of cands) {
+    const key = skillBaseName(c.name)
+    if (!byName.has(key)) byName.set(key, [])
+    byName.get(key).push(c)
+  }
+  for (const entry of entries) {
+    try {
+      const list = byName.get(entry.pkg)
+      if (list === undefined) {
+        results.push({ pkg: entry.pkg, state: 'skipped-not-installed' })
+        continue
+      }
+      list.sort((a, b) => a.rank - b.rank)
+      const target = list[0]
+      const text = fs.readFileSync(target.path, 'utf8')
+      const next = rewriteSkillFrontmatter(text, {
+        name: entry.zh && entry.zh.name ? entry.zh.name : entry.pkg,
+        description: entry.zh && entry.zh.description ? entry.zh.description : '',
+      })
+      if (next === undefined) {
+        results.push({ pkg: entry.pkg, state: 'failed', message: '缺少 frontmatter，已跳过（不会破坏文件）' })
+        continue
+      }
+      if (next === text) {
+        results.push({ pkg: entry.pkg, state: 'applied', note: 'unchanged' })
+        continue
+      }
+      if (!hasAnyBackup(target.path)) backupOnce(target.path)
+      fs.writeFileSync(target.path, next)
+      results.push({ pkg: entry.pkg, state: 'applied', path: target.path })
+    } catch (error) {
+      results.push({ pkg: entry.pkg, state: 'failed', message: String((error && error.message) || error) })
+    }
+  }
+  return results
+}
+
+/** 还原技能文案：有备份才还原（技能文件无法凭生成内容反推原文）。 */
+export function revertSkillLocale(_dirs, options = {}) {
+  const entries = options.entries ?? readSkillCatalog()
+  const results = []
+  for (const entry of entries) {
+    try {
+      const list = scanSkillCandidates().filter((c) => skillBaseName(c.name) === entry.pkg)
+      if (list.length === 0) {
+        results.push({ pkg: entry.pkg, state: 'skipped-not-installed' })
+        continue
+      }
+      list.sort((a, b) => a.rank - b.rank)
+      const path0 = list[0].path
+      let restored = 0
+      for (const suffix of BACKUP_SUFFIXES) {
+        const b = path0 + suffix
+        if (fs.existsSync(b)) {
+          fs.copyFileSync(b, path0)
+          fs.unlinkSync(b)
+          restored += 1
+        }
+      }
+      results.push({ pkg: entry.pkg, state: restored > 0 ? 'restored' : 'no-backup', restored })
+    } catch (error) {
+      results.push({ pkg: entry.pkg, state: 'failed', message: String((error && error.message) || error) })
+    }
+  }
+  return results
+}
+
+/** 让模型为技能生成中文名与中文说明（格式：主要触发词 → 精炼说明）。 */
+export async function generateSkillRefinement(ctx, name, originalDescription) {
+  if (!ctx.llm || typeof ctx.llm.stream !== 'function') {
+    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用' }
+  }
+  const selection = await resolveGenerationModel(ctx)
+  if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型' }
+  try {
+    const prompt = [
+      '你在为 DSH 的技能库做中文化精炼。下面是某个技能的英文/中英混合说明。',
+      '',
+      '技能标识：' + name,
+      '原始说明：',
+      '"""',
+      String(originalDescription || '').slice(0, 2000),
+      '"""',
+      '',
+      '要求：',
+      '1. 只输出严格 JSON，不要 markdown 代码块，不要多余文字。',
+      '2. 结构：{"zhName":"...","description":"..."}',
+      '3. zhName：必须是「' + name + '（中文名）」的形态，中文名 2~8 个字，概括这个技能做什么。',
+      '4. description：只写一行，格式为「主要触发词 → 精炼说明」。',
+      '   · 触发词必须**保留原文里的触发关键词**（含英文词），用、分隔，让人一眼知道什么时候会用到它',
+      '   · 精炼说明用中文，说清「做什么 + 边界（不做什么）」，40~90 字',
+      '5. 不要使用半角冒号加空格（: ），避免破坏 YAML；需要时用全角：',
+      '6. 只依据原文，不要编造原文未提及的能力。',
+      '',
+      '只输出 JSON。',
+    ].join('\n')
+    let raw = ctx.llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    if (raw && typeof raw.then === 'function') raw = await raw
+    const stream = raw && raw.stream !== undefined ? raw.stream : raw
+    const text = await collectStreamText(stream)
+    const parsed = parseGeneratedSkill(typeof text === 'string' ? text : '')
+    if (parsed === undefined) return { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON', raw: String(text).slice(0, 400) }
+    // 强制命名约定：与原包名一致的做法——原名开头，中文名以（）附加
+    parsed.zhName = enforceSkillName(name, parsed.zhName)
+    parsed.description = String(parsed.description).replace(/:\s/g, '：')
+    return { ok: true, entry: { pkg: name, zh: { name: parsed.zhName, description: parsed.description } }, selection }
+  } catch (error) {
+    return { ok: false, code: 'generate-failed', message: String((error && error.message) || error) }
+  }
+}
+
+/** 强制「原名（中文名）」形态，不依赖模型自觉。 */
+export function enforceSkillName(name, candidate) {
+  const t = String(candidate ?? '').trim()
+  if (t === '' || t === name) return name
+  if (t.startsWith(name)) return t
+  const inner = t.replace(/^[^（(]*[（(]?/, '').replace(/[）)]\s*$/, '').trim()
+  return inner === '' || inner === t ? name + '（' + t + '）' : name + '（' + inner + '）'
+}
+
+/** 解析技能生成结果。 */
+export function parseGeneratedSkill(text) {
+  if (typeof text !== 'string') return undefined
+  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '')
+  const a = cleaned.indexOf('{')
+  const b = cleaned.lastIndexOf('}')
+  if (a < 0 || b <= a) return undefined
+  try {
+    const doc = JSON.parse(cleaned.slice(a, b + 1))
+    if (!doc || typeof doc.zhName !== 'string' || typeof doc.description !== 'string') return undefined
+    if (doc.zhName.trim() === '' || doc.description.trim() === '') return undefined
+    return { zhName: doc.zhName.trim(), description: doc.description.trim() }
+  } catch {
+    return undefined
+  }
+}
+
 /** 收集技能行（与插件行同构）。 */
 export function collectSkills(ctx) {
   const cands = scanSkillCandidates()
   const visible = visibleSkillNames(ctx)
   const byName = new Map()
   for (const c of cands) {
-    if (!byName.has(c.name)) byName.set(c.name, [])
-    byName.get(c.name).push(c)
+    // 按**稳定标识**分组：应用后 frontmatter 的 name 会变成「原名（中文名）」，
+    // 若仍按原样分组，二次应用与还原都会找不到目标。
+    const key = skillBaseName(c.name)
+    if (!byName.has(key)) byName.set(key, [])
+    byName.get(key).push(c)
   }
+  const catalog = new Map(readSkillCatalog().map((e) => [e.pkg, e]))
   const rows = []
   for (const [name, list] of byName) {
+    const entry = catalog.get(name)
     list.sort((a, b) => a.rank - b.rank)
     const top = list[0]
     const shadowed = list.slice(1)
@@ -1104,8 +1328,10 @@ export function collectSkills(ctx) {
       installed: true,
       enabled: isVisible,
       version: top.version,
-      localized: descriptionLanguage(top.description) !== '英文',
-      needsText: String(top.description).trim() === '',
+      // 优化状态 = 该技能的 name 已被本插件改写为「原名（中文名）」
+      localized: entry !== undefined && top.name === (entry.zh && entry.zh.name ? entry.zh.name : ''),
+      needsText: entry === undefined,
+      displayName: top.name,
       source: 'rank ' + top.rank + ' · ' + top.root,
       skillPath: top.path,
       bytes: top.bytes,
@@ -1130,6 +1356,7 @@ export function collectSkills(ctx) {
         version: null,
         localized: false,
         needsText: false,
+        displayName: name,
         source: '随 DSH 提供',
         skillPath: null,
         bytes: 0,
@@ -1167,7 +1394,9 @@ export function auditSkills(rows) {
         evidence: 'name=' + r.pkg + ' 但目录/文件名不同',
         remedy: '两者不一致时，引用该技能容易出现歧义。建议改为一致。' })
     }
-    if (r.needsText === true) {
+    // 注意：这里必须判「描述真的为空」，不能用 needsText ——
+    // skills 的 needsText 语义是「没有文案条目」，与描述是否为空是两回事。
+    if (r.descriptionLang === '空') {
       add({ kind: 'conflict', key: 'nodesc-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
         title: 'description 为空',
         evidence: r.skillPath,
@@ -1578,6 +1807,27 @@ export function upsertOverlay(pkg, entry) {
   }
 }
 
+/** 把一条技能生成结果写入技能覆盖层。 */
+export function upsertSkillOverlay(pkg, entry) {
+  try {
+    const file = skillOverlayPath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    let doc = { schema_version: 1, note: '技能中文名与中文说明。', entries: [] }
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (raw && Array.isArray(raw.entries)) doc = raw
+    } catch { /* 首次创建 */ }
+    // 宽容入参：既接受 {zh:{name,description}}（与插件侧 upsertOverlay 对齐），
+    // 也接受直接给 {name,description}
+    const zh = entry && entry.zh !== undefined ? entry.zh : entry
+    doc.entries = doc.entries.filter((e) => !(e && e.pkg === pkg)).concat([{ pkg: pkg, zh: zh }])
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n')
+    return { ok: true, path: file, total: doc.entries.length }
+  } catch (error) {
+    return { ok: false, message: String((error && error.message) || error) }
+  }
+}
+
 /**
  * 为一行数据生成「问题 → 原因 → 解决办法 → 可执行动作」。
  * 界面不应只丢一个 HTTP 404 给用户。
@@ -1784,6 +2034,59 @@ export function registerBridge(ctx, dirs) {
               })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/apply-skills',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const options = pkgs === null ? {} : { entries: readSkillCatalog().filter((e) => pkgs.includes(e.pkg)) }
+              writeJson(res, 200, { ok: true, value: applySkillLocale(dirs, options) })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/revert-skills',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const options = pkgs === null ? {} : { entries: readSkillCatalog().filter((e) => pkgs.includes(e.pkg)) }
+              writeJson(res, 200, { ok: true, value: revertSkillLocale(dirs, options) })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/generate-skill',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const pkg = body && typeof body.pkg === 'string' ? body.pkg : ''
+              if (pkg === '' || !isSafePackageName(pkg)) {
+                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '技能标识非法' })
+                return
+              }
+              const cand = scanSkillCandidates().filter((c) => skillBaseName(c.name) === pkg).sort((a, b) => a.rank - b.rank)[0]
+              if (cand === undefined) {
+                writeJson(res, 200, { ok: false, code: 'not-found', message: '未找到该技能' })
+                return
+              }
+              const generated = await generateSkillRefinement(ctx, pkg, cand.description)
+              if (generated.ok !== true) { writeJson(res, 200, generated); return }
+              const saved = upsertSkillOverlay(pkg, generated.entry)
+              writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'generate-failed', message: String(error?.message ?? error) })
             }
           },
         },

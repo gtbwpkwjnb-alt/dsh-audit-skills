@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "note": "内置技能中文名与中文说明。用户覆盖层在 ~/.dsh/dsh-audit-skills/skill-catalog.local.json，优先级更高。",
+  "entries": []
+}
