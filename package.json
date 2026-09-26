@@ -1,6 +1,6 @@
 {
   "name": "dsh-audit-skills",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "DeepSeek Harness plugin that refines plugin-page descriptions into clear Chinese (package name preserved), summarizes plugin status, and flags conflicts. Delegates updates/recommendations/guardianship to existing ecosystem plugins.",
   "type": "module",
   "main": "index.js",

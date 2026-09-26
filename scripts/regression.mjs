@@ -88,7 +88,7 @@ const fakeCtx = {
   inject(names, cb) { if (names.every((n) => services[n] !== undefined)) cb({ get: fakeCtx.get, effect: fakeCtx.effect, webServer: services.webServer }) },
 }
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 9 条 bridge 路由（新增审查忽略接口）', routes.length === 9, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 10 条 bridge 路由（新增技能接口）', routes.length === 10, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -252,7 +252,7 @@ const snapshotBody = clientSrc.slice(clientSrc.indexOf('var snapshot ='), client
 // 单一快照原则：表格行只能由 snapshot() 写入
 const setRowsCount = (clientSrc.match(/setRows\(/g) || []).length
 check('单一数据源：setRows 只出现 1 次（仅 snapshot 内）', setRowsCount === 1, '出现 ' + setRowsCount + ' 次')
-check('单一数据源：snapshot 只调 /updates', snapshotBody.includes("call('updates'") && !snapshotBody.includes("call('status'"), snapshotBody.slice(0, 120).replace(/\s+/g, ' '))
+check('单一数据源：snapshot 按页二选一，只用这两个端点', /call\(IS_SKILL \? 'skills' : 'updates'/.test(snapshotBody) && !snapshotBody.includes("call('status'"), snapshotBody.slice(0, 130).replace(/\s+/g, ' '))
 check('客户端不再直接使用 /status', !clientSrc.includes("call('status'") && !clientSrc.includes('loadStatus'))
 // 用户报告的 bug：点「翻译优化」后页面内容错乱（把 /apply 返回值当行）
 check('apply/revert 后不得把返回值当表格行', !/call\('(apply|revert)'\)[\s\S]{0,600}?setRows\(/.test(clientSrc))
@@ -513,10 +513,67 @@ process.env.DSH_HOME = savedHome5
 delete process.env.DSH_APP_ASAR
 fs.rmSync(auditRoot, { recursive: true, force: true })
 // 客户端契约
-check('客户端：审查并入刷新，无独立按钮', clientSrc.includes('call(\'updates\'') && !clientSrc.includes("'安全审查'"))
+check('客户端：审查并入刷新，无独立按钮', /call\(IS_SKILL \? 'skills' : 'updates'/.test(clientSrc) && !clientSrc.includes("'安全审查'"))
 check('客户端：事实/推断分组展示', clientSrc.includes('另有 ') && clientSrc.includes('仅供知悉'))
 check('客户端：严重度用文字而非仅颜色', clientSrc.includes("high: '高'") && clientSrc.includes("medium: '中'"))
 check('客户端：提供忽略入口', clientSrc.includes("call('ignore'") && clientSrc.includes('忽略此条'))
+
+// ─────────────────────── A11 技能页（与插件页同构） ───────────────────────
+console.log(String.fromCharCode(10) + 'A11 技能页规则')
+check('技能 frontmatter 解析：正常字段', (function () { const f = m.parseSkillFrontmatter(['---', 'name: demo', 'description: 一段说明', 'version: 1.2.3', '---', 'body'].join(String.fromCharCode(10))); return f.present && f.fields.name === 'demo' && f.fields.version === '1.2.3' })())
+check('技能 frontmatter 解析：块标量续行会拼接', (function () { const f = m.parseSkillFrontmatter(['---', 'description: 第一行', '  第二行', '---'].join(String.fromCharCode(10))); return f.fields.description === '第一行 第二行' })())
+check('技能 frontmatter 缺失时 present=false', m.parseSkillFrontmatter('没有 frontmatter').present === false)
+check('描述语言：纯英文', m.descriptionLanguage('This is an English only description') === '英文')
+check('描述语言：纯中文', m.descriptionLanguage('这是一段纯中文说明') === '中文')
+check('描述语言：中英混合', m.descriptionLanguage('使用 skill 完成任务的一套方法论框架') === '中文为主')
+check('描述语言：空', m.descriptionLanguage('   ') === '空')
+const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-'))
+const dshHome = path.join(skillRoot, 'dsh')
+const agentsHome = path.join(skillRoot, 'agents')
+const skHi = path.join(dshHome, 'skills')
+const skLo = path.join(agentsHome, 'skills')
+const mkSkill = (base, dir, frontmatter) => {
+  fs.mkdirSync(path.join(base, dir), { recursive: true })
+  fs.writeFileSync(path.join(base, dir, 'SKILL.md'), frontmatter)
+}
+mkSkill(skHi, 'demo-good', ['---', 'name: demo-good', 'description: 中文说明', 'version: 0.1.0', '---', 'body'].join(String.fromCharCode(10)))
+mkSkill(skHi, 'demo-nofm', 'no frontmatter here')
+mkSkill(skHi, 'demo-mismatch', ['---', 'name: another-name', 'description: 中文', '---'].join(String.fromCharCode(10)))
+mkSkill(skHi, 'demo-nodesc', ['---', 'name: demo-nodesc', 'description:', '---'].join(String.fromCharCode(10)))
+mkSkill(skHi, path.join('demo-nested', 'modes', 'inner'), ['---', 'name: inner', '---'].join(String.fromCharCode(10)))
+mkSkill(skHi, 'demo-nested', ['---', 'name: demo-nested', 'description: 中文', '---'].join(String.fromCharCode(10)))
+fs.writeFileSync(path.join(skHi, 'demo-flat.md'), ['---', 'name: demo-flat', 'description: English only', '---'].join(String.fromCharCode(10)))
+mkSkill(skLo, 'demo-good', ['---', 'name: demo-good', 'description: 低优先级那份', '---'].join(String.fromCharCode(10)))
+const savedHome6 = process.env.DSH_HOME
+const savedAgentsHome = process.env.DSH_AGENTS_HOME
+process.env.DSH_HOME = dshHome
+process.env.DSH_AGENTS_HOME = agentsHome
+const skRows = m.collectSkills({ get: () => undefined })
+const byName2 = new Map(skRows.map((r) => [r.pkg, r]))
+check('技能扫描：目录形态被发现', byName2.has('demo-good'))
+check('技能扫描：顶层 .md 形态被发现', byName2.has('demo-flat'))
+check('技能扫描：name 取 frontmatter 而非目录名', byName2.has('another-name') && !byName2.has('demo-mismatch'))
+check('技能扫描：版本可读', (byName2.get('demo-good') || {}).version === '0.1.0')
+check('遮蔽：取高优先级那份（rank 400）', (byName2.get('demo-good') || {}).skillPath.includes(path.join('dsh', 'skills')))
+check('遮蔽：记录了低优先级那份', ((byName2.get('demo-good') || {}).shadowed || []).length === 1)
+const skFind = m.auditSkills(skRows)
+const hasF = (pkg, kw) => skFind.some((f) => f.pkg === pkg && f.title.includes(kw))
+check('S1：缺 frontmatter -> 事实级高', hasF('demo-nofm', '缺少 frontmatter') && skFind.find((f) => f.pkg === 'demo-nofm').severity === 'high')
+check('S2：name 与目录名不一致 -> 报出', hasF('another-name', '不一致'))
+check('S3：description 为空 -> 报出', hasF('demo-nodesc', '为空'))
+check('S4：嵌套 SKILL.md 不会被发现 -> 报出', hasF('demo-nested', '不会被发现'))
+check('S5：纯英文描述 -> 提示可读性且明确只读', (function () { const f = skFind.find((x) => x.pkg === 'demo-flat'); return !!f && f.remedy.includes('只读') })())
+check('S6：同名被遮蔽 -> 事实级高', (function () { const f = skFind.find((x) => x.pkg === 'demo-good' && x.title.includes('遮蔽')); return !!f && f.severity === 'high' })())
+check('demo-good 只报「被遮蔽」一条（无 frontmatter/名称/描述问题）', (function () { const g2 = skFind.filter((x) => x.pkg === 'demo-good'); return g2.length === 1 && g2[0].title.includes('遮蔽') })())
+const withBundled = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx' }] } : undefined) })
+const bundledRow = withBundled.find((r) => r.pkg === 'office-docx')
+check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundledRow.source.includes('随 DSH 提供') && bundledRow.bundled === true)
+process.env.DSH_HOME = savedHome6
+process.env.DSH_AGENTS_HOME = savedAgentsHome
+fs.rmSync(skillRoot, { recursive: true, force: true })
+check('客户端：注册了插件审查与技能审查两页', clientSrc.includes("'插件审查'") && clientSrc.includes("'技能审查'"))
+check('客户端：技能页只读并说明原因', clientSrc.includes('IS_SKILL') && clientSrc.includes('技能页**只读**'))
+check('客户端：技能页列头为 技能/描述/版本/来源', clientSrc.includes("'描述'") && clientSrc.includes("'来源'"))
 
 // ─────────────────────── C 真实 profile 只读 ───────────────────────
 console.log(String.fromCharCode(10) + 'C 真实 profile：只读检查（不写入）')

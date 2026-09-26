@@ -940,6 +940,260 @@ export function auditPackages(ctx, profileDir) {
   }
 }
 
+// ───────────────────────── 技能（skills）─────────────────────────
+//
+// 与插件侧**同构**：一个数据源、一套行形状、一组审查规则。
+// 但三点本质不同，必须区别对待（照搬会出错）：
+//   1. 技能不是 npm 包 —— 没有 registry 可比版本；只有 git 来源的目录能比对远端
+//   2. 技能的 description 是**给模型看的**（技能选择依据），不是纯展示
+//      → 所以本版本对技能**只读**：不写任何 SKILL.md（写入会改变模型行为）
+//   3. 发现规则是"仅顶层 <name>/SKILL.md 或 <name>.md"，嵌套的不会被发现
+
+/** DSH 的技能根目录（按优先级）。rank 越小优先级越高。 */
+function skillRoots() {
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  // DSH_AGENTS_HOME 是同 DSH_APP_ASAR 性质的测试口：让回归测试能把
+  // rank-500 根指向沙箱，否则测试会写进真实用户目录。
+  const agentsHome = process.env.DSH_AGENTS_HOME ?? path.join(os.homedir(), '.agents')
+  return [
+    { rank: 400, root: path.join(home, 'skills') },
+    { rank: 500, root: path.join(agentsHome, 'skills') },
+  ]
+}
+
+/** 解析 SKILL.md 的 frontmatter（容忍块标量）。 */
+export function parseSkillFrontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(text))
+  if (m === null) return { present: false, fields: {} }
+  const fields = {}
+  let key = null
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/.exec(line)
+    if (kv !== null) {
+      key = kv[1]
+      fields[key] = kv[2]
+      continue
+    }
+    if (key !== null && /^\s+\S/.test(line)) fields[key] = String(fields[key]).trim() + ' ' + line.trim()
+  }
+  for (const k of Object.keys(fields)) fields[k] = String(fields[k]).trim()
+  return { present: true, fields }
+}
+
+/** 扫描技能根目录，返回全部候选（含被遮蔽的）。 */
+export function scanSkillCandidates() {
+  const out = []
+  for (const { rank, root } of skillRoots()) {
+    let entries = []
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const e of entries) {
+      try {
+        let dir
+        let file
+        if (e.isDirectory()) {
+          dir = path.join(root, e.name)
+          file = path.join(dir, 'SKILL.md')
+          if (!fs.existsSync(file)) continue
+        } else if (e.isFile() && e.name.endsWith('.md')) {
+          dir = root
+          file = path.join(root, e.name)
+        } else continue
+        const text = fs.readFileSync(file, 'utf8')
+        const fm = parseSkillFrontmatter(text)
+        const name = typeof fm.fields.name === 'string' && fm.fields.name !== '' ? fm.fields.name : e.name.replace(/\.md$/, '')
+        let nested = 0
+        if (e.isDirectory()) {
+          try {
+            nested = countNestedSkillFiles(dir)
+          } catch {
+            nested = 0
+          }
+        }
+        out.push({
+          name,
+          dirName: e.name.replace(/\.md$/, ''),
+          kind: e.isDirectory() ? 'dir' : 'file',
+          rank,
+          root,
+          path: file,
+          dir,
+          bytes: text.length,
+          frontmatter: fm.present,
+          description: typeof fm.fields.description === 'string' ? fm.fields.description : '',
+          version: typeof fm.fields.version === 'string' ? fm.fields.version : null,
+          nestedSkillFiles: nested,
+          isGit: fs.existsSync(path.join(dir, '.git')),
+        })
+      } catch {
+        /* 单个技能失败只跳过它 */
+      }
+    }
+  }
+  return out
+}
+
+/** 统计目录下**嵌套**的 SKILL.md（这些不会被 DSH 发现）。 */
+function countNestedSkillFiles(dir, depth = 0) {
+  if (depth > 3) return 0
+  let n = 0
+  let entries = []
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue
+    if (e.name === 'node_modules' || e.name === '.git') continue
+    const sub = path.join(dir, e.name)
+    if (fs.existsSync(path.join(sub, 'SKILL.md'))) n += 1
+    n += countNestedSkillFiles(sub, depth + 1)
+  }
+  return n
+}
+
+/** 取 DSH 认定的可见技能名集合（第一方数据源）。 */
+export function visibleSkillNames(ctx) {
+  try {
+    const svc = ctx.get('skills')
+    if (svc === undefined) return undefined
+    const raw = typeof svc.list === 'function' ? svc.list() : (typeof svc.snapshot === 'function' ? svc.snapshot() : undefined)
+    const arr = raw instanceof Map ? Array.from(raw.values()) : (Array.isArray(raw) ? raw : (raw && raw.entries instanceof Map ? Array.from(raw.entries.values()) : (raw && Array.isArray(raw.entries) ? raw.entries : undefined)))
+    if (arr === undefined) return undefined
+    const names = arr.map((x) => (x && x.candidate ? x.candidate.name : (x && x.name))).filter((x) => typeof x === 'string')
+    return new Set(names)
+  } catch {
+    return undefined
+  }
+}
+
+/** 判定描述语言：中文 / 英文 / 混合 / 空。 */
+export function descriptionLanguage(text) {
+  const s = String(text ?? '')
+  if (s.trim() === '') return '空'
+  const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length
+  const latin = (s.match(/[A-Za-z]/g) || []).length
+  if (cjk === 0) return '英文'
+  if (latin === 0) return '中文'
+  return cjk >= latin / 3 ? '中文为主' : '英文为主'
+}
+
+/** 收集技能行（与插件行同构）。 */
+export function collectSkills(ctx) {
+  const cands = scanSkillCandidates()
+  const visible = visibleSkillNames(ctx)
+  const byName = new Map()
+  for (const c of cands) {
+    if (!byName.has(c.name)) byName.set(c.name, [])
+    byName.get(c.name).push(c)
+  }
+  const rows = []
+  for (const [name, list] of byName) {
+    list.sort((a, b) => a.rank - b.rank)
+    const top = list[0]
+    const shadowed = list.slice(1)
+    // DSH 可见性：以第一方服务为准；服务不可用时按优先级推断
+    const isVisible = visible === undefined ? true : visible.has(name)
+    rows.push({
+      pkg: name,
+      kind: 'skill',
+      installed: true,
+      enabled: isVisible,
+      version: top.version,
+      localized: descriptionLanguage(top.description) !== '英文',
+      needsText: String(top.description).trim() === '',
+      source: 'rank ' + top.rank + ' · ' + top.root,
+      skillPath: top.path,
+      bytes: top.bytes,
+      descriptionLang: descriptionLanguage(top.description),
+      frontmatter: top.frontmatter,
+      dirMismatch: top.name !== top.dirName,
+      nestedSkillFiles: top.nestedSkillFiles,
+      isGit: top.isGit,
+      shadowed: shadowed.map((s) => 'rank ' + s.rank + ' · ' + s.path),
+    })
+  }
+  // 补齐「随 DSH 提供」的技能：它们不在用户的技能根目录里，
+  // 但 DSH 认定可见。若不补，本页会比真实技能数少（实测少 3 个）。
+  if (visible !== undefined) {
+    for (const name of visible) {
+      if (byName.has(name)) continue
+      rows.push({
+        pkg: name,
+        kind: 'skill',
+        installed: true,
+        enabled: true,
+        version: null,
+        localized: false,
+        needsText: false,
+        source: '随 DSH 提供',
+        skillPath: null,
+        bytes: 0,
+        descriptionLang: '未知（随 DSH 提供）',
+        frontmatter: true,
+        dirMismatch: false,
+        nestedSkillFiles: 0,
+        isGit: false,
+        shadowed: [],
+        bundled: true,
+      })
+    }
+  }
+  rows.sort((a, b) => a.pkg.localeCompare(b.pkg))
+  return rows
+}
+
+/**
+ * 技能审查规则。
+ * 与插件审查同约定：只报告、有证据、标 confidence、不评分。
+ */
+export function auditSkills(rows) {
+  const findings = []
+  const add = (f) => findings.push(Object.assign({ id: f.kind + ':' + f.key }, f))
+  for (const r of rows) {
+    if (r.frontmatter !== true) {
+      add({ kind: 'conflict', key: 'fm-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
+        title: 'SKILL.md 缺少 frontmatter',
+        evidence: r.skillPath + ' 未以 --- 包裹的 frontmatter 开头',
+        remedy: 'DSH 依赖 frontmatter 的 name/description 来选择技能；缺失会导致该技能不可被正确识别。' })
+    }
+    if (r.dirMismatch === true) {
+      add({ kind: 'conflict', key: 'name-' + r.pkg, pkg: r.pkg, peers: [], severity: 'medium', confidence: 'fact',
+        title: 'frontmatter 的 name 与目录名不一致',
+        evidence: 'name=' + r.pkg + ' 但目录/文件名不同',
+        remedy: '两者不一致时，引用该技能容易出现歧义。建议改为一致。' })
+    }
+    if (r.needsText === true) {
+      add({ kind: 'conflict', key: 'nodesc-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
+        title: 'description 为空',
+        evidence: r.skillPath,
+        remedy: '模型靠 description 决定是否启用该技能；为空等于它几乎不会被选中。' })
+    } else if (r.bytes > 0 && r.descriptionLang === '英文') {
+      add({ kind: 'interaction', key: 'lang-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
+        title: '描述为英文（中文用户的可读性较低）',
+        evidence: 'description 语言判定：英文',
+        remedy: '仅影响你阅读时的直观度。注意：description 是**模型选择技能的依据**，本插件对它只读、不代你改写。' })
+    }
+    if (r.nestedSkillFiles > 0) {
+      add({ kind: 'interaction', key: 'nested-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
+        title: '目录下有 ' + r.nestedSkillFiles + ' 个嵌套 SKILL.md 不会被发现',
+        evidence: r.skillPath + ' 所在目录的更深层存在 SKILL.md',
+        remedy: 'DSH 只发现顶层 <name>/SKILL.md 或 <name>.md。这些嵌套技能实际不生效（若非有意，可上移或删除）。' })
+    }
+    if (Array.isArray(r.shadowed) && r.shadowed.length > 0) {
+      add({ kind: 'conflict', key: 'shadow-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
+        title: '存在 ' + r.shadowed.length + ' 份被遮蔽的同名技能',
+        evidence: r.shadowed.join('；') + ' —— 优先级低于当前生效的那份',
+        remedy: '被遮蔽的那份不会生效（DSH 会记录 "ignored because a higher-priority skill already exists"）。建议删除或改名，避免你以为在用的是另一份。' })
+    }
+  }
+  return findings
+}
+
 /** 读某包当前已装版本。 */
 export function installedVersion(profileDir, pkg) {
   if (!isSafePackageName(pkg)) return null
@@ -1495,6 +1749,41 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, startUpdate(ctx, Array.isArray(dirs) ? dirs[0] : dirs, pkg))
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'update-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/skills',
+          handler: async (req, res) => {
+            try {
+              const rows = collectSkills(ctx)
+              const ignored = new Set(readIgnored())
+              const visible = auditSkills(rows).filter((f) => !ignored.has(f.id))
+              const byPkg = new Map()
+              for (const f of visible) {
+                for (const owner of [f.pkg].concat(Array.isArray(f.peers) ? f.peers : [])) {
+                  if (!byPkg.has(owner)) byPkg.set(owner, [])
+                  if (!byPkg.get(owner).includes(f)) byPkg.get(owner).push(f)
+                }
+              }
+              writeJson(res, 200, {
+                ok: true,
+                audit: {
+                  generatedAt: Date.now(),
+                  counts: {
+                    high: visible.filter((f) => f.severity === 'high').length,
+                    medium: visible.filter((f) => f.severity === 'medium').length,
+                    low: visible.filter((f) => f.severity === 'low').length,
+                    fact: visible.filter((f) => f.confidence === 'fact').length,
+                    inferred: visible.filter((f) => f.confidence === 'inferred').length,
+                  },
+                  noCompat: [],
+                },
+                value: rows.map((r) => Object.assign({}, r, { issues: [], findings: byPkg.get(r.pkg) ?? [] })),
+              })
+            } catch (error) {
+              writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
           },
         },

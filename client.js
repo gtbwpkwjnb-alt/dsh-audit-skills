@@ -137,7 +137,9 @@ window.__ModuleLoader__.load({
         }));
     }
 
-    function Panel() {
+    function Panel(props) {
+      var TARGET = (props && props.target) || 'plugin';
+      var IS_SKILL = TARGET === 'skill';
       var rowsState = useState(null); var rows = rowsState[0]; var setRows = rowsState[1];
       var busyState = useState(''); var busy = busyState[0]; var setBusy = busyState[1];
       var noteState = useState(null); var note = noteState[0]; var setNote = noteState[1];
@@ -157,7 +159,7 @@ window.__ModuleLoader__.load({
 
       // 唯一的数据入口：完整快照（状态 + 已装版本 + 最新版本 + 问题）
       var snapshot = useCallback(function (opts) {
-        return call('updates', opts || {}).then(absorb).then(function (r) {
+        return call(IS_SKILL ? 'skills' : 'updates', opts || {}).then(absorb).then(function (r) {
           if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); if (r.audit) setAudit(r.audit); return r.value; }
           setNote({ kind: 'err', text: '读取失败：' + ((r && r.message) || '未知') });
           return null;
@@ -344,10 +346,16 @@ window.__ModuleLoader__.load({
       var s = rows ? summarize(rows) : null;
 
       var head = h('div', { style: S.bar },
-        h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
-        h('button', { type: 'button', disabled: !!busy, onClick: revert }, busy === 'revert' ? '还原中…' : '还原翻译'),
-        h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态'),
-        (s && s.upd > 0)
+        IS_SKILL
+          ? h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态')
+          : h('button', { type: 'button', disabled: !!busy, onClick: optimize }, busy === 'optimize' ? '优化中…' : '翻译优化'),
+        IS_SKILL
+          ? null
+          : h('button', { type: 'button', disabled: !!busy, onClick: revert }, busy === 'revert' ? '还原中…' : '还原翻译'),
+        IS_SKILL
+          ? null
+          : h('button', { type: 'button', disabled: !!busy, onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新状态'),
+        (!IS_SKILL && s && s.upd > 0)
           ? h('button', { type: 'button', disabled: !!busy, onClick: function () { updateAll(rows); } },
               busy === 'update:all' ? '批量更新中…' : '一键更新（' + s.upd + '）')
           : null);
@@ -401,10 +409,10 @@ window.__ModuleLoader__.load({
         ? h('div', { style: S.note }, '正在读取插件状态…')
         : h('table', { style: S.table },
             h('thead', null, h('tr', null,
-              h('th', { style: S.th }, '插件'),
-              h('th', { style: S.th }, '优化'),
+              h('th', { style: S.th }, IS_SKILL ? '技能' : '插件'),
+              h('th', { style: S.th }, IS_SKILL ? '描述' : '优化'),
               h('th', { style: S.th }, '版本'),
-              h('th', { style: S.th }, '最新'),
+              h('th', { style: S.th }, IS_SKILL ? '来源' : '最新'),
               h('th', { style: S.th }, '操作'))),
             h('tbody', null, (onlyFlagged
               ? rows.filter(function (r) { return (r.issues || []).length > 0 || (r.findings || []).length > 0; })
@@ -416,7 +424,9 @@ window.__ModuleLoader__.load({
                 h('td', { style: S.td }, r.pkg),
                 // 三态：已优化 / 待应用（有文案未落盘）/ 待优化（压根没有文案）
                 h('td', { style: S.td },
-                  (r.localized ? '已优化' : (r.needsText ? '待优化' : '待应用')) + (function () {
+                  (IS_SKILL
+                    ? (r.needsText ? '描述为空' : r.descriptionLang)
+                    : (r.localized ? '已优化' : (r.needsText ? '待优化' : '待应用'))) + (function () {
                     var fs2 = r.findings || [];
                     var facts = fs2.filter(function (f) { return f.confidence === 'fact'; });
                     if (facts.length === 0) return '';
@@ -425,7 +435,9 @@ window.__ModuleLoader__.load({
                     return '  ⚠' + sev;
                   })()),
                 h('td', { style: S.td }, r.version || '—'),
-                h('td', { style: S.td }, r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—')),
+                h('td', { style: S.td }, IS_SKILL
+                  ? (r.source || '—') + (r.isGit ? ' · git 来源' : ' · 本地目录')
+                  : (r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'))),
               ];
               var op = [];
               if (job && !job.done) op.push(h('span', { key: 'j', style: S.note }, job.stage + '…'));
@@ -444,14 +456,18 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: S.box },
         head,
-        h('div', { style: S.note }, '命名约定：标题保留原包名，中文名以（）附加。刷新即包含状态、版本与更新检查（同一份快照）。'),
+        h('div', { style: S.note }, IS_SKILL
+          ? '技能页与插件页同构：一源数据、一套规则。技能不是 npm 包，因此没有可比的「最新版本」——「来源」列显示它来自哪个根目录与优先级。'
+          : '命名约定：标题保留原包名，中文名以（）附加。刷新即包含状态、版本与更新检查（同一份快照）。'),
         staleEl,
         summaryEl,
         noteEl,
         batchEl,
         table,
         detail,
-        h('div', { style: S.note }, '翻译优化会调用模型为缺失文案的插件生成中文（消耗 token），结果存入覆盖层，重装不丢；更新经第一方插件管理器执行，会真实运行 pnpm 并可能触发重载。' + (hostRev ? '  宿主半体 v' + hostRev : '')));
+        h('div', { style: S.note }, IS_SKILL
+          ? '技能页**只读**：技能的 description 是模型选择技能的依据，改写它属于行为变更而非展示变更，因此本页不代你改写 SKILL.md（如需翻译，用「技能翻译精炼」类技能或直接编辑）。' + (hostRev ? '  宿主半体 v' + hostRev : '')
+          : '翻译优化会调用模型为缺失文案的插件生成中文（消耗 token），结果存入覆盖层，重装不丢；更新经第一方插件管理器执行，会真实运行 pnpm 并可能触发重载。' + (hostRev ? '  宿主半体 v' + hostRev : '')));
     }
 
     function safe(what, fn) {
@@ -465,12 +481,20 @@ window.__ModuleLoader__.load({
     function registerAll(sctx) {
       safe('settings.section', function () {
         sctx.slots.inject('settings.section', function () {
-          return sctx.slots.register({
-            name: 'settings.section',
-            id: 'dsh-audit-skills',
-            order: 200,
-            label: function () { return LABEL; },
-          }, function () { return h(Boundary, null, h(Panel)); });
+          return [
+            sctx.slots.register({
+              name: 'settings.section',
+              id: 'dsh-audit-skills',
+              order: 200,
+              label: function () { return '插件审查'; },
+            }, function () { return h(Boundary, null, h(Panel, { target: 'plugin' })); }),
+            sctx.slots.register({
+              name: 'settings.section',
+              id: 'dsh-audit-skills-skills',
+              order: 201,
+              label: function () { return '技能审查'; },
+            }, function () { return h(Boundary, null, h(Panel, { target: 'skill' })); }),
+          ];
         });
       });
       safe('plugins.row.config', function () {
