@@ -89,6 +89,11 @@ function readProfileManifest(profileDir) {
   }
 }
 
+/** 该文件是否已有任一形式的备份。 */
+function hasAnyBackup(file) {
+  return BACKUP_SUFFIXES.some((suffix) => fs.existsSync(file + suffix))
+}
+
 function backupOnce(file) {
   const b = file + BACKUP_SUFFIXES[0]
   if (!fs.existsSync(b)) fs.copyFileSync(file, b)
@@ -133,7 +138,12 @@ export function readBundleInfo(profileDir, pkg) {
     const dir = path.join(profileDir, 'node_modules', ...pkg.split('/'))
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
     if (!manifest.dsh || !manifest.dsh.bundle || !manifest.dsh.bundle.patch) return undefined
-    return { dir, name: manifest.name, description: String(manifest.description ?? '') }
+    return {
+      dir,
+      name: manifest.name,
+      version: typeof manifest.version === 'string' ? manifest.version : null,
+      description: String(manifest.description ?? ''),
+    }
   } catch {
     return undefined
   }
@@ -167,6 +177,7 @@ export function collectStatus(profileDirs) {
         needsText: entry === undefined && !st.localized,
         localized: st.localized,
         title: st.title,
+        version: info.version,
         description: info.description,
       })
     }
@@ -234,6 +245,8 @@ export function revertLocale(profileDirs, options = {}) {
       try {
         const dir = path.join(profileDir, 'node_modules', ...entry.pkg.split('/'))
         let restored = 0
+        let removed = 0
+        // 1) 有备份的：恢复（package.json 与 locale 文件）
         const files = [
           path.join(dir, 'package.json'),
           path.join(dir, 'locale', 'en.json'),
@@ -249,7 +262,32 @@ export function revertLocale(profileDirs, options = {}) {
             }
           }
         }
-        results.push({ pkg: entry.pkg, state: restored > 0 ? 'restored' : 'no-backup', restored })
+        // 2) 没有备份的 locale 文件：这些包原本没有 locale 目录，是我们新建的。
+        //    不删除的话「还原翻译」之后仍会显示中文 —— 必须按内容确认是自己写的再删。
+        const owned = []
+        if (entry.en !== undefined) owned.push([path.join(dir, 'locale', 'en.json'), JSON.stringify({ meta: entry.en }, null, 2) + '\n'])
+        if (entry.zh !== undefined) owned.push([path.join(dir, 'locale', 'zh.json'), JSON.stringify({ meta: entry.zh }, null, 2) + '\n'])
+        for (const pair of owned) {
+          const file = pair[0]
+          const wanted = pair[1]
+          if (hasAnyBackup(file)) continue
+          try {
+            if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === wanted) {
+              fs.unlinkSync(file)
+              removed += 1
+            }
+          } catch {
+            /* 单个文件失败不影响其他 */
+          }
+        }
+        try {
+          const localeDir = path.join(dir, 'locale')
+          if (fs.existsSync(localeDir) && fs.readdirSync(localeDir).length === 0) fs.rmdirSync(localeDir)
+        } catch {
+          /* 目录非空或其他原因，忽略 */
+        }
+        const state = restored > 0 || removed > 0 ? 'restored' : 'no-backup'
+        results.push({ pkg: entry.pkg, state, restored, removed })
       } catch (error) {
         results.push({ pkg: entry.pkg, state: 'failed', message: String(error?.message ?? error) })
       }
