@@ -80,11 +80,12 @@
 | **F2** | 插件状态与健康**汇总**（只读第一方数据：激活状态、版本、peer 兼容、locale 缺失、上游更新可查） | 🔁 复用第一方 API |
 | **F3** | 冲突威胁**评估与建议**（peer 不满足、同槽抢占、配置行 id 重复、加载失败）——**只出报告，不自动停用** | 🔁 复用数据 + 委托执行 |
 | **F4** | 设置页「技能审查」**按钮控制台**（翻译精炼/还原、刷新状态、兼容性报告、更新检查入口、需求检索） | 🔁 复用第一方 settings 槽 |
+| **F5** | **治理中心**（第一方 `inspect` 预检安装、bundle 启停/可卸载判断、运行条目启停、技能来源与备份还原） | 🔁 只调用第一方 manager / 既有技能写入链 |
 
 ### 不做
 
 - ❌ 市场索引 / 排行 / 评分模型 → 委托 dshmarket、dsh-recommend、`find_dsh_plugins`
-- ❌ 更新执行 / 回滚 → 委托 dsh-updater-ui、dsh-purge
+- ❌ 自建包管理器、市场排行或版本回滚 → 委托第一方 pluginManager 与生态插件
 - ❌ 启动期守护 / 自动停用 → 委托 dsh-conflict-guardian、dsh-my-guardian
 - ❌ 规则集管理（AGENTS.md / prompt-inject.md）→ dsh-purge 已覆盖
 
@@ -92,15 +93,15 @@
 
 ## 5. 每项功能实现边界
 
-| | F1 中文化 | F2 状态汇总 | F3 冲突评估 | F4 控制台 |
-|---|---|---|---|---|
-| 输入 | catalog JSON + profile 路径 | loader entries / listBundles | peers + 激活态 + patch id | 用户点击 |
-| 输出 | `<pkg>/locale/*.json` + `exports` 补丁 | 只读表格 | 风险清单（附证据） | 触发 F1–F3 |
-| 依赖 | node:fs | 第一方 inventory API | 同上 + 版本比较 | client-ui-settings |
-| 失败模式 | 包未装→跳过；包被 pnpm 覆盖→重新应用 | API 缺失→显示 unavailable | 无证据→不排序 | 只读降级 |
-| 验证 | resolve `locale/en.json` | 与 Plugins 页一致 | 报告可复现 | 页面可渲染 |
-| 回滚 | `--restore` / dispose 还原 | 只读，无需回滚 | 只读 | 只读 |
-| **不做** | 不机翻、不另起页面 | 不自己扫描磁盘 | **不自动停用** | 不引入写操作除非明确按钮 |
+| | F1 中文化 | F2 状态汇总 | F3 冲突评估 | F4 控制台 | F5 治理中心 |
+|---|---|---|---|---|---|
+| 输入 | catalog JSON + profile 路径 | loader entries / listBundles | peers + 激活态 + patch id | 用户点击 | spec、bundle/plugin/skill 标识 |
+| 输出 | `<pkg>/locale/*.json` + `exports` 补丁 | 只读表格 | 风险清单（附证据） | 触发 F1–F3 | 第一方 ChangeResult 与能力矩阵 |
+| 依赖 | node:fs | 第一方 inventory API | 同上 + 版本比较 | client-ui-settings | pluginManager + 技能扫描 |
+| 失败模式 | 包未装→跳过；包被 pnpm 覆盖→重新应用 | API 缺失→显示 unavailable | 无证据→不排序 | 只读降级 | inspect 拒绝、只读/不可移除、需重启 |
+| 验证 | resolve `locale/en.json` | 与 Plugins 页一致 | 报告可复现 | 页面可渲染 | 管理快照与 HTTP bridge 契约 |
+| 回滚 | `--restore` / dispose 还原 | 只读，无需回滚 | 只读 | 只读 | 技能只从备份还原；bundle 卸载由第一方执行 |
+| **不做** | 不机翻、不另起页面 | 不自己扫描磁盘 | **不自动停用** | 不引入隐式写操作 | 不绕过 `inspect`，不删除不可移除 bundle |
 
 ---
 

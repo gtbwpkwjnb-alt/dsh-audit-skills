@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.8.0';
+    var CLIENT_REV = '2.9.0';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -98,7 +98,9 @@ window.__ModuleLoader__.load({
       if (c === 'not-installed') return '该包未安装或不是 DSH bundle，无法生成文案。'
       if (c === 'invalid-pkg' || c === 'missing-pkg') return '参数非法，已被宿主拒绝。'
       if (c === 'timeout') return '超时：可能仍在后台执行，稍后点「刷新状态」查看结果。'
-      if (c === 'update-failed') return '安装失败，原因见左侧说明；可重试。'
+      if (c === 'incompatible-version') return '目标版本与当前 DSH 运行时不兼容，管理器已自动恢复原版本；请查看当前行详情，等待兼容版本或升级 DSH。'
+      if (c === 'update-failed') return '安装失败，原因见当前行；可先刷新状态，再重试。'
+      if (c === 'unchanged') return '安装请求已执行，但已安装版本没有变化；请检查依赖来源、锁文件或插件管理器日志。'
       if (c === 'batch-running') return '批量更新正在进行，等它结束后再更新这一项（避免两条 pnpm 并发安装）。'
       if (c === 'network') return '连不上宿主半体，确认 DSH 仍在运行后刷新页面。'
       return '可重试；若反复失败请「刷新状态」重新判定。'
@@ -129,6 +131,9 @@ window.__ModuleLoader__.load({
       '  --das-line2: var(--dsw-alias-border-l2, rgba(128,128,128,.16));',
       '  --das-dim: var(--dsw-alias-label-tertiary, rgba(127,127,127,.95));',
       '  --das-dimmer: var(--dsw-alias-label-quaternary, rgba(127,127,127,.7));',
+      /* 次级文字用 secondary 而不是 tertiary/quaternary：截图里「一片灰」的根因就是
+         把说明文字放到了亮度最低的令牌上。quaternary 只留给时间戳这类附带信息。 */
+      '  --das-text2: var(--dsw-alias-label-secondary, rgba(127,127,127,1));',
       '  --das-ok: var(--dsw-alias-state-success-primary, #2a9d54);',
       '  --das-warn: var(--dsw-alias-state-warn-primary, #c07f00);',
       '  --das-err: var(--dsw-alias-label-error, #d3402f);',
@@ -205,7 +210,9 @@ window.__ModuleLoader__.load({
       '  font-size: var(--dsw-font-xxxs-11-font-size, 11px); font-weight: 600; letter-spacing: .02em;',
       '  color: var(--das-dim); background: var(--dsw-alias-bg-layer-2, var(--das-l2));',
       '  border-bottom: 1px solid var(--das-line); white-space: nowrap; }',
-      '.das-table td { padding: 6px 10px; border-bottom: 1px solid var(--das-line2); vertical-align: top; }',
+      /* 行内一律单行：nowrap + 省略号。竖排的「更/新」就是列太窄还允许换行造成的。
+         需要多行的地方（详情、悬停槽）显式 opt-out。 */
+      '.das-table td { padding: 6px 10px; border-bottom: 1px solid var(--das-line2); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
       '.das-table tbody tr { transition: background .18s ease, box-shadow .18s ease; }',
       '.das-table tbody tr:hover { background: var(--dsw-alias-interactive-bg-hover, var(--das-l1));',
       '  box-shadow: inset 2px 0 0 0 var(--das-info); }',
@@ -213,12 +220,25 @@ window.__ModuleLoader__.load({
       '.das-table tr.is-dim td { opacity: .5; }',
       '.das-name { font-family: var(--das-mono); font-size: var(--dsw-font-xxs-12-font-size, 12px); word-break: break-all; }',
       '.das-name small { display: block; font-family: inherit; color: var(--das-dim); font-size: var(--dsw-font-xxxs-11-font-size, 11px); }',
+      '.das-name-main { font-family: var(--dsw-font-family, system-ui), "Microsoft YaHei UI", sans-serif; font-weight: 600; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.das-name-pkg { font-family: var(--das-mono); }',
       '.das-mono { font-family: var(--das-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }',
       '.das-num { font-family: var(--das-mono); font-variant-numeric: tabular-nums; }',
-      '.das-desc { color: var(--das-dim); max-width: 52ch; }',
+      '.das-desc { color: var(--das-text2); max-width: 52ch; }',
+      '.das-optimized-copy { margin-top: 4px; max-width: 52ch; color: var(--das-text2); line-height: 17px; overflow-wrap: anywhere; }',
+      '.das-problem { margin-top: 4px; max-width: 52ch; color: var(--das-err); line-height: 17px; overflow-wrap: anywhere; }',
       '.das-act { white-space: nowrap; }',
       '.das-act > * + * { margin-left: 6px; }',
+      /* 行内多个元素（chip / 版本号 / 记录）并排，单行内互相留白 */
+      '.das-table td > * + * { margin-left: 6px; }',
       '.das-wrapd { white-space: normal; }',
+      '.das-table-meta { padding: 7px 10px; border-bottom: 1px solid var(--das-line2); background: var(--das-l1); }',
+      '.das-table-meta .das-note { border: 0; padding: 0; background: transparent; }',
+      '.das-purpose { max-width: 42ch; margin-top: 3px; color: var(--das-text2); line-height: 17px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }',
+      '.das-purpose strong { color: inherit; font-weight: 600; }',
+      '.das-source-cell { display: flex; flex-direction: column; gap: 2px; min-width: 170px; }',
+      '.das-source-link { color: var(--das-info); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28ch; }',
+      '.das-source-link:hover { text-decoration: underline; }',
       /* chip 与严重度徽章 */
       '.das-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--das-line);',
       '  border-radius: 999px; background: var(--das-l1); font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px;',
@@ -241,6 +261,35 @@ window.__ModuleLoader__.load({
       '.das-note-text { min-width: 0; }',
       '.das-detail { display: flex; flex-direction: column; gap: 8px; margin-top: -2px; }',
       '.das-detail .das-card { box-shadow: 0 -6px 18px -12px rgba(0,0,0,.35); }',
+      '.das-inline-detail { padding: 6px 10px 8px; background: var(--das-l1); border-bottom: 1px solid var(--das-line2); white-space: normal; overflow: visible; text-overflow: clip; }',
+      '.das-inline-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px 14px; }',
+      '.das-inline-item { min-width: 0; padding-left: 8px; border-left: 2px solid var(--das-line); }',
+      '.das-inline-item.is-high { border-left-color: var(--das-err); }',
+      '.das-inline-item.is-medium { border-left-color: var(--das-warn); }',
+      '.das-inline-item.is-ok { border-left-color: var(--das-ok); }',
+      '.das-inline-title { font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: 17px; }',
+      '.das-inline-copy { color: var(--das-text2); font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; overflow-wrap: anywhere; }',
+      /* 悬停详情槽：固定在表格下方、高度预留 —— 换内容不改布局，所以不会跳行 */
+      '.das-hover { min-height: 52px; padding: 7px 10px; border: 1px solid var(--das-line); border-radius: var(--das-r);',
+      '  background: var(--das-l1); font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 16px; display: flex; flex-direction: column; gap: 3px; }',
+      '.das-hover-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }',
+      '.das-hover-name { font-weight: 600; font-size: var(--dsw-font-xxs-12-font-size, 12px); }',
+      '.das-hover-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 16px; }',
+      '.das-hover-k { color: var(--das-dim); }',
+      '.das-hover-v { color: var(--das-text2); overflow-wrap: anywhere; }',
+      '.das-hover-hint { color: var(--das-dim); display: flex; align-items: center; min-height: 36px; }',
+      '.das-row-hint { color: var(--das-dimmer); font-size: var(--dsw-font-xxxs-11-font-size, 11px); }',
+      '.das-management { display: flex; flex-direction: column; gap: 8px; }',
+      '.das-manage-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }',
+      '.das-manage-input { flex: 1 1 260px; min-width: 180px; font: inherit; font-size: 12px; line-height: 16px; padding: 5px 8px; border: 1px solid var(--das-line); border-radius: var(--dsw-radius-sm, 6px); background: var(--das-l1); color: inherit; }',
+      '.das-manage-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 6px; }',
+      '.das-manage-group { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--das-line2); }',
+      '.das-manage-group-head { display: flex; align-items: baseline; gap: 8px; }',
+      '.das-manage-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border: 1px solid var(--das-line2); border-radius: var(--dsw-radius-sm, 6px); min-width: 0; }',
+      '.das-manage-main { flex: 1 1 auto; min-width: 0; }',
+      '.das-manage-name { font-family: var(--das-mono); font-size: 12px; overflow-wrap: anywhere; }',
+      '.das-manage-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }',
+      '.das-manage-preview { white-space: pre-wrap; max-height: 140px; overflow: auto; padding: 7px 9px; border: 1px solid var(--das-line2); border-radius: 6px; font-family: var(--das-mono); font-size: 11px; color: var(--das-dim); }',
       '.das-kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; align-items: baseline; }',
       '.das-kv dt { color: var(--das-dim); font-size: var(--dsw-font-xxxs-11-font-size, 11px); white-space: nowrap; }',
       '.das-kv dd { margin: 0; font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: 18px; }',
@@ -283,6 +332,81 @@ window.__ModuleLoader__.load({
 
     function stateText(state) { return STATE_TEXT[state] || String(state === undefined || state === null ? '未知' : state); }
     function isBad(state) { return state === 'failed' || state === 'fail'; }
+
+    function ManagementPanel(props) {
+      var state = useState(null); var data = state[0]; var setData = state[1];
+      var busyState = useState(''); var busy = busyState[0]; var setBusy = busyState[1];
+      var specState = useState(''); var spec = specState[0]; var setSpec = specState[1];
+      var previewState = useState(null); var preview = previewState[0]; var setPreview = previewState[1];
+      var load = useCallback(function () {
+        setBusy('load');
+        return call('management').then(function (r) { setBusy(''); if (r && r.ok) setData(r); else props.onMessage('err', '治理快照读取失败：' + ((r && r.message) || '插件管理器不可用')); return r; });
+      }, [props.onMessage]);
+      useEffect(function () { load(); }, [load]);
+      var action = useCallback(function (body, label) {
+        setBusy(label);
+        return call('manage', body).then(function (r) {
+          setBusy('');
+          if (!r || !r.ok) { props.onMessage('err', label + '失败：' + ((r && r.message) || '未知') + ' → ' + fixOf(r && r.code)); return r; }
+          props.onMessage('ok', label + '完成' + (r.restartRequired ? '，需要重启 DSH 才会完全生效' : '')); setPreview(null); return load();
+        });
+      }, [load, props.onMessage]);
+      var inspect = function () {
+        if (spec.trim() === '') { props.onMessage('err', '请输入安装规格，例如 npm 包名、Git 地址或 tarball。'); return; }
+        setBusy('inspect'); setPreview(null);
+        return call('manage', { action: 'install-bundle', spec: spec.trim(), enabled: true }).then(function (r) {
+          setBusy('');
+          if (!r || !r.ok) { setPreview(r || { ok: false, message: '预检失败' }); props.onMessage('err', '安装未执行：' + ((r && r.message) || '预检未通过')); return r; }
+          setPreview(r.inspection || r); setSpec(''); props.onMessage('ok', '安装完成，治理快照正在刷新。'); return load();
+        });
+      };
+      if (!data) return h('section', { className: 'das-card das-management' }, h('div', { className: 'das-card-head' }, h('span', { className: 'das-card-title' }, '插件治理中心')), h('div', { className: 'das-body' }, h('span', { className: 'das-foot' }, busy ? '正在读取第一方插件管理器…' : '插件管理器不可用或尚未返回数据。')));
+      var bundles = Array.isArray(data.bundles) ? data.bundles : [];
+      var plugins = Array.isArray(data.plugins) ? data.plugins : [];
+      var skills = Array.isArray(data.skills) ? data.skills : [];
+      var managerCaps = data.capabilities || {};
+      var skillAction = function (actionName, pkg, label) {
+        setBusy(label);
+        return call(actionName, { pkgs: [pkg] }).then(function (r) { setBusy(''); if (!r || !r.ok) props.onMessage('err', label + '失败：' + ((r && r.message) || '未知')); else { props.onMessage('ok', label + '完成'); load(); } return r; });
+      };
+      var pluginGroup = plugins.length ? h('div', { className: 'das-manage-group' },
+        h('div', { className: 'das-manage-group-head' }, h('span', { className: 'das-card-title' }, '运行中的插件条目'), h('span', { className: 'das-foot' }, plugins.length + ' 个')),
+        h('div', { className: 'das-manage-list' }, plugins.map(function (item) {
+          var cap = item.capabilities || {};
+          var toggle = cap.canEnable ? { action: 'enable-plugin', label: '开启' } : (cap.canDisable ? { action: 'disable-plugin', label: '停用' } : null);
+          return h('div', { className: 'das-manage-row', key: item.entryId || item.moduleName },
+            h('div', { className: 'das-manage-main' }, h('div', { className: 'das-manage-name' }, item.moduleName || item.entryId), h('div', { className: 'das-foot' }, item.entryId + (item.readOnlyReason ? ' · ' + item.readOnlyReason : ''))),
+            h('div', { className: 'das-manage-actions' }, toggle ? h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy !== '', onClick: function () { action({ action: toggle.action, entryId: item.entryId }, toggle.label + ' ' + (item.moduleName || item.entryId)); } }, toggle.label) : null));
+        }))) : null;
+      var skillGroup = skills.length ? h('div', { className: 'das-manage-group' },
+        h('div', { className: 'das-manage-group-head' }, h('span', { className: 'das-card-title' }, '技能管理'), h('span', { className: 'das-foot' }, skills.length + ' 个')),
+        h('div', { className: 'das-manage-list' }, skills.map(function (item) {
+          var cap = item.capabilities || {};
+          return h('div', { className: 'das-manage-row', key: item.pkg },
+            h('div', { className: 'das-manage-main' }, h('div', { className: 'das-manage-name' }, item.pkg), h('div', { className: 'das-foot' }, (item.displayName || item.descriptionLang || '未知') + ' · ' + (item.source || '来源未知'))),
+            h('div', { className: 'das-manage-actions' }, cap.canApply ? h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy !== '', onClick: function () { skillAction('apply-skills', item.pkg, '应用 ' + item.pkg); } }, '应用翻译') : null, cap.canRollback ? h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy !== '', onClick: function () { if (typeof window === 'undefined' || window.confirm('确认还原 ' + item.pkg + ' 的翻译？')) skillAction('revert-skills', item.pkg, '还原 ' + item.pkg); } }, '还原') : null));
+        }))) : null;
+      return h('section', { className: 'das-card das-management' },
+        h('div', { className: 'das-card-head' }, h('span', { className: 'das-card-title' }, '插件治理中心'), h('span', { className: 'das-spacer' }), h('span', { className: 'das-foot' }, bundles.length + ' 个 bundle · 第一方管理器')),
+        h('div', { className: 'das-body' },
+          h('div', { className: 'das-manage-toolbar' },
+            h('input', { className: 'das-manage-input', value: spec, onChange: function (e) { setSpec(e.target.value); }, placeholder: '安装规格：包名 / github:owner/repo / tarball', 'aria-label': '安装规格' }),
+            h('button', { type: 'button', className: 'das-btn das-primary', disabled: busy !== '' || managerCaps.install !== true || managerCaps.inspect !== true, onClick: inspect, title: '先执行第一方 inspect 预检，只有通过后才安装' }, busy === 'inspect' ? '预检并安装中…' : '预检并安装'),
+            h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy !== '', onClick: load, title: '重新读取 bundle、启停和可卸载能力' }, busy === 'load' ? '刷新中…' : '刷新治理状态')),
+          preview ? h('div', { className: 'das-manage-preview', role: 'status' }, JSON.stringify(preview, null, 2)) : null,
+          h('div', { className: 'das-manage-list' }, bundles.map(function (item) {
+            var cap = item.capabilities || {};
+            var toggle = cap.canEnable ? { action: 'enable-bundle', label: '开启' } : (cap.canDisable ? { action: 'disable-bundle', label: '停用' } : null);
+            var blocked = cap.blockedReason === 'incompatible-version' ? ' · 版本不兼容，暂不可开启' : '';
+            return h('div', { className: 'das-manage-row', key: item.name },
+              h('div', { className: 'das-manage-main' }, h('div', { className: 'das-manage-name' }, item.name), h('div', { className: 'das-foot' }, (item.version ? 'v' + item.version + ' · ' : '') + (item.installed ? (item.enabled ? '已启用' : '已停用') : '未安装') + (item.readOnlyReason ? ' · ' + item.readOnlyReason : '') + blocked)),
+              h('div', { className: 'das-manage-actions' }, toggle ? h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy !== '', onClick: function () { action({ action: toggle.action, name: item.name }, toggle.label + ' ' + item.name); } }, toggle.label) : null,
+                cap.canUninstall ? h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy !== '', onClick: function () { if (typeof window === 'undefined' || window.confirm('确认卸载 ' + item.name + '？这会从当前 profile 移除依赖。')) action({ action: 'remove-bundle', name: item.name }, '卸载 ' + item.name); } }, '卸载') : null));
+          })),
+          pluginGroup,
+          skillGroup,
+          h('div', { className: 'das-foot' }, '启停、安装和卸载均由 DSH 第一方 pluginManager 执行；内置或受保护 bundle 不显示危险操作。')));
+    }
 
     /** 提交号短写（宿主给的是全量 sha）。 */
     function shortShaOf(sha) {
@@ -372,7 +496,10 @@ window.__ModuleLoader__.load({
       var total = rows.length;
       /* 技能侧：随 DSH 提供的技能在 app.asar 里，没有可写路径 —— 只入表并标注来源，
          不计入「待应用 / 待生成」，否则那几项永远是待办、还会在优化时去写写不了的文件。 */
-      var active = isSkill ? rows.filter(function (r) { return r.bundled !== true; }) : rows;
+      // 只有有可写路径的对象才进入翻译优化统计；内置/只读对象仍保留在总表中。
+      var active = rows.filter(function (r) {
+        return r.translationEligible !== false && (isSkill !== true || r.bundled !== true);
+      });
       var refined = active.filter(function (r) { return r.localized === true; }).length;
       var pending = active.filter(function (r) { return r.needsText === true; }).length;
       var toApply = active.filter(function (r) { return r.localized !== true; }).length;
@@ -441,65 +568,6 @@ window.__ModuleLoader__.load({
      *   · 锁只在 LOCK_MS 内有效；
      *   · 两者不一致时，页面必须写明「记录不约束下表」，否则用户只能看到矛盾。
      */
-    function ResultsPanel(props) {
-      var results = props.results || [];
-      var batch = props.batch || null;
-      var running = !!(batch && batch.running === true);
-      if (results.length === 0 && running !== true) return null;
-      var IS_SKILL = props.isSkill === true;
-      var locked = props.locked === true;
-      /* 记录条数 ≠ 被锁行数：翻译优化会往记录里加「应用」条目，但它不锁任何行。
-         两个数字混用会让「已锁定 N 行」虚报，所以分别取。 */
-      var lockedCount = typeof props.lockedCount === 'number' ? props.lockedCount : 0;
-      var batchCount = batch && Array.isArray(batch.items) ? batch.items.length : results.length;
-      /* 没有 finishedAt 的批量记录 = 宿主判为「超过 10 分钟无进展」而中断的那一批。
-         它不能被说成「已完成」—— 那正是这次要修的那类不诚实措辞。 */
-      var interrupted = batch !== null && running !== true && typeof batch.finishedAt !== 'number';
-      var onRetryOne = props.onRetryOne;
-      var badCount = results.filter(function (r) { return isBad(r.state); }).length;
-      var batchChip = batch
-        ? chip('bc', (IS_SKILL ? '技能更新' : '批量更新') + ' · ' + (running
-            ? '进行中 ' + (Number(batch.index || 0) + 1) + '/' + Number(batch.total || 0)
-            : (interrupted ? '已中断（未完成）' : '已完成 ' + batchCount + ' 项')),
-          running ? 'info' : (interrupted ? 'warn' : (badCount > 0 ? 'err' : 'ok')),
-          batch.message || undefined)
-        : chip('bc', '单行动作 · ' + results.length + ' 项', 'dim', '这些结果来自单行操作，不涉及批量记录');
-      var progress = running && typeof batch.total === 'number'
-        ? h('div', { className: 'das-kpi' }, kpiCell('p1', Number(batch.index || 0) + 1, '进行中', '宿主侧串行执行，逐项落盘'),
-            kpiCell('p2', batch.total, '总数'), kpiCell('p3', batchCount, '已出结果'))
-        : null;
-      return h('section', { className: 'das-card das-rise' },
-        h('div', { className: 'das-card-head' },
-          h('span', { className: 'das-card-title' }, '本轮结果'),
-          batchChip,
-          h('span', { className: 'das-spacer' }),
-          chip('lock', locked ? '下表已按本轮结果锁定 ' + lockedCount + ' 行' : '记录不约束下表', locked ? 'ok' : 'dim',
-            locked ? '被锁的行按钮已暗下去，未变化/失败也不可重复点击；点「刷新状态」可重新判定'
-              : '记录比锁旧：锁定只保鲜 ' + Math.round(LOCK_MS / 60000) + ' 分钟，超期后下表回到「按当前快照判定」')),
-        h('p', { className: 'das-card-note' }, lockNote(batch, locked, lockedCount, IS_SKILL, props.lockReason, Number(props.lockedAt) || 0)),
-        progress,
-        h('div', { className: 'das-wrap', style: { border: 0, borderRadius: 0 } },
-          h('table', { className: 'das-table' },
-            h('thead', null, h('tr', null,
-              h('th', null, '对象'), h('th', null, '动作'), h('th', null, '结果'),
-              h('th', null, '说明与人话'), h('th', null, '操作'))),
-            h('tbody', null, results.map(function (entry) {
-              var tone = STATE_TONE[entry.state] || 'dim';
-              return h('tr', { key: entry.action + '|' + entry.pkg },
-                h('td', { className: 'das-name' }, entry.pkg),
-                h('td', null, ACTION_TEXT[entry.action] || String(entry.action || '—')),
-                h('td', null, chip('st', stateText(entry.state), tone)),
-                h('td', { className: 'das-desc' },
-                  h('div', null, entry.message || '—'),
-                  isBad(entry.state) && entry.fix ? h('div', { className: 'das-foot' }, '→ ' + entry.fix) : null),
-                h('td', { className: 'das-act' },
-                  isBad(entry.state) && typeof onRetryOne === 'function'
-                    ? h('button', { type: 'button', className: 'das-btn das-mini', title: '只重试这一项', onClick: function () { onRetryOne(entry); } }, '重试')
-                    : null,
-                  h('span', { className: 'das-foot' }, entry.at ? agoText(entry.at) : '')));
-            })))));
-    }
-
     /**
      * 记录与锁的口径说明。写的是「为什么记录说完成、下表却还能点更新」——
      * 这正是用户报的「逻辑不清晰」，必须由页面自己解释，不能留给用户猜。
@@ -559,6 +627,10 @@ window.__ModuleLoader__.load({
          于是「刷新后单行更新」会把刚上的锁说成 5 分钟前那批批量的完成（归因错误）；而批量被
          中断时（没有 finishedAt）更会退化成「刚刚完成」。两个错都出自同一个偷懒。 */
       var lockedAtState = useState(0); var lockedAt = lockedAtState[0]; var setLockedAt = lockedAtState[1];
+      /* 悬停展开：行内只留一行主要信息，完整信息进下方固定槽位。
+         有意不挂 onMouseLeave —— 鼠标往槽位移动时不该把内容清掉（清了就来不及读）。
+         槽位优先显示「点展开钉住」的那一行，否则显示最近悬停的一行。 */
+      var hoverState = useState(''); var hoverPkg = hoverState[0]; var setHoverPkg = hoverState[1];
 
       var absorb = useCallback(function (r) {
         if (r && typeof r.rev === 'string' && r.rev !== '') setHostRev(r.rev);
@@ -587,6 +659,7 @@ window.__ModuleLoader__.load({
               pkg: it.pkg, action: action, state: it.state,
               message: why, fix: it.fix || (isBad(it.state) ? fixOf(it.code) : ''),
               from: it.from, to: it.to, at: at,
+              versionUnchanged: it.versionUnchanged === true,
             };
           }
           return Object.keys(map).sort().map(function (k) { return map[k]; });
@@ -635,7 +708,7 @@ window.__ModuleLoader__.load({
         setDone(function (prev) {
           var n = Object.assign({}, prev);
           for (var i = 0; i < b.items.length; i += 1) {
-            n[b.items[i].pkg] = { state: b.items[i].state, message: b.items[i].message };
+            n[b.items[i].pkg] = { state: b.items[i].state, message: b.items[i].message, versionUnchanged: b.items[i].versionUnchanged === true };
           }
           return n;
         });
@@ -710,9 +783,9 @@ window.__ModuleLoader__.load({
         if (IS_SKILL) {
           return snapshot().then(function (cur) {
             if (!cur) { setBusy(''); return; }
-            var pend = cur.filter(function (r) { return r.needsText === true; });
+            var pend = cur.filter(function (r) { return r.translationEligible !== false && r.needsText === true; });
             // 随 DSH 提供的技能在 app.asar 内，没有可写路径：跳过，不算失败
-            var toApplyS = cur.filter(function (r) { return r.bundled !== true && r.localized !== true; });
+            var toApplyS = cur.filter(function (r) { return r.translationEligible !== false && r.localized !== true; });
             if (toApplyS.length === 0) {
               setBusy('');
               setNote({ kind: 'ok', text: '全部 ' + cur.length + ' 个技能均已优化，无需处理。' });
@@ -735,7 +808,7 @@ window.__ModuleLoader__.load({
                     setNote({ kind: gFail.length ? 'err' : 'ok',
                       text: '翻译优化（技能）：生成 ' + gOk + '/' + pend.length + ' · 应用 ' + applied + ' 项 · 跳过 ' + (cur.length - toApplyS.length) + ' 个（已优化或随 DSH 提供）' +
                         (ss ? '；当前已优化 ' + ss.refined + '/' + ss.total : '') +
-                        (gFail.length ? ' · 生成失败 ' + gFail.length + ' 个 —— 逐项原因与重试入口见「本轮结果」' : '') });
+                        (gFail.length ? ' · 生成失败 ' + gFail.length + ' 个 —— 原因见对应行的悬停详情' : '') });
                   });
                 });
               }
@@ -760,8 +833,8 @@ window.__ModuleLoader__.load({
         return snapshot().then(function (cur) {
           if (!cur) { setBusy(''); return; }
           // 跳过已优化的：needsText = 压根没有文案（要生成）；未 localized = 有文案但未落盘（要应用）
-          var pending = cur.filter(function (r) { return r.needsText === true; });
-          var toApply = cur.filter(function (r) { return r.localized !== true; });
+          var pending = cur.filter(function (r) { return r.translationEligible !== false && r.needsText === true; });
+          var toApply = cur.filter(function (r) { return r.translationEligible !== false && r.localized !== true; });
           var skipped = cur.length - toApply.length;
           if (toApply.length === 0) {
             setBusy('');
@@ -786,7 +859,7 @@ window.__ModuleLoader__.load({
                   setNote({ kind: genFail.length ? 'err' : 'ok',
                     text: '翻译优化完成：新生成 ' + genOk + '/' + pending.length + ' 条文案，应用 ' + applied + ' 项，跳过已优化 ' + skipped + ' 个' +
                       (s ? '；当前已优化 ' + s.refined + '/' + s.total : '') +
-                      (genFail.length ? ' · 生成失败 ' + genFail.length + ' 个 —— 逐项原因与重试入口见「本轮结果」' : '') });
+                      (genFail.length ? ' · 生成失败 ' + genFail.length + ' 个 —— 原因见对应行的悬停详情' : '') });
                 });
               });
             }
@@ -855,7 +928,17 @@ window.__ModuleLoader__.load({
                   setJobs(function (prev) { var x = Object.assign({}, prev); x[pkg] = job; return x; });
                   if (job.done) {
                     setJobs(function (prev) { var x = Object.assign({}, prev); delete x[pkg]; return x; });
-                    resolve({ ok: job.ok === true, pkg: pkg, code: job.ok ? null : 'update-failed', message: job.message });
+                    resolve({
+                      ok: job.state === 'updated' || (job.ok === true && job.state !== 'unchanged'),
+                      state: job.state || (job.ok === true ? 'updated' : 'failed'),
+                      pkg: pkg,
+                      code: job.code || (job.state === 'unchanged' ? 'unchanged' : (job.ok ? null : 'update-failed')),
+                      message: job.message,
+                      from: job.from,
+                      to: job.to,
+                      versionUnchanged: job.versionUnchanged === true,
+                      application: job.application,
+                    });
                     return;
                   }
                 }
@@ -912,7 +995,7 @@ window.__ModuleLoader__.load({
           return snapshot({ force: true }).then(function () {
             setNote({ kind: nFail > 0 ? 'err' : (nUpdated > 0 ? 'ok' : 'note'),
               text: '技能更新完成：更新 ' + nUpdated + ' 个，未变化 ' + nSame + ' 个，失败 ' + nFail + ' 个' +
-                (nFail > 0 ? '（每项失败原因都在「本轮结果」里，可逐项重试）' : '') });
+                (nFail > 0 ? '（每项失败原因见对应行的悬停详情）' : '') });
             return items;
           });
         });
@@ -929,23 +1012,18 @@ window.__ModuleLoader__.load({
         // 一键更新却仍然可点」—— 那是同一处矛盾的另一半。
         return updateOne(pkg).then(function (res) {
           setBusy('');
-          setDone(function (prev) { var n = Object.assign({}, prev); n[pkg] = { state: res.ok ? 'ok' : 'fail', message: res.message }; return n; });
+          setDone(function (prev) { var n = Object.assign({}, prev); n[pkg] = { state: res.state || (res.ok ? 'updated' : 'failed'), message: res.message, versionUnchanged: res.versionUnchanged === true }; return n; });
           setBatchSettled(true);
           setLockedAt(Date.now());
           return snapshot({ force: true }).then(function () {
-            absorbResults('update', [{ pkg: pkg, state: res.ok ? 'updated' : 'failed', code: res.code, message: res.message }]);
-            if (res.ok) setNote({ kind: 'ok', text: pkg + ' 更新完成，状态已刷新。' });
+            absorbResults('update', [{ pkg: pkg, state: res.state || (res.ok ? 'updated' : 'failed'), code: res.code, message: res.message, from: res.from, to: res.to, versionUnchanged: res.versionUnchanged === true }]);
+            if (res.state === 'unchanged') setNote({ kind: 'note', text: pkg + ' 安装请求已执行，但版本未变化。' + fixOf(res.code) });
+            else if (res.versionUnchanged === true) setNote({ kind: 'ok', text: pkg + ' 已重新安装；版本字段未变化，重启 DSH 后确认运行状态。' });
+            else if (res.ok) setNote({ kind: 'ok', text: pkg + ' 已更新，状态已刷新。' });
             else setNote({ kind: 'err', text: pkg + ' 更新失败：' + res.message + ' → ' + fixOf(res.code) });
           });
         });
       }, [absorbResults, snapshot, updateOne, updateSkills]);
-
-      /** 逐项重试：动作不同走不同路径，但都复用已经验证过的调用链。 */
-      var retryOne = useCallback(function (entry) {
-        if (!entry || typeof entry.pkg !== 'string') return null;
-        if (entry.action === 'update') return IS_SKILL ? updateSkills([entry.pkg]) : doUpdate(entry.pkg);
-        return optimize();
-      }, [doUpdate, optimize, updateSkills]);
 
       var updateAll = useCallback(function (list) {
         var pend = (list || []).filter(function (r) { return r.hasUpdate === true; }).map(function (r) { return r.pkg; });
@@ -1076,11 +1154,23 @@ window.__ModuleLoader__.load({
       }
       var kpiEl = kpiCells.length > 0 ? h('div', { className: 'das-kpi' }, kpiCells) : null;
 
-      // 两页各自渲染自己那一份：「本轮结果」由 results 承载，批量进度由 batch 承载
-      var resultsEl = h(ResultsPanel, {
-        results: results, batch: batch, isSkill: IS_SKILL, locked: locked, lockedCount: lockedCount,
-        lockReason: lockReason, lockedAt: lockedAt, onRetryOne: retryOne,
-      });
+      /* 「本轮结果」不再单独占一张表（用户报的那张灰表 + 动作列竖排就是它）：
+         批量进度压成一条状态提示，逐项结果贴回对应对象行；口径原文进提示的 title，
+         悬停即可读到，不再吃版面。 */
+      var resultHint = null;
+      var lockExplain = lockNote(batch, locked, lockedCount, IS_SKILL, lockReason, lockedAt);
+      if (batch && batch.running === true) {
+        resultHint = h('div', { className: 'das-note', role: 'status', title: lockExplain }, chip('rh', '执行中', 'info'), h('span', { className: 'das-note-text' },
+          (IS_SKILL ? '技能更新' : '插件更新') + ' ' + (Number(batch.index || 0) + 1) + '/' + Number(batch.total || 0) + '，宿主正在串行处理；下表会实时合并结果。'));
+      } else if (results.length > 0) {
+        var failedResults = results.filter(function (item) { return isBad(item.state); }).length;
+        var changedResults = results.filter(function (item) { return item.state === 'updated' || item.state === 'applied' || item.state === 'generated' || item.state === 'restored'; }).length;
+        var interruptedResult = batch && typeof batch.finishedAt !== 'number';
+        var resultScope = locked ? '已锁定 ' + lockedCount + ' 行' : '按最新快照';
+        resultHint = h('div', { className: 'das-note' + (interruptedResult ? '' : (failedResults > 0 ? ' is-err' : ' is-ok')), role: 'status', title: lockExplain },
+          chip('rh', interruptedResult ? '已中断（未完成）' : (failedResults > 0 ? '有失败' : '已完成'), interruptedResult ? 'warn' : (failedResults > 0 ? 'err' : 'ok')),
+          h('span', { className: 'das-note-text' }, '本轮处理 ' + results.length + ' 项' + (changedResults ? ' · 已变化 ' + changedResults : '') + (failedResults ? ' · 失败 ' + failedResults : '') + ' · ' + resultScope + '；逐项说明已并入下表。'));
+      }
 
       /* 行按钮与「本轮结果」记录一致时不必再说；一旦行按钮不再代表那一轮（记录已超期、锁已释放），
          就把记录贴回该行 —— 这正是用户看到「状态栏说完成、行里还能点更新」时缺的那一句话。 */
@@ -1092,6 +1182,7 @@ window.__ModuleLoader__.load({
       var table = rows === null
         ? h('div', { className: 'das-note' }, h('span', { className: 'das-note-text' }, IS_SKILL ? '正在读取技能状态…' : '正在读取插件状态…'))
         : h('div', { className: 'das-wrap' },
+            resultHint ? h('div', { className: 'das-table-meta' }, resultHint) : null,
             h('table', { className: 'das-table' },
               h('thead', null, h('tr', null,
                 h('th', null, IS_SKILL ? '技能' : '插件'),
@@ -1108,45 +1199,65 @@ window.__ModuleLoader__.load({
                 var facts = findings.filter(function (f) { return f.confidence === 'fact'; });
                 var sev = facts.some(function (f) { return f.severity === 'high'; }) ? 'high'
                   : (facts.some(function (f) { return f.severity === 'medium'; }) ? 'medium' : 'low');
-                /* 事实级发现直接摊在行内（带严重度徽章 + 标题片段），
-                   推断级只计数、留在「详情」里 —— 行内不塞噪音，但仍能一眼看到有没有真问题。 */
-                var factTitle = facts.length > 0 ? String(facts[0].title) : '';
-                var factLine = facts.length > 0
-                  ? h('div', { title: facts.map(function (f) { return (SEV[f.severity] || f.severity) + ' · ' + f.title; }).join('\n') },
-                      h('span', { className: 'das-sev ' + (SEV_CLASS[sev] || 'is-low') }, SEV[sev]),
-                      h('span', { className: 'das-foot' }, ' ' + factTitle.slice(0, 38) + (factTitle.length > 38 ? '…' : '')))
-                  : null;
-                var stateTone = r.bundled === true ? 'dim' : (r.localized ? 'ok' : 'warn');
-                var stateText2 = r.bundled === true ? '随 DSH 提供' : (r.localized ? '已优化' : (r.needsText ? '待生成文案' : '待应用'));
+                /* 事实级发现行内只留严重度徽章（标题进悬停槽与 title）；推断级只计数。 */
+                var managerProblem = r.errorCode === 'incompatible-version' || r.errorCode === 'bundle-error' || r.error;
+                var readOnly = r.translationEligible === false;
+                var stateTone = readOnly ? 'dim' : (r.localized ? 'ok' : 'warn');
+                var stateText2 = readOnly
+                  ? (r.bundled === true ? '随 DSH 提供' : '未纳入翻译优化')
+                  : (r.localized ? '已优化' : (r.needsText ? '待生成文案' : '待应用'));
                 var record = recordByPkg[r.pkg];
                 var recordChip = (record && done[r.pkg] === undefined)
                   ? chip('rc', '本轮 · ' + stateText(record.state), STATE_TONE[record.state] || 'dim',
                       '这是「本轮结果」里针对本行的记录（' + agoText(record.at) + '，动作：' + (ACTION_TEXT[record.action] || record.action) + '）：' +
                       (record.message || '') + '。它不是当前状态：当前状态由版本列与「更新」按钮决定。')
                   : null;
-                var latestCell = IS_SKILL
-                  ? h('span', { className: 'das-desc' },
-                      shortRoot(r.source) || '—',
-                      r.isGit === true
-                        ? ' · ' + (r.hasUpdate === true ? '↑ 远端 ' + shortShaOf(r.remoteSha)
-                          : (r.hasUpdate === false ? '最新 ' + shortShaOf(r.localSha) : '未比对（' + (r.reason || '未知') + '）'))
-                          + (r.dirty > 0 ? ' · 本地改动 ' + r.dirty + ' 个文件' : '')
-                        : ' · 本地目录')
-                  : h('span', { className: 'das-desc', title: r.reason || (r.latest ? 'npm registry 上的最新版本' : undefined) },
-                      r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'));
+                var sourceHint = IS_SKILL ? shortRoot(r.source) : '';
+                var sourceNode = IS_SKILL
+                  ? (r.sourceUrl
+                    ? h('a', { className: 'das-source-link', href: r.sourceUrl, target: '_blank', rel: 'noreferrer', title: r.sourceUrl }, r.sourceLabel || 'GitHub 原作者仓库')
+                    : h('span', { className: 'das-desc', title: sourceHint || undefined }, r.sourceLabel || '来源未知'))
+                  : null;
+                /* 更新口径：显式状态 chip，而不是只给一个箭头让用户猜。
+                   「版本不兼容」（管理器拒绝）优先 —— 那正是「装了但版本没动」的真因。 */
+                var updateState = managerProblem
+                  ? { text: '版本不兼容', tone: 'err', title: String(r.errorMessage || r.error || '宿主管理器拒绝了这个版本') }
+                  : (upd ? { text: '可更新', tone: 'warn', title: IS_SKILL ? '远端比本地新' : '远端比已装版本新' }
+                    : (r.hasUpdate === false ? { text: '已最新', tone: 'ok', title: '远端与本地一致' }
+                      : { text: '不可比', tone: 'dim', title: r.reason || '没有可比的远端版本' }));
+                var latestText = IS_SKILL
+                  ? (r.isGit === true
+                    ? (r.hasUpdate === true ? '↑ 远端 ' + shortShaOf(r.remoteSha)
+                      : (r.hasUpdate === false ? '最新 ' + shortShaOf(r.localSha) : '未比对（' + (r.reason || '未知') + '）'))
+                      + (r.dirty > 0 ? ' · 本地改动 ' + r.dirty + ' 个文件' : '')
+                    : '本地目录')
+                  : (r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'));
+                var nameLine = (r.displayName && r.displayName !== r.pkg) ? r.displayName + ' · ' + r.pkg : (r.displayName || r.pkg);
+                var optimizeTitle = (readOnly
+                  ? (r.bundled === true
+                    ? '该对象来自 DSH 内置运行时，在 app.asar 内没有可写路径，不参与翻译优化。'
+                    : '该对象由宿主管理，当前没有可写路径，不参与翻译优化。')
+                  : (r.localized ? '文案已落盘' : (r.needsText ? '还没有文案条目，需要调用模型生成' : '已有文案但未落盘，点「翻译优化」应用')))
+                  + (r.localizedDescription ? ' 说明：' + r.localizedDescription : '');
+                /* 一行一项：行内只留 名称 · 优化状态 · 版本 · 更新状态(+本轮记录) · 操作。
+                   中文说明、作用、描述语言、管理器异常、审查标题、原名统统进悬停槽与 title。 */
                 var cells = [
-                  h('td', { className: 'das-name' },
-                    r.pkg,
-                    r.displayName && r.displayName !== r.pkg ? h('small', null, r.displayName) : null),
+                  h('td', { className: 'das-name' }, h('div', { className: 'das-name-main', title: r.pkg }, nameLine)),
                   h('td', null,
-                    chip('lo', stateText2, stateTone,
-                      r.bundled === true ? '在 app.asar 内，没有可写路径，不参与优化'
-                        : (r.localized ? '文案已落盘' : (r.needsText ? '还没有文案条目，需要调用模型生成' : '已有文案但未落盘，点「翻译优化」应用'))),
-                    IS_SKILL ? h('div', { className: 'das-foot' }, '描述语言 ' + (r.descriptionLang || '未知')) : null,
-                    factLine),
+                    chip('lo', stateText2, stateTone, optimizeTitle),
+                    facts.length > 0
+                      ? h('span', {
+                          className: 'das-sev ' + (SEV_CLASS[sev] || 'is-low'),
+                          title: facts.map(function (f) { return (SEV[f.severity] || f.severity) + ' · ' + f.title; }).join('\n'),
+                        }, SEV[sev])
+                      : null),
                   h('td', { className: 'das-num' },
                     IS_SKILL ? h('span', { title: rev.title }, rev.text) : h('span', { title: 'package.json 里已安装的版本' }, r.version || '—')),
-                  h('td', { className: 'das-wrapd' }, latestCell, recordChip),
+                  h('td', null,
+                    chip('us', updateState.text, updateState.tone, updateState.title),
+                    IS_SKILL && sourceNode ? sourceNode : null,
+                    h('span', { className: 'das-num', title: latestText }, latestText),
+                    recordChip),
                 ];
                 var op = [];
                 var finished = done[r.pkg];
@@ -1159,20 +1270,81 @@ window.__ModuleLoader__.load({
                 if (issues.length || findings.length) {
                   op.push(h('button', {
                     key: 'i', type: 'button', className: 'das-btn das-mini',
-                    title: '查看该条的审查发现与问题说明',
+                    title: '在当前表格行下展开审查发现与处理建议',
                     onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); },
-                  }, (openPkg === r.pkg ? '收起详情' : '详情 ' + (issues.length + findings.length))));
+                  }, (openPkg === r.pkg ? '收起' : '展开 ' + (issues.length + findings.length))));
                 }
                 cells.push(h('td', { className: 'das-act' }, op.length ? op : null));
-                return h('tr', { key: r.profileDir + '|' + r.pkg, className: r.installed === false ? 'is-dim' : undefined }, cells);
+                var row = h('tr', {
+                  key: r.profileDir + '|' + r.pkg,
+                  className: r.installed === false ? 'is-dim' : undefined,
+                  onMouseEnter: function () { setHoverPkg(r.pkg); },
+                }, cells);
+                if (openPkg !== r.pkg || (issues.length === 0 && findings.length === 0)) return row;
+                var inlineItems = [];
+                findings.forEach(function (finding) {
+                  inlineItems.push(h('div', { key: 'finding:' + finding.id, className: 'das-inline-item ' + (SEV_CLASS[finding.severity] || '') },
+                    h('div', { className: 'das-inline-title' }, h('span', { className: 'das-sev ' + (SEV_CLASS[finding.severity] || 'is-low') }, SEV[finding.severity] || finding.severity), finding.confidence === 'fact' ? null : ' 推断', ' ', finding.title),
+                    h('div', { className: 'das-inline-copy' }, '影响/目的：' + (finding.impact || '用于判断该对象是否能被正确识别、选择或安全更新。')),
+                    h('div', { className: 'das-inline-copy' }, '证据：' + (finding.evidence || '—')),
+                    h('div', { className: 'das-inline-copy' }, '建议：' + (finding.remedy || '—')),
+                    h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy.indexOf('ignore:') === 0, onClick: function () { ignore(finding.id); } }, '忽略')));
+                });
+                issues.forEach(function (issue, issueIndex) {
+                  inlineItems.push(h('div', { key: 'issue:' + issueIndex, className: 'das-inline-item is-medium' },
+                    h('div', { className: 'das-inline-title' }, issue.reason || '状态异常'),
+                    h('div', { className: 'das-inline-copy' }, '影响/目的：' + (issue.impact || issue.reason || '需要确认当前状态是否可继续使用。')),
+                    h('div', { className: 'das-inline-copy' }, '建议：' + (issue.remedy || '—')),
+                    issue.action && issue.action.kind === 'retry'
+                      ? h('button', { type: 'button', className: 'das-btn das-mini', onClick: refresh }, issue.action.label || '重试')
+                      : null));
+                });
+                return [row, h('tr', { key: r.profileDir + '|' + r.pkg + '|detail' }, h('td', { colSpan: 5, className: 'das-inline-detail' }, h('div', { className: 'das-inline-detail-grid' }, inlineItems)))];
               }))));
 
-      var openRow = rows ? rows.filter(function (r) { return r.pkg === openPkg; })[0] : null;
-      var detail = openRow
-        ? h('div', { className: 'das-detail' },
-            h(FindingCard, { pkg: openRow.pkg, findings: openRow.findings, onIgnore: ignore, busy: busy.indexOf('ignore:') === 0 }),
-            (openRow.issues || []).length ? h(IssueCard, { pkg: openRow.pkg, issues: openRow.issues, onRetry: refresh }) : null)
-        : null;
+      /* ── 悬停详情槽（用户三条里的「鼠标悬停拓展展示详细信息」）──
+         行内只留一行主要信息，完整信息在这里。固定槽位 + 预留高度：换内容不改布局，所以不跳行。
+         优先显示「点展开钉住」的那一行，否则显示最近悬停的一行。 */
+      var detailPkg = openPkg || hoverPkg;
+      var detailRow = rows ? rows.filter(function (r) { return r.pkg === detailPkg; })[0] : null;
+      var hoverEl = h('div', { className: 'das-hover', role: 'status' }, (function () {
+        if (!detailRow) {
+          return h('div', { className: 'das-hover-hint' },
+            '把鼠标移到某一行，这里显示该行的完整信息：中文说明、作用、描述语言、版本对照、来源、本轮结果与审查发现。点行内「展开」可钉住。');
+        }
+        var d = detailRow;
+        var dRecord = recordByPkg[d.pkg];
+        var dFacts = (d.findings || []).filter(function (f) { return f.confidence === 'fact'; });
+        var dInferred = (d.findings || []).filter(function (f) { return f.confidence !== 'fact'; });
+        var pairs = [];
+        pairs.push(['名称', (d.displayName && d.displayName !== d.pkg) ? d.displayName + '（' + d.pkg + '）' : d.pkg]);
+        if (d.localizedDescription) pairs.push(['中文说明', d.localizedDescription]);
+        if (IS_SKILL && d.purpose) pairs.push(['作用', d.purpose]);
+        if (IS_SKILL && d.descriptionLang) pairs.push(['描述语言', d.descriptionLang]);
+        pairs.push([IS_SKILL ? '修订' : '版本', (IS_SKILL ? skillRevision(d).text : (d.version || '—')) +
+          (IS_SKILL ? '' : (d.latest ? ' → 远端 ' + d.latest : '（' + (d.reason || '没有可比的远端版本') + '）'))]);
+        if (IS_SKILL && d.source) pairs.push(['来源', shortRoot(d.source) + (d.sourceUrl ? ' · ' + (d.sourceLabel || d.sourceUrl) : '')]);
+        if (d.errorMessage || d.error) pairs.push(['管理器异常', String(d.errorMessage || d.error)]);
+        if (dRecord) {
+          pairs.push(['本轮结果', stateText(dRecord.state) + (dRecord.message ? ' · ' + dRecord.message : '')
+            + '（' + agoText(dRecord.at) + '）' + (dRecord.fix ? ' → ' + dRecord.fix : '')]);
+        }
+        if (dFacts.length || dInferred.length) {
+          pairs.push(['审查', dFacts.map(function (f) { return (SEV[f.severity] || f.severity) + '·' + f.title; }).join('；')
+            + (dInferred.length ? '（另有 ' + dInferred.length + ' 条推断）' : '')]);
+        }
+        return [
+          h('div', { key: 'k', className: 'das-hover-head' },
+            h('span', { className: 'das-hover-name' }, d.displayName || d.pkg),
+            chip('hv', openPkg === d.pkg ? '已钉住' : '悬停预览', openPkg === d.pkg ? 'ok' : 'dim',
+              openPkg === d.pkg ? '点行内「收起」取消钉住' : '点行内「展开」可钉住并显示操作按钮')),
+          h('div', { key: 'g', className: 'das-hover-grid' }, pairs.map(function (p, i) {
+            return h('div', { key: 'p' + i },
+              h('span', { className: 'das-hover-k' }, p[0] + '：'),
+              h('span', { className: 'das-hover-v' }, String(p[1])));
+          })),
+        ];
+      })());
 
       return h('div', { className: 'das-root' },
         h('div', { className: 'das-head' },
@@ -1187,12 +1359,13 @@ window.__ModuleLoader__.load({
         staleEl,
         kpiEl,
         noteEl,
-        resultsEl,
         table,
-        detail,
-        h('p', { className: 'das-sub' }, IS_SKILL
-          ? '技能改写会真实写入 SKILL.md：name 保留原文、中文名以（）附加，description 替换为「触发词 → 精炼说明」；改写前留 .dsh-skill.backup 备份，「还原翻译」逐字节恢复原文件。注意 description 是模型选择技能的依据，改它属于行为变更而非展示变更，请自行确认生成内容。「随 DSH 提供」的技能在 app.asar 内、没有可写路径，只入表不参与优化。' + (hostRev ? '  宿主半体 v' + hostRev : '')
-          : '翻译优化会调用模型为缺失文案的插件生成中文（消耗 token），结果存入覆盖层，重装不丢；更新经第一方插件管理器执行，会真实运行 pnpm 并可能触发重载。' + (hostRev ? '  宿主半体 v' + hostRev : '')));
+        hoverEl,
+        h('p', { className: 'das-sub', title: IS_SKILL
+          ? '技能改写会真实写入 SKILL.md；写入前保留 .dsh-skill.backup，必要时可还原；改写描述属于行为变更。'
+          : undefined }, IS_SKILL
+          ? '技能表已合并来源、修订、翻译、更新与审查；翻译会写入 SKILL.md 并保留备份。'
+          : '插件表已合并优化状态、版本、更新、审查与本轮结果；安装和更新由第一方管理器执行。'));
     }
 
     /* 合并页：插件与技能共用一个设置页，切换按钮在页面上方。
@@ -1220,7 +1393,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'das-head' },
           h('div', { className: 'das-seg', role: 'tablist' },
             tab('plugin', '插件', '插件半体：翻译优化、版本与更新、冲突与兼容审查'),
-            tab('skill', '技能', '技能 SKILL.md：翻译优化、来源与审查'))),
+            tab('skill', '技能', '技能 SKILL.md：翻译优化、来源、作用与审查'))),
         h(Panel, { key: mode, target: mode }));
     }
 

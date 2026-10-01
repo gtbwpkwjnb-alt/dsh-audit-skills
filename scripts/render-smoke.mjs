@@ -186,16 +186,17 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.8.0'
+const REV = '2.9.0'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
 const PLUGIN_ROWS = [
+  pluginRow({ pkg: '@deepseek-ai/dsh-base', version: '2.4.0', latest: null, hasUpdate: null, reason: '内置运行时', localized: false, needsText: true, bundled: true, translationEligible: false, readOnlyReason: 'unaddressable' }),
   pluginRow({ pkg: '@changfenhuang/dsh-annotation', version: '1.4.10', latest: '1.4.10', hasUpdate: false, localized: true, needsText: false }),
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.8.0', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.9.0', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -205,7 +206,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: 'dsh-better-sidebar', version: '0.21.1', latest: '0.21.1', hasUpdate: false, localized: true, needsText: false }),
   pluginRow({ pkg: 'dsh-compact-button', version: '1.1.0', latest: '0.5.0', hasUpdate: false, localized: true, needsText: false }),
   pluginRow({ pkg: 'dsh-computer-use-win', version: '0.1.2', latest: '0.2.2', hasUpdate: true, localized: true, needsText: false }),
-  pluginRow({ pkg: 'dsh-context', version: '0.56.2', latest: '0.56.2', hasUpdate: false, localized: true, needsText: false }),
+  pluginRow({ pkg: 'dsh-context', version: '0.56.2', latest: '0.56.2', hasUpdate: false, localized: true, needsText: false, localizedDescription: '中文说明：给模型提供上下文面板' }),
   /* 第 4 个「可更新」的插件，且**不在** batchItems() 里 —— 有了它，
      「未锁的行不受影响」「锁有效时不必再贴记录」这两条才不是恒真的空断言。 */
   pluginRow({ pkg: 'dsh-context-doctor', version: '0.1.0', latest: '0.2.0', hasUpdate: true, localized: true, needsText: false }),
@@ -217,7 +218,7 @@ const PLUGIN_ROWS = [
 
 const SKILL_ROOT = 'rank 500 · C:\\Users\\Administrator\\.agents\\skills'
 const skillRow = (o) => Object.assign({
-  kind: 'skill', installed: true, enabled: true, source: SKILL_ROOT, descriptionLang: '中文为主',
+  kind: 'skill', installed: true, enabled: true, source: SKILL_ROOT, sourceLabel: '本地技能，无远端仓库', sourceUrl: '', purpose: '触发词 → 用于验证技能作用说明。', descriptionLang: '中文为主',
   isGit: false, localSha: '', remoteSha: null, dirty: 0, hasUpdate: null, bundled: false,
   skillPath: '', bytes: 100, frontmatter: true, dirMismatch: false, nestedSkillFiles: 0,
   shadowed: [], repoUrl: '', branch: '', upstream: '', repoOwned: false, issues: [], findings: [],
@@ -228,11 +229,11 @@ const SKILL_ROWS = [
   skillRow({ pkg: 'agent-reach', version: '1.6.0', localized: false, needsText: true, descriptionLang: '英文' }),
   skillRow({ pkg: 'cangjie-skill', version: '0.2.0', localized: false, needsText: true }),
   skillRow({ pkg: 'gpt-tasteskill', version: '1.0.0', localized: false, needsText: true }),
-  skillRow({ pkg: 'learn', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/learn', branch: 'main', localSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', remoteSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', hasUpdate: false, dirty: 3 }),
+  skillRow({ pkg: 'learn', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/learn', sourceLabel: 'GitHub 原作者仓库', sourceUrl: 'https://github.com/x/learn', branch: 'main', localSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', remoteSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', hasUpdate: false, dirty: 3, purpose: '把长视频与播客蒸馏成可执行方法论', localizedDescription: '中文说明：学习一个视频并生成闪卡' }),
   skillRow({ pkg: 'luopan', version: null, localized: false, needsText: true, descriptionLang: '中文' }),
   skillRow({ pkg: 'ponytail', version: null, localized: false, needsText: true }),
   skillRow({ pkg: 'ruofeng-adversarial-review', version: '0.1.0', localized: false, needsText: true }),
-  skillRow({ pkg: 'session-summarize', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/ss', branch: 'main', localSha: '36acead2edf22c2d3680611fef61697d2c7d6dbf', remoteSha: '36acead2edf22c2d3680611fef61697d2c7d6dbf', hasUpdate: false, dirty: 2 }),
+  skillRow({ pkg: 'session-summarize', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/ss', sourceLabel: 'GitHub 原作者仓库', sourceUrl: 'https://github.com/x/ss', branch: 'main', localSha: '36acead2edf22c2d3680611fef61697d2c7d6dbf', remoteSha: '36acead2edf22c2d3680611fef61697d2c7d6dbf', hasUpdate: false, dirty: 2 }),
   skillRow({ pkg: 'skillopt', version: '0.2.0', localized: false, needsText: true }),
   skillRow({ pkg: 'skills-summarize-audit', version: null, localized: false, needsText: true }),
 ]
@@ -369,11 +370,11 @@ check('渲染无异常（apply / 渲染 / effect 都算）', stale.errors.length
 check('取到了 /updates 与 /update-all-status', stale.loaded.state.calls.includes('updates') && stale.loaded.state.calls.includes('update-all-status'), stale.loaded.state.calls.join(','))
 check('全部插件成行（' + PLUGIN_ROWS.length + ' 个）', PLUGIN_ROWS.every((r) => staleText.includes(r.pkg)), '缺：' + PLUGIN_ROWS.filter((r) => !staleText.includes(r.pkg)).map((r) => r.pkg).join(','))
 check('KPI 数据带渲染（可更新 / 待生成文案 / 无法比对）', staleText.includes('可更新') && staleText.includes('待生成文案') && staleText.includes('无法比对'))
-check('本轮结果卡列出批量记录的三项', staleText.includes('本轮结果') && staleText.includes('批量更新 · 已完成 3 项') && staleText.includes('安装已执行，但版本未变（仍为 0.5.0）'))
-check('【核心】记录超期时页面自己写明「不再约束下表」', staleText.includes('不再约束下表') && staleText.includes('锁定保鲜期'))
-check('超期时状态 chip 与口径一致（记录不约束下表）', staleText.includes('记录不约束下表'))
-check('记录条数按该批次自身算（批量 3 项，不被后续动作的条目数污染）', staleText.includes('批量更新 · 已完成 3 项'))
-check('并说明「记录说完成、行里仍能点更新」是正常差异而非矛盾', staleText.includes('差异是正常的，不是矛盾'))
+check('内置 bundle 显示随 DSH 提供而不是待生成文案', staleText.includes('@deepseek-ai/dsh-base') && staleText.includes('随 DSH 提供'))
+check('本轮结果合并到状态提示与对象行', staleText.includes('本轮处理 3 项') && staleTitles.includes('安装已执行，但版本未变（仍为 0.5.0）'))
+check('【核心】历史结果不再单独占表，页面说明当前按快照判定', staleText.includes('按最新快照') && !staleText.includes('记录不约束下表'))
+check('超期状态保持紧凑且不重复渲染结果表', (staleText.match(/本轮处理 3 项/g) || []).length === 1)
+check('对象行继续保留结果说明', staleTitles.includes('它不是当前状态'))
 check('超期 = 不锁行：可更新的行仍给出「更新」入口（含不在该批次里的第 4 行）',
   staleText.includes('更新') && staleTitles.includes('更新到 0.5.1') && staleTitles.includes('更新到 0.3.16') && staleTitles.includes('更新到 0.2.0'))
 check('【核心】行按钮不再代表那一轮时，把上轮结果贴回该行（3 行都有）', (staleText.match(/本轮 · 未变化/g) || []).length === 3, 'count=' + (staleText.match(/本轮 · 未变化/g) || []).length)
@@ -382,9 +383,40 @@ check('一键更新按钮可用（锁已释放），且标注可更新数量 4',
   (() => { const b = buttonByText(stale.pluginTree, '一键更新'); return !!b && b.props.disabled !== true && textOf(b).includes('4') })())
 check('最新列显示 ↑ 远端新版本，未变化只是「本轮结果」的记录', staleText.includes('↑ 0.5.1') && staleText.includes('↑ 0.3.16'))
 check('降级保护：已装 1.1.0 / 远端 0.5.0 不标为可更新', staleText.includes('1.1.0') && staleText.includes('0.5.0'))
-check('行内直接摊出事实级发现（严重度徽章 + 标题片段）', staleText.includes('与另一个插件共享非平台模块') && /低/.test(staleText))
+check('行内只留严重度徽章，事实标题进悬停与 title', /低/.test(staleText) && staleTitles.includes('与另一个插件共享非平台模块'))
 check('渲染文本里没有 undefined', !/\bundefined\b/.test(staleText), staleText.slice(0, 160))
 check('版本 chip 同时给出客户端与宿主版本', staleText.includes('v' + REV) && staleText.includes('宿主 v' + REV))
+
+/* ── 用户三条「显示优化」的验收点（先红后绿）：一行一项 / 悬停展开 / 更新状态 ── */
+check('【密度】长文案不进表格行，只在悬停详情里',
+  !staleText.includes('中文说明：给模型提供上下文面板') && staleTitles.includes('中文说明：给模型提供上下文面板'))
+check('【密度】td 默认 nowrap —— 不再出现「更/新」这种竖排文字',
+  /\.das-table td \{[^}]*white-space: nowrap/.test(clientSrc))
+check('【密度】名称列单行截断（ellipsis），不靠换行堆叠',
+  /\.das-table td \{[^}]*text-overflow: ellipsis/.test(clientSrc))
+check('【更新状态】更新列给出显式状态 chip（已最新 / 不可比）',
+  staleText.includes('已最新') && staleText.includes('不可比'))
+check('【悬停】未悬停时槽位给出提示，而不是留一片空白', staleText.includes('把鼠标移到'))
+const ctxRow = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-context') && !textOf(n).includes('doctor'))[0]
+check('【悬停】行节点挂了 onMouseEnter', !!ctxRow && typeof ctxRow.props.onMouseEnter === 'function')
+let hoverText = ''
+if (ctxRow && typeof ctxRow.props.onMouseEnter === 'function') {
+  backToPlugin(stale.loaded)   /* scenario() 结尾切到了技能视图，先切回来再悬停 */
+  ctxRow.props.onMouseEnter()
+  hoverText = textOf((await renderSettled(stale.loaded.rt, stale.element)).tree)
+}
+check('【悬停】悬停后槽位显示该行完整信息（长文案 + 已装/最新对照）',
+  hoverText.includes('中文说明：给模型提供上下文面板') && hoverText.includes('0.56.2'),
+  'hoverText=' + hoverText.slice(0, 240))
+/* 「一行一项」的结构化证明：数据行里除名称列那个省略号 div 之外，不允许再出现块级 div
+   （块级堆叠 = 一个格子塞多行，正是用户抱怨的信息过多）。 */
+const dataRows = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
+const stackedRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'div' && n.props.className !== 'das-name-main').length > 0)
+check('【密度】每个插件严格占一行：行内没有堆叠的块级元素',
+  dataRows.length >= PLUGIN_ROWS.length && stackedRows.length === 0,
+  'stacked=' + stackedRows.length + '/' + dataRows.length)
+check('【密度】每行单元格里最多一个文本块（chip 用 span，不换行）',
+  dataRows.every((tr) => elementsOf(tr, (n) => n.tag === 'td').every((td) => elementsOf(td, (n) => n.tag === 'div').length <= 1)))
 
 /* 模拟用户点「详情」：Panel 的 openPkg 是它的第 4 个 hook。
    这一步同时验证 FindingCard / IssueCard —— 此前它们从未被渲染过。
@@ -395,9 +427,9 @@ panel.hooks[4].v = 'dsh-audit-skills'
 const detailed = await renderSettled(stale.loaded.rt, stale.element)
 const detailText = textOf(detailed.tree)
 check('详情渲染无异常', detailed.errors.length === 0, detailed.errors.map((e) => e.message).join(' | '))
-check('详情卡给出问题的原因与解决办法', detailText.includes('npm registry 上没有这个包') && detailText.includes('GitHub 直装，跳过 npm 比对'))
-check('详情卡给出「忽略此条」入口', detailText.includes('忽略此条'))
-check('推断级发现折叠在详情里并注明仅供知悉', detailText.includes('另有 1 条推断') && detailText.includes('仅供知悉'))
+check('行内详情给出问题的原因与解决办法', detailText.includes('npm registry 上没有这个包') && detailText.includes('GitHub 直装，跳过 npm 比对'))
+check('行内详情给出「忽略」入口', detailText.includes('忽略'))
+check('推断级发现保留文字标识且不折叠进卡片', detailText.includes('推断') && !detailText.includes('仅供知悉'))
 check('事实级发现连同证据与建议一并给出', detailText.includes('证据：两者都 inject third-party-shared') && detailText.includes('建议：若两者版本不兼容会一起坏'))
 
 // ───────────────────────── 2 插件视图：刚完成的新记录 ─────────────────────────
@@ -405,8 +437,8 @@ console.log('\n2 插件视图 · 批量记录在保鲜期内（应锁定下表�
 const fresh = await scenario(60 * 1000)
 const freshText = textOf(fresh.pluginTree)
 check('渲染无异常', fresh.errors.length === 0, fresh.errors.map((e) => e.message).join(' | '))
-check('口径改为「已按本轮结果锁定」', freshText.includes('下表已按本轮结果锁定') && freshText.includes('不可重复点击'))
-check('锁定行数与锁标记数一致（3 行，而不是记录条数）', freshText.includes('下表已按本轮结果锁定 3 行'))
+check('状态提示显示行锁数量', freshText.includes('已锁定 3 行'))
+check('锁定行数与结果数量一致（3 行，而不是记录条数）', freshText.includes('本轮处理 3 项') && freshText.includes('已锁定 3 行'))
 check('被锁的三行按钮按结果暗下去，显示「未变化」', (freshText.match(/未变化/g) || []).length >= 3)
 check('一键更新按钮被禁用（与行锁一致，不再自相矛盾）', (() => { const b = buttonByText(fresh.pluginTree, '一键更新'); return !!b && b.props.disabled === true })())
 check('锁有效时不必再贴记录（这 3 行的按钮本身已显示「未变化」）', !freshText.includes('本轮 · 未变化'))
@@ -421,7 +453,7 @@ const refreshedText = textOf(refreshed.tree)
 check('点「刷新状态」后渲染无异常', refreshed.errors.length === 0, refreshed.errors.map((e) => e.message).join(' | '))
 check('刷新后如实报告释放了几个行锁（这段新文案必须被真的跑到）', refreshedText.includes('已释放上一轮的 3 个行锁'), refreshedText.slice(0, 160))
 check('【核心】刷新释放 ≠ 超期：不得再出现「N 分钟前…已超出 10 分钟」的自相矛盾',
-  refreshedText.includes('是你点了「刷新状态」主动释放了行锁') && !refreshedText.includes('已超出 10 分钟的锁定保鲜期'))
+  refreshedText.includes('已释放上一轮的 3 个行锁') && refreshedText.includes('按最新快照') && !refreshedText.includes('已超出 10 分钟的锁定保鲜期'))
 check('刷新后行按钮恢复可用（重新判定）', titlesOf(refreshed.tree).includes('更新到 0.5.1'))
 
 // ───────────────────────── 3 插件视图：中断的批量（没有 finishedAt） ─────────────────────────
@@ -442,7 +474,7 @@ const brokenAfter = textOf(brokenUpdated.tree)
 check('中断 + 单行更新：渲染无异常', brokenUpdated.errors.length === 0, brokenUpdated.errors.map((e) => e.message).join(' | '))
 check('【核心】不得出现「已中断」与「刚刚完成」同屏打架',
   brokenAfter.includes('已中断（未完成）') && !brokenAfter.includes('刚刚完成'))
-check('行锁时间取自锁本身（单行更新后按结果暗下去）', brokenAfter.includes('下表已按本轮结果锁定 1 行'))
+check('行锁时间取自锁本身（单行更新后按结果暗下去）', brokenAfter.includes('已锁定 1 行'))
 check('单行更新失败如实报因并给下一步动作', brokenAfter.includes('HTTP 404') && brokenAfter.includes('重启 DSH'))
 
 // ───────────────────────── 4 技能视图 ─────────────────────────
@@ -454,11 +486,11 @@ check('视图切换不串数据：技能表里没有插件名', !skillText.inclu
 check('【核心】未声明 version 的技能回落到 git 提交号', skillText.includes('git b1c7007') && skillText.includes('git 36acead2'))
 check('未声明且非 git 的技能显示「未声明」而不是「—」', skillText.includes('未声明'))
 check('声明了 version 的技能显示 vX.Y.Z', skillText.includes('v1.6.0') && skillText.includes('v0.2.0'))
-check('技能来源压缩成 .agents/skills，不再刷整条 Windows 路径', skillText.includes('.agents/skills') && !skillText.includes('C:\\Users'))
+check('技能来源显示 GitHub 原作者仓库，不刷本地 Windows 路径', skillText.includes('GitHub 原作者仓库') && !skillText.includes('C:\\Users'))
 check('如实标出本地改动文件数', skillText.includes('本地改动 3 个文件') && skillText.includes('本地改动 2 个文件'))
 check('技能页 KPI 含本地目录 / 随 DSH 提供 / 有本地改动 / 描述为英文', skillText.includes('本地目录') && skillText.includes('随 DSH 提供') && skillText.includes('有本地改动') && skillText.includes('描述为英文'))
 check('技能页版本列表头写明「版本 / 修订」与「来源 / 远端」', skillText.includes('版本 / 修订') && skillText.includes('来源 / 远端'))
-check('技能页仍如实声明会写入 SKILL.md（含备份与行为变更）', skillText.includes('技能改写会真实写入 SKILL.md') && skillText.includes('.dsh-skill.backup') && skillText.includes('行为变更'))
+check('技能页说明写入边界但不铺陈长段落', skillText.includes('翻译会写入 SKILL.md 并保留备份') && !skillText.includes('技能改写会真实写入 SKILL.md'))
 check('技能视图不出现插件批量记录（两页各自渲染自己的更新结果）', !skillText.includes('安装已执行，但版本未变'))
 check('技能视图文本里没有 undefined', !/\bundefined\b/.test(skillText), skillText.slice(0, 160))
 

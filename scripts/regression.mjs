@@ -100,7 +100,8 @@ const fakeCtx = new Proxy(fakeCtxBase, {
   },
 })
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 14 条 bridge 路由（新增技能更新接口）', routes.length === 14, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 16 条 bridge 路由（含治理快照与治理动作）', routes.length === 16, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('治理 bridge 路由已注册', routes.some((r) => r.path.endsWith('/management')) && routes.some((r) => r.path.endsWith('/manage')))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
   const route = routes.find((r) => r.path === url.pathname)
@@ -196,6 +197,9 @@ const specLoc = m.resolveUpdateSpec(sandbox, 'pkg-local')
 const specUnk = m.resolveUpdateSpec(sandbox, 'not-a-dep')
 check('registry 依赖 → pkg@latest', specReg.kind === 'registry' && specReg.spec === 'pkg-with-exports@latest', JSON.stringify(specReg))
 check('git 依赖 → 原样回传 git spec（不加 @latest）', specGit.kind === 'git' && specGit.spec === 'github:owner/repo', JSON.stringify(specGit))
+check('技能 GitHub 来源规范化为可打开地址且不带凭据',
+  m.normalizeRepoUrl('git@github.com:owner/repo.git') === 'https://github.com/owner/repo' &&
+  m.normalizeRepoUrl('https://token@github.com/owner/repo.git') === 'https://github.com/owner/repo')
 check('本地依赖 → 拒绝并说明', specLoc.spec === null && specLoc.kind === 'local', JSON.stringify(specLoc))
 check('未知依赖 → 拒绝并说明', specUnk.spec === null, JSON.stringify(specUnk))
 // 更新任务：有 pluginManager 时拿到 token 并可轮询到 done
@@ -207,12 +211,14 @@ const fakePM = {
 const ctxWithPM = { get: (n) => (n === 'pluginManager' ? fakePM : undefined) }
 const started = m.startUpdate(ctxWithPM, sandbox, 'pkg-with-exports')
 check('startUpdate 立即返回 token 与计划', started.ok === true && typeof started.token === 'string' && started.plan.kind === 'registry', JSON.stringify(started))
-check('startUpdate 对 git 依赖用 git spec', m.startUpdate(ctxWithPM, sandbox, 'pkg-git').plan.spec === 'github:owner/repo')
 // 完成处理现在是 async（收尾要做一次变化提示查询），所以给足等待
 await new Promise((r) => setTimeout(r, 800))
 const jr = m.updateJobStatus(started.token)
-check('轮询到 done 且 ok（不再是一次长请求）', jr.ok === true && jr.job.done === true && jr.job.ok === true, JSON.stringify(jr))
+check('轮询到 done 且状态可解释（版本未变不再假报成功）', jr.ok === true && jr.job.done === true && jr.job.state === 'unchanged' && jr.job.ok === false, JSON.stringify(jr))
 check('installBundle 收到的 spec 正确', seenSpecs.includes('pkg-with-exports@latest'), JSON.stringify(seenSpecs))
+const gitStarted = m.startUpdate(ctxWithPM, sandbox, 'pkg-git')
+check('startUpdate 对 git 依赖用 git spec', gitStarted.ok === true && gitStarted.plan.spec === 'github:owner/repo', JSON.stringify(gitStarted))
+await new Promise((r) => setTimeout(r, 800))
 check('未知 token 优雅报错', m.updateJobStatus('nope').ok === false)
 // 失败路径
 const failPM = { listBundles: () => [], installBundle: () => Promise.reject(new Error('boom')) }
@@ -220,6 +226,26 @@ const started2 = m.startUpdate({ get: () => failPM }, sandbox, 'pkg-with-exports
 await new Promise((r) => setTimeout(r, 700))
 const jr2 = m.updateJobStatus(started2.token)
 check('安装失败时 stage=failed 且带原因', jr2.ok && jr2.job.done === true && jr2.job.ok === false && jr2.job.message === 'boom', JSON.stringify(jr2))
+// 第一方 pluginManager 的 change() 会把失败封装为 resolved application=failed，不能被当成 unchanged。
+const wrappedFailPM = {
+  listBundles: () => [],
+  installBundle: () => Promise.resolve({ application: 'failed', error: { code: 'operation-error', diagnostic: 'pnpm failed' }, packageResult: { output: 'network denied' } }),
+}
+const started3 = m.startUpdate({ get: () => wrappedFailPM }, sandbox, 'pkg-with-exports')
+await new Promise((r) => setTimeout(r, 700))
+const jr3 = m.updateJobStatus(started3.token)
+check('管理器 resolved application=failed 时仍报告 failed（不误报未变化）',
+  jr3.ok && jr3.job.done === true && jr3.job.state === 'failed' && jr3.job.message.includes('pnpm failed'), JSON.stringify(jr3))
+const incompatibleSinglePM = { listBundles: () => [], installBundle: async () => ({ application: 'failed', error: { code: 'incompatible-version', incompatible: [{ name: 'pkg-with-exports', version: '2.0.0', runtimeVersion: '0.2.0-rc.1' }] } }) }
+const started4 = m.startUpdate({ get: () => incompatibleSinglePM }, sandbox, 'pkg-with-exports')
+await new Promise((r) => setTimeout(r, 700))
+const jr4 = m.updateJobStatus(started4.token)
+check('单项更新保留管理器错误码与 application', jr4.ok && jr4.job.code === 'incompatible-version' && jr4.job.application === 'failed', JSON.stringify(jr4))
+const delayedPM = { listBundles: () => [], installBundle: () => new Promise((resolve) => setTimeout(() => resolve({}), 400)) }
+const delayedSingle = m.startUpdate({ get: () => delayedPM }, sandbox, 'pkg-with-exports')
+const blockedBatchDuringSingle = m.startUpdateAll({ get: () => delayedPM }, sandbox, ['pkg-with-exports'])
+check('单项进行中时批量更新被互斥锁拒绝', delayedSingle.ok && blockedBatchDuringSingle.ok === false && blockedBatchDuringSingle.code === 'update-busy', JSON.stringify(blockedBatchDuringSingle))
+await new Promise((r) => setTimeout(r, 900))
 // 问题诊断
 const diagText = m.describeIssues({ pkg: 'x', needsText: true })
 check('needsText → 给出原因/办法/动作(由翻译优化处理)', diagText.length === 1 && diagText[0].code === 'needs-text' && diagText[0].remedy.length > 10 && diagText[0].action.kind === 'hint', JSON.stringify(diagText))
@@ -327,7 +353,7 @@ check('按钮：一键更新在无待更新或本轮已完成时禁用',
   clientSrc.includes('var noUpdate = noRows || updatable === 0 || batchSettled') && clientSrc.includes("opBtn('all'"))
 check('按钮：更新完成后按结果暗下去（不是消失），刷新才重新判定',
   clientSrc.includes('var OUTCOME =') && clientSrc.includes('function outcomeLabel(') &&
-  clientSrc.includes("n[pkg] = { state: res.ok ? 'ok' : 'fail'") && clientSrc.includes('absorbBatch(b)') &&
+  clientSrc.includes("n[pkg] = { state: res.state || (res.ok ? 'updated' : 'failed')") && clientSrc.includes('absorbBatch(b)') &&
   clientSrc.includes('setDone({})') && clientSrc.includes('setBatchSettled(false)'))
 check('按钮：行内不再有「可点但点了没用」的更新按钮', !clientSrc.includes("op.push(h('button', { key: 'u'"))
 // ── A5b：本轮结果 / 行锁口径（用户报告「状态栏说完成、行里还能点更新」） ──
@@ -338,9 +364,12 @@ check('口径：记录仍在、锁已超期时只作记录（旧实现把记录�
   clientSrc.includes("if (fresh) absorbBatch(b); else absorbResults('update', b.items)"))
 check('口径：批量 / 单行 / 技能三种更新都会置位本轮锁定（否则一键更新与行锁互相打脸）',
   (clientSrc.match(/setBatchSettled\(true\)/g) || []).length >= 3 && clientSrc.includes('setBatchSettled(fresh)'))
-check('本轮结果：逐项结果 + 失败原因的下一步动作（修「状态栏红色、功能状态未知」）',
-  clientSrc.includes('function ResultsPanel(') && clientSrc.includes('var ACTION_TEXT =') &&
-  clientSrc.includes('isBad(entry.state) && entry.fix') && clientSrc.includes("'重试'"))
+check('本轮结果：逐项结果贴回对象行 + 失败码给出下一步动作（修「状态栏红色、功能状态未知」）',
+  clientSrc.includes('var ACTION_TEXT =') && clientSrc.includes('fixOf(it.code)') &&
+  clientSrc.includes('var recordChip =') && !clientSrc.includes('function ResultsPanel('))
+check('显示密度：行内单行（nowrap + 省略号）+ 悬停详情槽 + 更新状态 chip',
+  /\.das-table td \{[^}]*white-space: nowrap/.test(clientSrc) && clientSrc.includes('className: \'das-hover\'') &&
+  clientSrc.includes('onMouseEnter') && clientSrc.includes("'已最新'") && clientSrc.includes("'不可比'"))
 check('口径：中断的批量不得被说成「已完成」',
   clientSrc.includes("'已中断（未完成）'") && clientSrc.includes('没有完成时间') && clientSrc.includes('未跑完'))
 check('口径：只有真拿到逐项结果才置位行锁（避免「一键更新已禁用、行锁却不存在」）',
@@ -366,8 +395,8 @@ check('宿主：批量进行中时单包更新被拒绝（batch-running，避免
 check('本轮结果：每个失败码都有对应的下一步动作', clientSrc.includes("c === 'generate-failed'") && clientSrc.includes('fixOf(it.code)'))
 check('技能版本列：version → git 提交号 → 未声明 的回落链，不留「—」',
   clientSrc.includes('function skillRevision(') && clientSrc.includes("'git ' + shortShaOf(r.localSha)") && clientSrc.includes("'未声明'"))
-check('技能来源：根目录压缩成 .dsh/skills、.agents/skills',
-  clientSrc.includes('function shortRoot(') && /shortRoot\(r\.source\)/.test(clientSrc))
+check('技能来源：只显示 GitHub 原作者仓库链接，不把本地路径当来源',
+  clientSrc.includes('sourceUrl') && clientSrc.includes('GitHub 原作者仓库') && clientSrc.includes("target: '_blank'"))
 check('数据网格：KPI 露线法 + 表头吸顶 + 横向可滚（信息容纳量优先）',
   clientSrc.includes('repeat(auto-fit, minmax(94px, 1fr))') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap'))
 check('样式命名空间化，只用 DSH token 并带回落（亮/暗主题都跟随）',
@@ -425,8 +454,33 @@ const rowA = rowRows.find((r) => r.pkg === 'dsh-better-sidebar')
 const rowB = rowRows.find((r) => r.pkg === 'never-heard-of')
 check('行：有内置文案但未应用 -> localized=false 且 needsText=false（不白调模型）', !!rowA && rowA.localized === false && rowA.inCatalog === true && rowA.needsText === false, JSON.stringify(rowA))
 check('行：无任何文案 -> needsText=true（才该调模型）', !!rowB && rowB.needsText === true, JSON.stringify(rowB))
-check('行：不再携带死字段 description/title', rowRows.every((r) => !('description' in r) && !('title' in r)), JSON.stringify(Object.keys(rowRows[0] || {})))
+check('行：带展示中文名与优化说明字段', rowRows.every((r) => Object.hasOwn(r, 'displayName') && Object.hasOwn(r, 'localizedDescription')), JSON.stringify(Object.keys(rowRows[0] || {})))
 check('行：两条路径共用同一构造函数（含 inCatalog 字段）', 'inCatalog' in (rowRows[0] || {}))
+const readonlyRows = m.collectStatusViaService({ get: () => ({ listBundles: () => [
+  { name: 'dsh-base', installed: true, enabled: true, version: '9.0.0', readOnlyReason: 'unaddressable' },
+  { name: 'managed-plugin', installed: true, enabled: true, version: '1.0.0', readOnlyReason: 'management-required' },
+  { name: '@deepseek-ai/dsh-experimental-auto-review', installed: false, enabled: true, version: '9.0.0' },
+] }) }, [rowSandbox])
+const bundledPlugin = readonlyRows && readonlyRows.find((r) => r.pkg === 'dsh-base')
+const managedPlugin = readonlyRows && readonlyRows.find((r) => r.pkg === 'managed-plugin')
+const bundledOfficial = readonlyRows && readonlyRows.find((r) => r.pkg === '@deepseek-ai/dsh-experimental-auto-review')
+check('只读内置 bundle 不进入待生成文案', !!bundledPlugin && bundledPlugin.bundled === true && bundledPlugin.translationEligible === false && bundledPlugin.needsText === false, JSON.stringify(bundledPlugin))
+check('宿主管理对象不进入翻译优化', !!managedPlugin && managedPlugin.readOnlyReason === 'management-required' && managedPlugin.translationEligible === false && managedPlugin.needsText === false, JSON.stringify(managedPlugin))
+check('未安装的官方 bundle 即使无 readOnlyReason 也不进入待生成文案', !!bundledOfficial && bundledOfficial.bundled === true && bundledOfficial.translationEligible === false && bundledOfficial.needsText === false, JSON.stringify(bundledOfficial))
+check('只读对象不生成 needs-text 审查问题', m.describeIssues(Object.assign({}, bundledPlugin, { latest: null })).length === 0)
+const incompatibleRows = m.collectStatusViaService({ get: () => ({ listBundles: () => [
+  { name: '@wenaixi/dsh-ponytail', installed: true, enabled: true, version: '4.9.0-dsh.5', error: {
+    code: 'incompatible-version',
+    message: 'Plugin @wenaixi/dsh-ponytail@4.9.0-dsh.5 is incompatible with dsh 0.2.0-rc.1',
+    incompatible: [{ name: '@deepseek-ai/dsh-skill', range: '^0.1.1-rc.2', runtimeVersion: '0.2.0-rc.1' }],
+    peerDependencies: { '@deepseek-ai/dsh-skill': '^0.1.1-rc.2' },
+  } },
+] }) }, [rowSandbox])
+const incompatibleRow = incompatibleRows && incompatibleRows[0]
+const incompatibleIssues = incompatibleRow ? m.describeIssues(Object.assign({}, incompatibleRow, { latest: null })) : []
+check('宿主兼容性错误保留错误码和原始诊断', !!incompatibleRow && incompatibleRow.errorCode === 'incompatible-version' && /0\.2\.0-rc\.1/.test(incompatibleRow.errorMessage) && incompatibleRow.incompatible.length === 1, JSON.stringify(incompatibleRow))
+check('宿主跳过 bundle 时回填本地版本', !!incompatibleRow && incompatibleRow.version === '4.9.0-dsh.5', JSON.stringify(incompatibleRow))
+check('启动被跳过的插件给出兼容性处理建议', incompatibleIssues.some((x) => x.code === 'incompatible-version' && /停用/.test(x.remedy) && /0\.2\.0-rc\.1/.test(x.reason)), JSON.stringify(incompatibleIssues))
 fs.rmSync(rowSandbox, { recursive: true, force: true })
 // 威胁5 任务表有界
 const idxSrc = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
@@ -468,6 +522,19 @@ await new Promise((r) => setTimeout(r, 1500))
 const itemC = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
 check('安装执行了但版本未变 -> 如实标为 unchanged（不假装成功）', !!itemC && itemC.state === 'unchanged', JSON.stringify(itemC))
 check('结束语区分 成功/未变化/失败', /成功 \d+ 个，未变化 \d+ 个，失败 \d+ 个/.test(String(m.updateAllStatus().message)), String(m.updateAllStatus().message))
+// 第一方可能重新物化 lockfile / 依赖树，但 package.json 的 version 不变；changed=true 代表更新确实落盘。
+const sameVersionPM = { listBundles: () => [], installBundle: async () => ({ changed: true, application: 'restart-required' }) }
+m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? sameVersionPM : undefined) }, sandbox, ['pkg-with-exports'])
+await new Promise((r) => setTimeout(r, 1500))
+const itemD = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
+check('管理器 changed=true 且版本字段不变 -> 记录为 updated 而非 unchanged', !!itemD && itemD.state === 'updated' && itemD.versionUnchanged === true, JSON.stringify(itemD))
+check('同版本重新物化结果要求重启确认', !!itemD && /重启 DSH/.test(String(itemD.message)), JSON.stringify(itemD))
+const incompatiblePM = { listBundles: () => [], installBundle: async () => ({ application: 'failed', error: { code: 'incompatible-version', incompatible: [{ name: 'pkg-with-exports', version: '2.0.0', runtimeVersion: '0.2.0-rc.1' }] } }) }
+m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? incompatiblePM : undefined) }, sandbox, ['pkg-with-exports'])
+await new Promise((r) => setTimeout(r, 1500))
+const itemE = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
+check('管理器兼容性拒绝 -> 记录为 failed 且保留错误码', !!itemE && itemE.state === 'failed' && itemE.code === 'incompatible-version' && /0\.2\.0-rc\.1/.test(String(itemE.message)), JSON.stringify(itemE))
+check('管理中心仅对存在备份的技能显示还原能力', idxSrc.includes('canRollback: item.translationEligible !== false && typeof item.skillPath === \'string\'') && idxSrc.includes('hasAnyBackup(item.skillPath)'), 'canRollback 必须与实际备份绑定')
 process.env.DSH_HOME = savedHome
 
 // ─────────────────────── A8 更新后的精炼保持 + 变化提示 ───────────────────────
@@ -486,7 +553,7 @@ const rematerializePM = { listBundles: () => [], installBundle: async () => {
   const j = JSON.parse(fs.readFileSync(path.join(keepDir, 'package.json'), 'utf8')); j.version = '2.0.0'
   fs.writeFileSync(path.join(keepDir, 'package.json'), JSON.stringify(j, null, 2)); return {} } }
 m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? rematerializePM : undefined) }, sandbox, ['dsh-better-sidebar'])
-await new Promise((r) => setTimeout(r, 1500))
+await new Promise((r) => setTimeout(r, 5000))
 const keepItem = (m.updateAllStatus().items || []).find((x) => x.pkg === 'dsh-better-sidebar')
 check('更新后：精炼被自动补回并标记 refined', !!keepItem && keepItem.refined === true, JSON.stringify(keepItem && { state: keepItem.state, refined: keepItem.refined }))
 check('更新后：locale 文件确实重新落盘（用户无需再点翻译优化）', fs.existsSync(path.join(keepDir, 'locale', 'zh.json')))
@@ -535,6 +602,9 @@ check('定向应用对空列表什么都不做', m.applyLocale([sandbox], { entr
 process.env.DSH_HOME = savedHome4
 // 客户端契约：跳过已优化 + 去启用列 + 措辞
 check('客户端：翻译优化会跳过已优化（只对未 localized 的包调 apply）', clientSrc.includes('var toApply = cur.filter') && clientSrc.includes("call('apply', { pkgs: toApply.map"))
+check('客户端：优化后的中文名显示在插件名称位置', clientSrc.includes('das-name-main') && clientSrc.includes('r.displayName || r.pkg'))
+check('客户端：优化列显示已落盘的中文说明', clientSrc.includes('das-optimized-copy') && clientSrc.includes('r.localizedDescription'))
+check('客户端：更新结果透传管理器错误码与同版本重装标记', clientSrc.includes('job.code ||') && clientSrc.includes('versionUnchanged') && clientSrc.includes("incompatible-version"))
 check('客户端：全部已优化时直接返回不做事', clientSrc.includes('均已优化，无需处理'))
 check('客户端：表格已去掉「启用」列', !clientSrc.includes("'启用'"))
 check('客户端：精炼措辞已改为优化', !clientSrc.includes('已精炼') && !clientSrc.includes('待精炼') && clientSrc.includes("'已优化'"))
@@ -683,6 +753,7 @@ check('demo-good 只报「被遮蔽」一条（无 frontmatter/名称/描述问�
 const withBundled = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx' }] } : undefined) })
 const bundledRow = withBundled.find((r) => r.pkg === 'office-docx')
 check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundledRow.source.includes('随 DSH 提供') && bundledRow.bundled === true)
+check('技能行提供作用说明与来源字段', !!(byName2.get('demo-good') || {}).purpose && Object.hasOwn(byName2.get('demo-good') || {}, 'sourceUrl'))
 process.env.DSH_HOME = savedHome6
 process.env.DSH_AGENTS_HOME = savedAgentsHome
 fs.rmSync(skillRoot, { recursive: true, force: true })
@@ -790,7 +861,7 @@ check('客户端：技能视图把 优化状态 与 描述语言 分栏如实呈
 check('客户端：技能侧不再把 needsText 当成「描述为空」', !clientSrc.includes("'描述为空'"))
 check('客户端：技能视图不继承插件批量状态，两页各自渲染自己的更新结果',
   clientSrc.includes('if (IS_SKILL) return;') && !clientSrc.includes('!IS_SKILL && batch &&') &&
-  clientSrc.includes("(IS_SKILL ? '技能更新' : '批量更新')") && clientSrc.includes("call('update-skills'"))
+  clientSrc.includes("(IS_SKILL ? '技能更新' : '插件更新')") && clientSrc.includes("call('update-skills'"))
 check('客户端：技能页有与插件页同一套一键更新/行内更新',
   clientSrc.includes("call('update-all'") && clientSrc.includes("call('update-skills'") &&
   clientSrc.includes("opBtn('all'") && clientSrc.includes("opBtn('u'"))

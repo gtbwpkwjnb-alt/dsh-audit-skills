@@ -69,7 +69,9 @@ const NPM_REGISTRY = 'https://registry.npmjs.org/'
 /** 读取精炼目录；任何失败都返回空目录而不是抛错。 */
 /** 用户/Agent 可写回的文案覆盖层（不在 node_modules 内，重装不会被覆盖）。 */
 export function overlayPath() {
-  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  const home = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== '' && process.env.DSH_HOME !== 'undefined'
+    ? process.env.DSH_HOME
+    : path.join(os.homedir(), '.dsh')
   return path.join(home, 'dsh-audit-skills', 'catalog.local.json')
 }
 
@@ -152,6 +154,45 @@ function writeJson(file, value) {
   return true
 }
 
+/** 从 DSH 的多语言元数据中取出中文（或可读的回退）文本。 */
+function localizedMetaText(value) {
+  if (typeof value === 'string') return value.trim() || null
+  if (!value || typeof value !== 'object') return null
+  for (const key of ['zh', 'zh-CN', 'zh-Hans', 'en']) {
+    if (typeof value[key] === 'string' && value[key].trim() !== '') return value[key].trim()
+  }
+  return null
+}
+
+/**
+ * 统一第一方 pluginManager 的失败形态。
+ * 不同 DSH 版本可能把错误放在 error、failure 或 status.error，
+ * 也可能直接返回字符串；界面必须保留 code 和诊断正文，不能退化成 [object Object]。
+ */
+function normalizeManagerError(value) {
+  if (value === undefined || value === null || value === '') return { code: null, message: null, incompatible: [], runtimeVersion: null, peerDependencies: null }
+  if (typeof value === 'string') {
+    const text = value.trim()
+    const code = /incompatible|peerDependencies/i.test(text) ? 'incompatible-version' : null
+    return { code, message: text || null, incompatible: [], runtimeVersion: null, peerDependencies: null }
+  }
+  if (value instanceof Error) {
+    return normalizeManagerError({ code: value.code, message: value.message, incompatible: value.incompatible, runtimeVersion: value.runtimeVersion, peerDependencies: value.peerDependencies })
+  }
+  if (typeof value !== 'object') return normalizeManagerError(String(value))
+  const nested = value.error && value.error !== value ? normalizeManagerError(value.error) : null
+  const code = typeof value.code === 'string' && value.code !== '' ? value.code : (nested?.code || null)
+  const message = [value.message, value.diagnostic, value.reason, nested?.message]
+    .find((item) => typeof item === 'string' && item.trim() !== '')
+  const incompatible = Array.isArray(value.incompatible) ? value.incompatible : (nested?.incompatible || [])
+  const runtimeVersion = typeof value.runtimeVersion === 'string' ? value.runtimeVersion : (nested?.runtimeVersion || null)
+  const peerDependencies = value.peerDependencies && typeof value.peerDependencies === 'object'
+    ? value.peerDependencies
+    : (nested?.peerDependencies || null)
+  const inferredCode = code || (incompatible.length > 0 || /incompatible|peerDependencies/i.test(String(message || '')) ? 'incompatible-version' : null)
+  return { code: inferredCode, message: message ? String(message).trim() : null, incompatible, runtimeVersion, peerDependencies }
+}
+
 /** 单包状态：是否安装 / 启用 / 已有本插件精炼 / 当前中文标题。 */
 export function inspectPackage(profileDir, entry) {
   const dir = path.join(profileDir, 'node_modules', ...entry.pkg.split('/'))
@@ -160,14 +201,16 @@ export function inspectPackage(profileDir, entry) {
   const installed = fs.existsSync(path.join(dir, 'package.json'))
   let localized = false
   let title = null
+  let description = null
   try {
     const j = JSON.parse(fs.readFileSync(path.join(dir, 'locale', 'zh.json'), 'utf8'))
-    title = j?.meta?.title ?? null
-    localized = typeof title === 'string' && title.length > 0
+    title = localizedMetaText(j?.meta?.title)
+    description = localizedMetaText(j?.meta?.description)
+    localized = title !== null
   } catch {
     localized = false
   }
-  return { pkg: entry.pkg, installed, enabled, localized, title }
+  return { pkg: entry.pkg, installed, enabled, localized, title, description }
 }
 
 /** 判断某个已装依赖是否为 DSH bundle（与插件页同判据）。 */
@@ -205,17 +248,46 @@ export function readBundleInfo(profileDir, pkg) {
  */
 function buildRow(profileDir, pkg, fields) {
   const st = inspectPackage(profileDir, { pkg })
+  const localInfo = fields.version === undefined || fields.version === null ? readBundleInfo(profileDir, pkg) : undefined
+  const installedVersion = fields.version ?? localInfo?.version ?? null
   const inCatalog = fields.inCatalog === true
+  const readOnlyReason = typeof fields.readOnlyReason === 'string' && fields.readOnlyReason !== ''
+    ? fields.readOnlyReason
+    : null
+  const unavailable = fields.installed === false
+  // DSH 内置 bundle 位于 app.asar 或由宿主管理，没有可写路径。
+  // 这类对象仍保留版本/启用状态，但不能进入翻译优化流水线。
+  const bundled = fields.bundled === true || readOnlyReason === 'unaddressable'
+    || (unavailable && typeof pkg === 'string' && pkg.startsWith('@deepseek-ai/'))
+  const translationEligible = !bundled && !unavailable && readOnlyReason === null
+  const catalogEntry = fields.catalogEntry
+  const catalogTitle = catalogEntry && catalogEntry.zh ? localizedMetaText(catalogEntry.zh.title) : null
+  const catalogDescription = catalogEntry && catalogEntry.zh ? localizedMetaText(catalogEntry.zh.description) : null
+  const managerTitle = fields.meta ? localizedMetaText(fields.meta.title) : null
+  const managerDescription = fields.meta ? localizedMetaText(fields.meta.description) : null
+  const displayName = st.title || managerTitle || (st.localized ? catalogTitle : null) || pkg
+  const localizedDescription = st.description || managerDescription || (st.localized ? catalogDescription : null)
+  const managerError = normalizeManagerError(fields.error ?? fields.failure ?? fields.statusError)
   return {
     profileDir,
     pkg,
     installed: fields.installed !== false,
     enabled: fields.enabled === true,
-    version: fields.version ?? null,
-    error: fields.error ?? null,
+    version: installedVersion,
+    error: managerError.message || managerError.code || null,
+    errorCode: fields.errorCode || managerError.code || null,
+    errorMessage: fields.errorMessage || managerError.message || null,
+    incompatible: Array.isArray(fields.incompatible) && fields.incompatible.length > 0 ? fields.incompatible : managerError.incompatible,
+    runtimeVersion: fields.runtimeVersion || managerError.runtimeVersion || null,
+    peerDependencies: fields.peerDependencies || managerError.peerDependencies || null,
     localized: st.localized,
+    displayName,
+    localizedDescription,
     inCatalog,
-    needsText: !inCatalog && !st.localized,
+    readOnlyReason,
+    bundled,
+    translationEligible,
+    needsText: translationEligible && !inCatalog && !st.localized,
   }
 }
 
@@ -234,6 +306,7 @@ export function collectStatus(profileDirs) {
         installed: true,
         enabled: manifest.bundles.includes(pkg),
         inCatalog: byPkg.has(pkg),
+        catalogEntry: byPkg.get(pkg),
         version: info.version,
       }))
     }
@@ -375,15 +448,179 @@ export function collectStatusViaService(ctx, dirs) {
     const list = pm.listBundles()
     if (!Array.isArray(list)) return undefined
     const catalogPkgs = new Set(readCatalog().map((e) => e.pkg))
-    return list.map((b) => buildRow(profileDir, b.name, {
+    const catalogByPkg = new Map(readCatalog().map((e) => [e.pkg, e]))
+    return list.map((b) => {
+      const managerError = normalizeManagerError(b.error ?? b.failure ?? b.status?.error ?? b.status)
+      return buildRow(profileDir, b.name, {
       installed: b.installed !== false,
       enabled: b.enabled === true,
       version: typeof b.version === 'string' ? b.version : null,
-      error: b.error ? String(b.error.code ?? b.error) : null,
+        error: b.error ?? b.failure ?? b.status?.error ?? b.status ?? null,
+        errorCode: managerError.code,
+        errorMessage: managerError.message,
+        incompatible: managerError.incompatible,
+        runtimeVersion: managerError.runtimeVersion,
+        peerDependencies: managerError.peerDependencies,
       inCatalog: catalogPkgs.has(b.name),
-    }))
+      catalogEntry: catalogByPkg.get(b.name),
+      meta: b.meta,
+      readOnlyReason: b.readOnlyReason,
+      bundled: b.readOnlyReason === 'unaddressable'
+        || (b.installed === false && typeof b.name === 'string' && b.name.startsWith('@deepseek-ai/')),
+      })
+    })
   } catch (error) {
     return undefined
+  }
+}
+
+/** Async counterpart for current plugin-manager remotes, which may return Promise values. */
+export async function collectStatusViaServiceAsync(ctx, dirs) {
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return undefined
+  try {
+    const list = await Promise.resolve(pm.listBundles())
+    if (!Array.isArray(list)) return undefined
+    const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
+    const catalogPkgs = new Set(readCatalog().map((e) => e.pkg))
+    const catalogByPkg = new Map(readCatalog().map((e) => [e.pkg, e]))
+    return list.map((b) => {
+      const managerError = normalizeManagerError(b.error ?? b.failure ?? b.status?.error ?? b.status)
+      return buildRow(profileDir, b.name, {
+      installed: b.installed !== false,
+      enabled: b.enabled === true,
+      version: typeof b.version === 'string' ? b.version : null,
+      error: b.error ?? b.failure ?? b.status?.error ?? b.status ?? null,
+      errorCode: managerError.code,
+      errorMessage: managerError.message,
+      incompatible: managerError.incompatible,
+      runtimeVersion: managerError.runtimeVersion,
+      peerDependencies: managerError.peerDependencies,
+      inCatalog: catalogPkgs.has(b.name),
+      catalogEntry: catalogByPkg.get(b.name),
+      meta: b.meta,
+      readOnlyReason: b.readOnlyReason,
+      bundled: b.readOnlyReason === 'unaddressable'
+        || (b.installed === false && typeof b.name === 'string' && b.name.startsWith('@deepseek-ai/')),
+      })
+    })
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 构造治理中心使用的能力矩阵。
+ * 第一方 manager 是唯一写入口；字段缺失时宁可隐藏能力，也不猜测可执行性。
+ */
+export function managementCapabilities(item, kind = 'bundle') {
+  const readOnly = typeof item?.readOnlyReason === 'string' && item.readOnlyReason !== ''
+  const installed = kind === 'bundle' ? item?.installed === true : true
+  const enabled = item?.enabled === true
+  const removable = kind === 'bundle' && item?.removable === true
+  const managerError = normalizeManagerError(item?.error ?? item?.failure ?? item?.status?.error ?? item?.status)
+  const incompatible = item?.errorCode === 'incompatible-version'
+    || managerError.code === 'incompatible-version'
+    || (Array.isArray(item?.incompatible) && item.incompatible.length > 0)
+  return {
+    canInstall: kind === 'bundle' && installed !== true,
+    canUninstall: removable && !readOnly,
+    canEnable: !readOnly && installed && !enabled && !incompatible,
+    canDisable: !readOnly && installed && enabled,
+    canUpdate: kind === 'bundle' && installed,
+    canEdit: kind === 'plugin' && !readOnly,
+    canTranslate: kind === 'bundle' && installed,
+    canRollback: false,
+    blockedReason: incompatible ? 'incompatible-version' : null,
+  }
+}
+
+/** 读取第一方插件/ bundle 治理快照；manager 不可用时明确返回原因。 */
+export async function collectManagementSnapshot(ctx, dirs) {
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务未就绪（重启 DSH 后可用）' }
+  try {
+    const [rawBundles, rawPlugins] = await Promise.all([
+      typeof pm.listBundles === 'function' ? Promise.resolve(pm.listBundles()) : Promise.resolve([]),
+      typeof pm.listPlugins === 'function' ? Promise.resolve(pm.listPlugins()) : Promise.resolve([]),
+    ])
+    const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
+    const bundles = (Array.isArray(rawBundles) ? rawBundles : []).map((item) => {
+      const localInfo = item.version === undefined || item.version === null ? readBundleInfo(profileDir, item.name) : undefined
+      const normalized = Object.assign({}, item, { version: item.version ?? localInfo?.version ?? null })
+      return Object.assign(normalized, { kind: 'bundle', capabilities: managementCapabilities(normalized, 'bundle') })
+    })
+    const plugins = (Array.isArray(rawPlugins) ? rawPlugins : []).map((item) => Object.assign({}, item, {
+      kind: 'plugin', capabilities: managementCapabilities(item, 'plugin'),
+    }))
+    let skills = []
+    try {
+      skills = collectSkills(ctx).map((item) => Object.assign({}, item, {
+        capabilities: {
+          canTranslate: item.translationEligible !== false && item.needsText === true,
+          canApply: item.translationEligible !== false && item.localized !== true,
+          canRollback: item.translationEligible !== false && typeof item.skillPath === 'string' && item.skillPath !== '' && hasAnyBackup(item.skillPath),
+          canEdit: item.translationEligible !== false && typeof item.skillPath === 'string' && item.skillPath !== '',
+        },
+      }))
+    } catch {
+      skills = []
+    }
+    return {
+      ok: true,
+      profileDir,
+      generatedAt: Date.now(),
+      capabilities: {
+        install: typeof pm.installBundle === 'function',
+        inspect: typeof pm.inspect === 'function',
+        removeBundle: typeof pm.removeBundle === 'function',
+        setBundleEnabled: typeof pm.setBundleEnabled === 'function',
+        setPluginEnabled: typeof pm.setPluginEnabled === 'function',
+      },
+      bundles,
+      plugins,
+      skills,
+    }
+  } catch (error) {
+    return { ok: false, code: 'manager-read-failed', message: String(error?.message ?? error) }
+  }
+}
+
+/** 校验并执行治理动作。任何写操作都串行交给第一方 manager。 */
+export async function executeManagementAction(ctx, body = {}) {
+  const pm = getPluginManager(ctx)
+  if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务未就绪（重启 DSH 后可用）' }
+  const action = typeof body.action === 'string' ? body.action : ''
+  const name = typeof body.name === 'string' ? body.name : ''
+  const entryId = typeof body.entryId === 'string' ? body.entryId : ''
+  try {
+    if (action === 'enable-bundle' || action === 'disable-bundle') {
+      if (!isSafePackageName(name) || typeof pm.setBundleEnabled !== 'function') return { ok: false, code: 'unsupported-action', message: '该环境不支持 bundle 启停' }
+      return Object.assign({ ok: true, action, name }, await pm.setBundleEnabled(name, action === 'enable-bundle'))
+    }
+    if (action === 'enable-plugin' || action === 'disable-plugin') {
+      if (entryId === '' || typeof pm.setPluginEnabled !== 'function') return { ok: false, code: 'unsupported-action', message: '该环境不支持插件条目启停' }
+      return Object.assign({ ok: true, action, entryId }, await pm.setPluginEnabled(entryId, action === 'enable-plugin'))
+    }
+    if (action === 'remove-bundle') {
+      if (!isSafePackageName(name) || typeof pm.removeBundle !== 'function') return { ok: false, code: 'unsupported-action', message: '该环境不支持 bundle 卸载' }
+      return Object.assign({ ok: true, action, name }, await pm.removeBundle(name))
+    }
+    if (action === 'install-bundle') {
+      const spec = typeof body.spec === 'string' ? body.spec.trim() : ''
+      if (spec === '' || typeof pm.installBundle !== 'function') return { ok: false, code: 'invalid-spec', message: '需要安装规格，且当前环境未提供安装能力' }
+      if (typeof pm.inspect === 'function') {
+        const inspection = await pm.inspect(spec, { registry: typeof body.registry === 'string' ? body.registry : undefined })
+        if (!inspection || inspection.status !== 'accepted') return { ok: false, code: 'inspect-refused', message: inspection?.reason || '安装前预检未通过', inspection }
+        const installation = pm.installBundle(spec, { enabled: body.enabled !== false })
+        const result = await installation
+        return Object.assign({ ok: true, action, spec, inspection }, result)
+      }
+      return { ok: false, code: 'manager-unsupported', message: '插件管理器未提供 inspect，已拒绝直接安装' }
+    }
+    return { ok: false, code: 'unknown-action', message: '未知治理动作' }
+  } catch (error) {
+    return { ok: false, code: 'management-failed', action, name: name || entryId, message: String(error?.message ?? error) }
   }
 }
 
@@ -435,6 +672,8 @@ export async function fetchLatestVersion(name) {
 
 /** 进行中的更新任务：token → 阶段状态。仅内存，重启即清空。 */
 const updateJobs = new Map()
+// profile 级安装互斥：第一方管理器改写同一份 profile 时只能有一个在途操作。
+let activeInstall = null
 /** 只保留最近若干条已完成任务，避免长时间运行后无限增长。 */
 const UPDATE_JOB_KEEP = 20
 function pruneUpdateJobs() {
@@ -442,6 +681,16 @@ function pruneUpdateJobs() {
   const finished = []
   for (const [key, job] of updateJobs) if (job && job.done === true) finished.push(key)
   while (updateJobs.size > UPDATE_JOB_KEEP && finished.length > 0) updateJobs.delete(finished.shift())
+}
+
+function claimInstall(lock) {
+  if (activeInstall !== null) return false
+  activeInstall = lock
+  return true
+}
+
+function releaseInstall(lock) {
+  if (activeInstall === lock) activeInstall = null
 }
 
 /** 读取 profile 原始清单（需要依赖范围，不只依赖名）。 */
@@ -480,6 +729,8 @@ export function resolveUpdateSpec(profileDir, pkg) {
  * **单包与批量共用**，避免两条路径行为分叉（这正是之前多处不一致的来源）。
  */
 export async function finishAfterUpdate(profileDir, pkg, from, to) {
+  // 更新完成后强制失效 npm 版本缓存，避免刷新继续显示旧的 latest。
+  clearLatestCache()
   let refined = false
   const entry = readCatalog().filter((e) => e.pkg === pkg)
   if (entry.length > 0) {
@@ -509,12 +760,17 @@ export function startUpdate(ctx, profileDir, pkg) {
   if (running && running.running === true) {
     return { ok: false, code: 'batch-running', message: '批量更新正在进行（' + (running.index + 1) + '/' + running.total + '）：等它结束后再更新这一项，避免两条 pnpm 并发安装' }
   }
+  if (activeInstall !== null) {
+    return { ok: false, code: 'update-busy', message: '已有更新正在执行，请等待当前更新完成后再试' }
+  }
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, code: 'unsupported-spec', message: plan.reason }
   const pm = getPluginManager(ctx)
   if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务未就绪（重启 DSH 后可用）' }
   if (typeof pm.installBundle !== 'function') return { ok: false, code: 'manager-unsupported', message: '插件管理器未提供 installBundle' }
   const token = pkg + ':' + Date.now().toString(36)
+  const lock = { kind: 'single', token, profileDir }
+  if (!claimInstall(lock)) return { ok: false, code: 'update-busy', message: '已有更新正在执行，请等待当前更新完成后再试' }
   const base = { pkg, spec: plan.spec, kind: plan.kind, startedAt: Date.now() }
   updateJobs.set(token, Object.assign({}, base, { stage: 'installing', message: '正在执行安装（pnpm，可能持续数十秒）…', done: false, ok: null }))
   installAndWait(ctx, profileDir, pkg)
@@ -524,22 +780,29 @@ export function startUpdate(ctx, profileDir, pkg) {
       const suffix = (finished.refined === true ? ' 优化已保持。' : '') + (finished.delta !== null ? ' ' + describeDeltaText(finished.delta) : '')
       pruneUpdateJobs()
       updateJobs.set(token, Object.assign({}, job, {
-        stage: result.ok === true ? 'done' : 'failed',
-        message: result.ok === true
-          ? '安装执行完成。' + suffix
-          : String(result.message || '更新失败'),
+        stage: result.state === 'unchanged' ? 'unchanged' : (result.ok === true ? 'done' : 'failed'),
+        message: result.state === 'unchanged'
+          ? String(result.message || '安装已执行，但版本未变化')
+          : (result.ok === true ? '安装执行完成。' + suffix : String(result.message || '更新失败')),
         done: true,
-        ok: result.ok === true,
+        ok: result.ok === true && result.state !== 'unchanged',
+        state: result.state || (result.ok === true ? 'updated' : 'failed'),
         from: result.from ?? null,
         to: result.to ?? null,
+        code: result.code || null,
+        application: result.application || null,
+        changed: result.changed === true,
+        versionUnchanged: result.versionUnchanged === true,
         refined: finished.refined,
         delta: finished.delta,
       }))
+      releaseInstall(lock)
     })
     .catch((error) => {
       const job = updateJobs.get(token) ?? base
       pruneUpdateJobs()
       updateJobs.set(token, Object.assign({}, job, { stage: 'failed', message: String((error && error.message) || error), done: true, ok: false }))
+      releaseInstall(lock)
     })
   return { ok: true, token, plan: { kind: plan.kind, spec: plan.spec, range: plan.range } }
 }
@@ -1053,6 +1316,28 @@ export function skillRepoInfo(dir) {
     url: gitSync(['remote', 'get-url', 'origin'], dir).stdout.trim(),
     upstream: gitSync(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], dir).stdout.trim(),
     dirty: status.ok === true ? status.stdout.split('\n').filter((line) => line.trim() !== '').length : 0,
+  }
+}
+
+/** 将 git remote 规范化为可直接打开的 GitHub 仓库地址。非 GitHub 远端不伪造来源。 */
+export function normalizeRepoUrl(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return ''
+  let value = raw.trim().replace(/^git\+/, '')
+  if (value.startsWith('git@github.com:')) value = 'https://github.com/' + value.slice('git@github.com:'.length)
+  else if (value.startsWith('ssh://git@github.com/')) value = 'https://github.com/' + value.slice('ssh://git@github.com/'.length)
+  else if (value.startsWith('git://github.com/')) value = 'https://github.com/' + value.slice('git://github.com/'.length)
+  value = value.replace(/\.git(?:#.*)?$/, '').replace(/\/$/, '')
+  try {
+    const parsed = new URL(value)
+    if (parsed.hostname.toLowerCase() !== 'github.com') return ''
+    parsed.username = ''
+    parsed.password = ''
+    parsed.hash = ''
+    parsed.search = ''
+    parsed.pathname = parsed.pathname.replace(/\.git$/, '').replace(/\/$/, '')
+    return 'https://github.com' + parsed.pathname
+  } catch {
+    return ''
   }
 }
 
@@ -1586,10 +1871,14 @@ export function collectSkills(ctx) {
       // 优化状态 = 该技能的 name 已被本插件改写为「原名（中文名）」
       localized: entry !== undefined && top.name === (entry.zh && entry.zh.name ? entry.zh.name : ''),
       needsText: entry === undefined,
+      translationEligible: true,
       displayName: top.name,
-      source: 'rank ' + top.rank + ' · ' + top.root,
+      source: 'rank ' + top.rank,
+      sourceLabel: 'GitHub 原作者仓库',
+      sourceUrl: '',
       skillPath: top.path,
       bytes: top.bytes,
+      purpose: String(top.description || '').trim(),
       descriptionLang: descriptionLanguage(top.description),
       frontmatter: top.frontmatter,
       dirMismatch: top.name !== top.dirName,
@@ -1597,11 +1886,14 @@ export function collectSkills(ctx) {
       // git 事实：技能不是 npm 包，「更新」只对 git 形态有意义
       ...(() => {
         const repo = top.isGit === true ? skillRepoInfo(path.dirname(top.path)) : { isGit: false }
+        const sourceUrl = repo.isGit === true ? normalizeRepoUrl(repo.url) : ''
         return {
           isGit: repo.isGit === true,
           repoRoot: repo.isGit === true ? repo.repoRoot : null,
           repoOwned: repo.isGit === true ? repo.owned === true : false,
           repoUrl: repo.isGit === true ? repo.url : '',
+          sourceUrl,
+          sourceLabel: sourceUrl !== '' ? 'GitHub 原作者仓库' : (repo.isGit === true ? '远端仓库不可用' : '本地技能，无远端仓库'),
           branch: repo.isGit === true ? repo.branch : '',
           upstream: repo.isGit === true ? repo.upstream : '',
           localSha: repo.isGit === true ? repo.head : '',
@@ -1627,11 +1919,15 @@ export function collectSkills(ctx) {
         version: null,
         localized: false,
         needsText: false,
+        translationEligible: false,
         displayName: name,
         source: '随 DSH 提供',
+        sourceLabel: '随 DSH 提供',
+        sourceUrl: '',
         skillPath: null,
         bytes: 0,
         descriptionLang: '未知（随 DSH 提供）',
+        purpose: '随 DSH 提供的内置技能；当前无法从可写技能目录读取作用说明。',
         frontmatter: true,
         dirMismatch: false,
         nestedSkillFiles: 0,
@@ -1657,12 +1953,14 @@ export function auditSkills(rows) {
       add({ kind: 'conflict', key: 'fm-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
         title: 'SKILL.md 缺少 frontmatter',
         evidence: r.skillPath + ' 未以 --- 包裹的 frontmatter 开头',
+        impact: 'DSH 无法读取 name/description，因此可能无法识别或选择该技能。',
         remedy: 'DSH 依赖 frontmatter 的 name/description 来选择技能；缺失会导致该技能不可被正确识别。' })
     }
     if (r.dirMismatch === true) {
       add({ kind: 'conflict', key: 'name-' + r.pkg, pkg: r.pkg, peers: [], severity: 'medium', confidence: 'fact',
         title: 'frontmatter 的 name 与目录名不一致',
         evidence: 'name=' + r.pkg + ' 但目录/文件名不同',
+        impact: '用户看到的名称与实际目录标识不一致，引用、更新和审查可能指向错误对象。',
         remedy: '两者不一致时，引用该技能容易出现歧义。建议改为一致。' })
     }
     // 注意：这里必须判「描述真的为空」，不能用 needsText ——
@@ -1671,23 +1969,27 @@ export function auditSkills(rows) {
       add({ kind: 'conflict', key: 'nodesc-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
         title: 'description 为空',
         evidence: r.skillPath,
+        impact: '模型缺少选择依据，技能可能在应使用时没有被召回。',
         remedy: '模型靠 description 决定是否启用该技能；为空等于它几乎不会被选中。' })
     } else if (r.bytes > 0 && r.descriptionLang === '英文') {
       add({ kind: 'interaction', key: 'lang-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
         title: '描述为英文（中文用户的可读性较低）',
         evidence: 'description 语言判定：英文',
+        impact: '用户难以快速判断用途；description 同时参与模型选技，翻译会改变行为边界。',
         remedy: '仅影响你阅读时的直观度。注意：description 是**模型选择技能的依据**，改它属于行为变更——「翻译优化」会真实写入 SKILL.md（写前留 .dsh-skill.backup 备份，「还原翻译」可逐字节恢复），请自行确认生成内容。' })
     }
     if (r.nestedSkillFiles > 0) {
       add({ kind: 'interaction', key: 'nested-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
         title: '目录下有 ' + r.nestedSkillFiles + ' 个嵌套 SKILL.md 不会被发现',
         evidence: r.skillPath + ' 所在目录的更深层存在 SKILL.md',
+        impact: '嵌套文件不会进入当前技能清单，维护者可能误以为它们已启用。',
         remedy: 'DSH 只发现顶层 <name>/SKILL.md 或 <name>.md。这些嵌套技能实际不生效（若非有意，可上移或删除）。' })
     }
     if (Array.isArray(r.shadowed) && r.shadowed.length > 0) {
       add({ kind: 'conflict', key: 'shadow-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
         title: '存在 ' + r.shadowed.length + ' 份被遮蔽的同名技能',
         evidence: r.shadowed.join('；') + ' —— 优先级低于当前生效的那份',
+        impact: '同名副本不会生效，翻译或更新可能改到未被 DSH 使用的那一份。',
         remedy: '被遮蔽的那份不会生效（DSH 会记录 "ignored because a higher-priority skill already exists"）。建议删除或改名，避免你以为在用的是另一份。' })
     }
   }
@@ -1742,6 +2044,7 @@ export function updateAllStatus() {
     batch.running = false
     batch.message = '上次批量更新已中断（超过 10 分钟无进展）'
     writeBatch(batch)
+    if (activeInstall && activeInstall.kind === 'batch') activeInstall = null
   }
   return batch
 }
@@ -1768,21 +2071,76 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
   const from = installedVersion(profileDir, pkg)
   let failure = null
   let settled = false
+  let managerResult = null
   Promise.resolve()
     .then(() => pm.installBundle(plan.spec, {}))
-    .then(() => { settled = true })
+    .then((result) => { managerResult = result; settled = true })
     .catch((error) => { failure = String((error && error.message) || error); settled = true })
   const deadline = Date.now() + waitMs
   for (;;) {
     if (failure !== null) return { ok: false, message: failure, from }
     // Promise 已 settle 就立刻判断，不先白等一个轮询周期
     if (settled === true) {
+      // pluginManager.change() 将安装异常封装成 application=failed 后 resolve，
+      // 不会 reject。必须先检查这个结果，否则真实失败会被误报为「版本未变化」。
+      if (managerResult && managerResult.application === 'failed') {
+        const error = managerResult.error || {}
+        const incompatible = Array.isArray(error.incompatible) ? error.incompatible : []
+        const diagnostic = error.diagnostic || error.code
+        const output = managerResult.packageResult && managerResult.packageResult.output
+        const detail = diagnostic || output || '插件管理器报告安装失败'
+        const code = error.code || (incompatible.length > 0 ? 'incompatible-version' : 'update-failed')
+        const compatibility = incompatible.map((item) => {
+          const name = item && item.name ? item.name : pkg
+          const version = item && item.version ? ' v' + item.version : ''
+          const runtime = item && item.runtimeVersion ? '（当前 DSH ' + item.runtimeVersion + '）' : ''
+          return name + version + runtime
+        }).join('、')
+        return {
+          ok: false,
+          state: 'failed',
+          code,
+          message: compatibility === '' ? String(detail) : String(detail) + '：' + compatibility,
+          from,
+          application: managerResult.application,
+          changed: managerResult.changed === true,
+          managerResult,
+        }
+      }
+      if (managerResult && managerResult.application === 'cancelled') {
+        return { ok: false, state: 'failed', message: '安装已取消', from, managerResult }
+      }
       const now = installedVersion(profileDir, pkg)
-      if (now !== null && now !== from) return { ok: true, message: '', from, to: now }
+      if (now !== null && now !== from) return { ok: true, state: 'updated', message: '', from, to: now, changed: managerResult?.changed === true }
       // 让出一小段时间，避免 pnpm 写盘与我们的读取竞争
       await sleep(300)
       const again = installedVersion(profileDir, pkg)
-      return { ok: true, message: '', from, to: again, unchanged: again === from }
+      const unchanged = again === from
+      // pluginManager 可能完成了重新物化，但包的 version 字段保持不变（例如同版本重打包、
+      // lockfile/依赖树变化或管理器只返回 restart-required）。changed 是第一方对磁盘的事实，
+      // 不能再把这种成功误报为「未变化」。
+      if (unchanged && managerResult && managerResult.changed === true) {
+        return {
+          ok: true,
+          state: 'updated',
+          message: '依赖已重新安装，但版本字段仍为 ' + String(again) + '；重启 DSH 后确认运行中的插件已切换。',
+          from,
+          to: again,
+          changed: true,
+          versionUnchanged: true,
+          application: managerResult.application,
+        }
+      }
+      return {
+        ok: !unchanged,
+        state: unchanged ? 'unchanged' : 'updated',
+        message: unchanged ? '安装已执行，但版本未变化（仍为 ' + String(again) + '）' : '',
+        from,
+        to: again,
+        unchanged,
+        changed: managerResult?.changed === true,
+        application: managerResult?.application,
+      }
     }
     if (Date.now() >= deadline) break
     await sleep(250)
@@ -1797,6 +2155,7 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
 export function startUpdateAll(ctx, profileDir, pkgs) {
   const current = updateAllStatus()
   if (current && current.running === true) return { ok: true, alreadyRunning: true, batch: current }
+  if (activeInstall !== null) return { ok: false, code: 'update-busy', message: '已有单项更新正在执行，请等待当前更新完成后再启动一键更新' }
   const items = (Array.isArray(pkgs) ? pkgs : []).filter(isSafePackageName).map((pkg) => ({
     pkg,
     state: 'pending',
@@ -1806,6 +2165,8 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
   }))
   if (items.length === 0) return { ok: false, code: 'no-target', message: '没有可更新的插件' }
   const batch = { running: true, index: 0, total: items.length, items, message: '准备中…', startedAt: Date.now(), finishedAt: null }
+  const lock = { kind: 'batch', batch, profileDir }
+  if (!claimInstall(lock)) return { ok: false, code: 'update-busy', message: '已有更新正在执行，请等待当前更新完成后再启动一键更新' }
   writeBatch(batch)
   ;(async () => {
     for (let i = 0; i < items.length; i += 1) {
@@ -1818,18 +2179,24 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
       writeBatch(live)
       const result = await installAndWait(ctx, profileDir, item.pkg)
       item.to = installedVersion(profileDir, item.pkg)
+      if (result.code) item.code = result.code
+      if (result.application) item.application = result.application
       if (result.ok === true) {
         // 与单包路径共用收尾：补回被 pnpm 洗掉的优化结果 + 变化提示
         const finished = await finishAfterUpdate(profileDir, item.pkg, item.from, item.to)
         item.refined = finished.refined
         item.delta = finished.delta
       }
-      if (result.ok !== true) {
+      if (result.state === 'unchanged') {
+        item.state = 'unchanged'
+        item.message = result.message || ('安装已执行，但版本未变（仍为 ' + String(item.to) + '）')
+      } else if (result.ok !== true) {
         item.state = 'failed'
         item.message = result.message
-      } else if (item.to !== null && item.from !== null && item.to !== item.from) {
+      } else if (result.state === 'updated' || (item.to !== null && item.from !== null && item.to !== item.from)) {
         item.state = 'updated'
-        item.message = item.from + ' → ' + item.to
+        item.message = result.message || (item.from + ' → ' + item.to)
+        if (result.versionUnchanged === true) item.versionUnchanged = true
       } else {
         // 安装确实执行了，但版本没变 —— 必须如实说明，不能假装成功
         item.state = 'unchanged'
@@ -1848,12 +2215,14 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
     const failed = items.filter((x) => x.state === 'failed').length
     done.message = '完成：成功 ' + updated + ' 个，未变化 ' + unchanged + ' 个，失败 ' + failed + ' 个'
     writeBatch(done)
+    releaseInstall(lock)
   })().catch(() => {
     const fallback = readBatch() ?? batch
     fallback.running = false
     fallback.finishedAt = Date.now()
     fallback.message = '批量更新异常中止'
     writeBatch(fallback)
+    releaseInstall(lock)
   })
   return { ok: true, batch }
 }
@@ -2109,10 +2478,11 @@ export function upsertSkillOverlay(pkg, entry) {
 export function describeIssues(row) {
   const issues = []
   const latest = row.latest === undefined ? null : row.latest
-  if (row.needsText === true) {
+  if (row.translationEligible !== false && row.needsText === true) {
     issues.push({
       code: 'needs-text',
       reason: '该插件没有内置精炼文案，需要生成一条中文说明。',
+      impact: '用户无法快速判断插件作用，模型也缺少稳定的展示说明。',
       remedy: '点「翻译优化」会自动让模型写一条并存入覆盖层，无需单独操作；也可把包名发给 Agent 手动补录。',
       action: { kind: 'hint', label: '由「翻译优化」自动处理' },
     })
@@ -2122,6 +2492,7 @@ export function describeIssues(row) {
       issues.push({
         code: 'not-on-npm',
         reason: 'npm registry 上找不到这个包（它可能是从 GitHub 直接安装的），所以无法比对版本。',
+        impact: '当前无法确认是否有新版本，直接显示“最新”会误导更新判断。',
         remedy: 'GitHub 直装的包要用 git spec 更新；若要简化以后升级，可改从 npm 安装。',
         action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' },
       })
@@ -2129,15 +2500,41 @@ export function describeIssues(row) {
       issues.push({
         code: 'registry-unavailable',
         reason: '查询 npm 版本失败：' + row.reason,
+        impact: '版本状态暂时未知，自动更新入口不能被可靠地启用。',
         remedy: '检查网络或代理后点「检查更新」重试。',
         action: { kind: 'retry', label: '重试检查' },
       })
     }
   }
-  if (row.error) {
+  const incompatible = Array.isArray(row.incompatible) ? row.incompatible : []
+  const errorText = String(row.errorMessage || row.error || '')
+  const incompatibleError = row.errorCode === 'incompatible-version'
+    || incompatible.length > 0
+    || (row.peerDependencies && typeof row.peerDependencies === 'object')
+  if (incompatibleError) {
+    const names = incompatible.map((item) => {
+      if (!item || typeof item !== 'object') return ''
+      const name = item.name || item.package || item.peer
+      const version = item.version || item.range
+      const runtime = item.runtimeVersion || row.runtimeVersion
+      return String(name || '目标版本') + (version ? '@' + String(version) : '') + (runtime ? '（当前 DSH ' + String(runtime) + '）' : '')
+    }).filter(Boolean)
+    const peers = row.peerDependencies && typeof row.peerDependencies === 'object'
+      ? Object.entries(row.peerDependencies).map(([name, range]) => name + '@' + String(range)).join('、')
+      : ''
+    const detail = names.length > 0 ? names.join('；') : (peers ? '要求 ' + peers : errorText)
+    issues.push({
+      code: 'incompatible-version',
+      reason: '插件与当前 DSH 运行时不兼容，宿主已跳过或拒绝加载。' + (detail ? ' ' + detail : ''),
+      impact: '继续启用可能导致宿主启动失败、插件被跳过或更新后回滚。',
+      remedy: '安装声明支持当前 DSH 的版本；若没有兼容版本，先停用该插件，再重启 DSH。不要绕过第一方兼容性检查。',
+      action: { kind: 'hint', label: '等待兼容版本或停用后重启' },
+    })
+  } else if (row.error) {
     issues.push({
       code: 'bundle-error',
-      reason: '插件管理器报告该 bundle 状态异常：' + row.error,
+      reason: '插件管理器报告该 bundle 状态异常：' + (errorText || row.error),
+      impact: '插件当前运行状态不稳定，继续翻译或更新可能掩盖真正的加载问题。',
       remedy: '在插件页停用再启用该插件；若仍异常，重启 DSH。',
       action: { kind: 'hint', label: '前往插件页处理' },
     })
@@ -2182,6 +2579,29 @@ export function registerBridge(ctx, dirs) {
       const routes = [
         {
           kind: 'exact',
+          path: BRIDGE_PREFIX + '/management',
+          handler: async (req, res) => {
+            try {
+              writeJson(res, 200, await collectManagementSnapshot(ctx, dirs))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'manager-read-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/manage',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              writeJson(res, 200, await executeManagementAction(ctx, body || {}))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'management-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          kind: 'exact',
           path: BRIDGE_PREFIX + '/apply',
           handler: async (req, res) => {
             try {
@@ -2203,7 +2623,7 @@ export function registerBridge(ctx, dirs) {
               const body = await readJsonBody(req)
               const force = body && body.force === true
               const ownerDirs = Array.isArray(dirs) ? dirs : [dirs]
-              const rows = collectStatusViaService(ctx, dirs) ?? collectStatus(dirs)
+              const rows = await collectStatusViaServiceAsync(ctx, dirs) ?? collectStatus(dirs)
               // 审查结果与状态走**同一次响应**（单一快照原则），不新增按钮
               let audit = { generatedAt: null, counts: { high: 0, medium: 0, low: 0, fact: 0, inferred: 0 }, noCompat: [] }
               const byPkg = new Map()

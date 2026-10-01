@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.9.0 — 2026-10-01 · 主表整合：一行一项 · 悬停详情 · 更新状态可解释
+
+两条线合进这一版：上半是「更新结果可信」的宿主侧改造，下半是显示层的密度与可读性重做。
+
+### 宿主侧：更新结果不再靠猜
+
+- 兼容性失败诊断保留第一方 `pluginManager` 的 `error.code`、原始消息、`incompatible`、运行时版本和 peer 范围；宿主启动跳过的插件明确显示「版本不兼容」，不再退化成 `[object Object]` 或「本轮未变化」。
+- 单行更新与批量更新统一 `updated` / `unchanged` / `failed` 三态；**安装完成但版本未变化不再显示为成功**——这正是「点了更新，信息却没更新」的真因：第一方管理器拒绝与当前运行时不兼容的版本并回滚 profile。
+- 更新完成后强制失效版本缓存；技能来源只展示可验证的 GitHub 原作者仓库链接，不展示本地路径。
+- 新增治理快照 / 治理动作接口（bridge 共 16 条）：启停、只读边界、`blockedReason` 都从第一方能力推导。
+
+### 显示层：一屏装得下更多
+
+- 表格行压缩为**严格一行**：行内只留 名称 · 优化状态 · 版本 · 更新状态 · 操作；中文说明、作用、描述语言、管理器异常原文、审查标题、原包名全部移入 `title` 与**悬停详情槽**（固定槽位 + 预留高度，换内容不跳行）。竖排文字（列太窄仍允许换行）随 `td { white-space: nowrap }` 消失，长文本改用省略号。
+- 更新列给出**显式状态 chip**：可更新 / 已最新 / 不可比 / 版本不兼容，原因进 `title`。
+- 删除已成死代码的 `ResultsPanel`（用户截图里那张灰表 + 动作列竖排就是它）及随之失效的 `retryOne` / `managerProblemNode`；`lockNote` 的口径原文移入状态提示的 `title`，不再占版面，但一个字也没丢。
+- 次级文字从 tertiary / quaternary 提到 `--dsw-alias-label-secondary`（截图「一片灰」的根因）；quaternary 只留给时间戳。
+- `render-smoke` 新增 9 条密度 / 悬停 / 更新状态用例（先红后绿），含「数据行内不得出现堆叠块级元素」的结构化证明；`regression` 把钉住 `ResultsPanel` 的契约改为钉住新机制。
+
+### 顺手修掉的重启阻塞
+
+profile 在重新钉版时丢掉了插件声明为 peer 的 `@deepseek-ai/schemastery`，导致 `index.js` 顶层 import 失败——**下次重启 DSH 时宿主半体会加载不了**（crash-rehearsal 的 `宿主半体可 import` 已红）。已装回 `@deepseek-ai/schemastery@3.18.4` 并清掉仓库里指向已消失目标的悬空 junction，`宿主半体可 import` 恢复 PASS。彻底根治需要把它从 `peerDependencies` 挪进 `dependencies`（待办）。
+
 ## 2.8.0 — 2026-09-27 · 修「状态栏说完成、行里还能点更新」+ 翻译优化真机 bug + 设置页重做
 
 用户反馈三条，逐条对应到根因（都有实测证据，不是猜）：
