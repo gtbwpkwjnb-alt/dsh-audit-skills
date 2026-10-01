@@ -2037,6 +2037,72 @@ function writeBatch(value) {
 
 const BATCH_STALE_MS = 10 * 60 * 1000
 
+/**
+ * 「上次翻译优化」的运行记录**落盘**。
+ *
+ * 为什么必须落盘：翻译优化的产物写在 node_modules 里（`locale/*.json` + `package.json.exports`），
+ * 而 `pnpm install` / 重新钉版会把包重新物化、顺手把这些文件洗掉。于是「我点过翻译优化」与
+ * 「现在为什么还是待应用 / 待生成文案」经常对不上——用户已经在两次会话里各问过一遍。
+ * 落盘之后，页面可以如实说出「上次翻译优化：X 时 · 生成 N · 应用 M · 失败 K（原因）」，
+ * 而不是留一个没有来历的「待生成文案」让用户以为功能没生效。
+ */
+function translateRunFile() {
+  return path.join(path.dirname(overlayPath()), 'translate-run.json')
+}
+
+/** 读上次翻译优化记录；没有/坏了都返回 null（页面据此显示「无记录」）。 */
+export function readTranslateRun() {
+  try {
+    return JSON.parse(fs.readFileSync(translateRunFile(), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** 写上次翻译优化记录；写失败只影响「留痕」，不影响翻译本身。 */
+export function writeTranslateRun(value) {
+  try {
+    fs.mkdirSync(path.dirname(translateRunFile()), { recursive: true })
+    fs.writeFileSync(translateRunFile(), JSON.stringify(value, null, 2) + '\n')
+    return { ok: true, value }
+  } catch (error) {
+    return { ok: false, message: String((error && error.message) || error) }
+  }
+}
+
+const TRANSLATE_ACTIONS = ['optimize', 'revert', 'auto-apply']
+const TRANSLATE_ITEM_CAP = 60
+
+/**
+ * 规范化一次运行记录：只接受已知动作与字符串字段，条目数设上限（不信任客户端输入），
+ * 并由宿主机自己数出 生成/应用/失败/跳过 —— 计数不交给客户端自报。
+ */
+export function normalizeTranslateRun(raw) {
+  const body = raw !== null && typeof raw === 'object' ? raw : {}
+  const action = TRANSLATE_ACTIONS.indexOf(body.action) >= 0 ? body.action : 'optimize'
+  const items = (Array.isArray(body.items) ? body.items.slice(0, TRANSLATE_ITEM_CAP) : [])
+    .map((item) => {
+      const it = item !== null && typeof item === 'object' ? item : {}
+      return {
+        pkg: String(it.pkg === undefined || it.pkg === null ? '' : it.pkg).slice(0, 200),
+        state: String(it.state === undefined || it.state === null ? 'unknown' : it.state).slice(0, 40),
+        message: String(it.message === undefined || it.message === null ? '' : it.message).slice(0, 400),
+      }
+    })
+    .filter((it) => it.pkg !== '')
+  return {
+    action,
+    items,
+    total: items.length,
+    generated: items.filter((it) => it.state === 'generated').length,
+    applied: items.filter((it) => it.state === 'applied').length,
+    failed: items.filter((it) => it.state === 'failed').length,
+    skipped: items.filter((it) => it.state === 'skipped-not-installed').length,
+    finishedAt: typeof body.finishedAt === 'number' ? body.finishedAt : Date.now(),
+    message: String(body.message === undefined || body.message === null ? '' : body.message).slice(0, 400),
+  }
+}
+
 /** 当前批量更新状态；过期的 running 视为已结束（避免卡死后续批量）。 */
 export function updateAllStatus() {
   const batch = readBatch()
@@ -2668,6 +2734,7 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, {
                 ok: true,
                 audit: audit,
+                translate: readTranslateRun(),
                 value: out.map((row) => Object.assign({}, row, { issues: describeIssues(row), findings: byPkg.get(row.pkg) ?? [] })),
               })
             } catch (error) {
@@ -2715,6 +2782,7 @@ export function registerBridge(ctx, dirs) {
               }
               writeJson(res, 200, {
                 ok: true,
+                translate: readTranslateRun(),
                 audit: {
                   generatedAt: Date.now(),
                   counts: {
@@ -2872,6 +2940,20 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, { ok: true, batch: updateAllStatus() })
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'status-failed', message: String(error?.message ?? error) })
+            }
+          },
+        },
+        {
+          // 「上次翻译优化」留痕：客户端把一次运行的结果 POST 上来，宿主规范化后落盘，
+          // 下次刷新由 /updates、/skills 带回（translate 字段）。
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/translate-run',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              writeJson(res, 200, writeTranslateRun(normalizeTranslateRun(body)))
+            } catch (error) {
+              writeJson(res, 200, { ok: false, code: 'run-failed', message: String(error?.message ?? error) })
             }
           },
         },

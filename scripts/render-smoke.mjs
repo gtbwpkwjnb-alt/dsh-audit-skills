@@ -186,7 +186,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.9.1'
+const REV = '2.9.2'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -194,9 +194,9 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: '@deepseek-ai/dsh-base', version: '2.4.0', latest: null, hasUpdate: null, reason: '内置运行时', localized: false, needsText: true, bundled: true, translationEligible: false, readOnlyReason: 'unaddressable' }),
   pluginRow({ pkg: '@changfenhuang/dsh-annotation', version: '1.4.10', latest: '1.4.10', hasUpdate: false, localized: true, needsText: false }),
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
-  pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true }),
+  pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true, inCatalog: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.9.1', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.9.2', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -264,15 +264,34 @@ function makeBatch(ageMs, interrupted) {
   }
 }
 
+/** 上次翻译优化的落盘记录（宿主 /updates 的 translate 字段）：一项失败、一项成功。 */
+function translateRecord() {
+  return {
+    action: 'optimize',
+    finishedAt: Date.now() - 90 * 60 * 1000,
+    total: 2, generated: 0, applied: 1, failed: 1, skipped: 0,
+    message: '翻译优化完成：应用 1 项，失败 1 个',
+    items: [
+      { pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', state: 'failed', message: '找不到默认模型，请先在设置里选定默认模型' },
+      { pkg: 'dsh-context', state: 'applied', message: '已写入 locale/zh.json' },
+    ],
+  }
+}
+
 function fetchImpl(state) {
   const json = (payload) => ({ ok: true, status: 200, json: async () => payload })
-  return async (url) => {
+  return async (url, init) => {
     /* 在调用时取，而不是构造时 —— scenario() 是在 loadClient() 之后才设 state.hostRev 的。 */
     const hostRev = state.hostRev || REV
     const action = String(url).split('/').pop()
     state.calls.push(action)
-    if (action === 'updates') return json({ rev: hostRev, ok: true, audit: AUDIT, value: PLUGIN_ROWS })
-    if (action === 'skills') return json({ rev: hostRev, ok: true, audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
+    if (init && typeof init.body === 'string') {
+      try { state.posted.push(Object.assign({ action: action }, JSON.parse(init.body))) } catch { state.posted.push({ action: action }) }
+    }
+    if (action === 'updates') return json({ rev: hostRev, ok: true, audit: AUDIT, translate: translateRecord(), value: PLUGIN_ROWS })
+    if (action === 'skills') return json({ rev: hostRev, ok: true, translate: translateRecord(), audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
+    if (action === 'apply') return json({ rev: hostRev, ok: true, value: [{ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', state: 'applied', exportNote: 'added-locale-export' }] })
+    if (action === 'translate-run') return json({ rev: hostRev, ok: true, value: { action: 'auto-apply', items: [], total: 0 } })
     if (action === 'update-all-status') return json({ rev: hostRev, ok: true, batch: makeBatch(state.batchAgeMs, state.interrupted) })
     if (action === 'update-status') return json({ rev: hostRev, ok: false, code: 'unknown-token', message: '任务不存在或已过期' })
     return json({ rev: hostRev, ok: false, code: 'http-404', message: 'HTTP 404（接口 ' + action + ' 不存在？）' })
@@ -282,7 +301,7 @@ function fetchImpl(state) {
 // ───────────────────────── 场景驱动 ─────────────────────────
 function loadClient(fetchFn) {
   const rt = createRuntime()
-  const state = { calls: [] }
+  const state = { calls: [], posted: [] }
   const timers = { n: 0 }
   const sb = {
     window: { __ModuleLoader__: { load: () => {} } },
@@ -418,6 +437,7 @@ if (ctxRow && typeof ctxRow.props.onMouseEnter === 'function') {
 check('【悬停】悬停后槽位显示该行完整信息（长文案 + 已装/最新对照）',
   hoverText.includes('中文说明：给模型提供上下文面板') && hoverText.includes('0.56.2'),
   'hoverText=' + hoverText.slice(0, 240))
+check('【留痕】悬停槽显示该行的上次翻译优化结果', hoverText.includes('上次翻译优化'), 'hoverText=' + hoverText.slice(0, 240))
 /* 「一行一项」的结构化证明：数据行里除名称列那个省略号 div 之外，不允许再出现块级 div
    （块级堆叠 = 一个格子塞多行，正是用户抱怨的信息过多）。 */
 const dataRows = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
@@ -425,6 +445,13 @@ const stackedRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'div
 check('【密度】每个插件严格占一行：行内没有堆叠的块级元素',
   dataRows.length >= PLUGIN_ROWS.length && stackedRows.length === 0,
   'stacked=' + stackedRows.length + '/' + dataRows.length)
+/* ── 用户第二次追问「我明明点过翻译优化」→ 运行必须留痕 + 能自愈（先红后绿） ── */
+check('【留痕】行内标出「上次翻译优化失败」，不再是无来历的待生成文案',
+  staleText.includes('上次失败'), staleText.slice(0, 120))
+check('【留痕】指标带给出上次优化时间', staleText.includes('上次优化'))
+check('【自愈】检测到「有条目但不在盘上」的对象时自动补应用',
+  stale.loaded.state.calls.indexOf('apply') >= 0 && stale.loaded.state.posted.some((b) => b.action === 'auto-apply'),
+  'calls=' + stale.loaded.state.calls.join(',') + ' posted=' + stale.loaded.state.posted.map((b) => b.action).join(','))
 check('【密度】每行单元格里最多一个文本块（chip 用 span，不换行）',
   dataRows.every((tr) => elementsOf(tr, (n) => n.tag === 'td').every((td) => elementsOf(td, (n) => n.tag === 'div').length <= 1)))
 

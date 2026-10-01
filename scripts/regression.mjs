@@ -100,7 +100,7 @@ const fakeCtx = new Proxy(fakeCtxBase, {
   },
 })
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 16 条 bridge 路由（含治理快照与治理动作）', routes.length === 16, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+check('注册了 17 条 bridge 路由（含治理快照/动作与翻译留痕）', routes.length === 17, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 check('治理 bridge 路由已注册', routes.some((r) => r.path.endsWith('/management')) && routes.some((r) => r.path.endsWith('/manage')))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
@@ -149,6 +149,27 @@ process.env.DSH_HOME = savedHomeB
 process.env.DSH_AGENTS_HOME = savedAgentsB
 const rv = await post('revert')
 check('POST /revert 返回 ok', rv.ok === true)
+// 翻译留痕：端到端 POST /translate-run → 宿主规范化后落盘（沙箱 DSH_HOME，绝不碰真实覆盖层目录）
+const savedHomeT = process.env.DSH_HOME
+process.env.DSH_HOME = sandbox
+const tr = await post('translate-run', {
+  action: 'optimize',
+  message: '翻译优化完成',
+  items: [
+    { pkg: 'pkg-with-exports', state: 'applied', message: '已写入 locale/zh.json' },
+    { pkg: 'pkg-no-exports', state: 'failed', message: '找不到默认模型' },
+    { pkg: '', state: 'applied' },
+    { pkg: 'pkg-bad-state', state: 'weird-state' },
+  ],
+})
+check('端到端：/translate-run 落盘并回传规范化记录', tr.ok === true && tr.value.total === 3 && tr.value.applied === 1 && tr.value.failed === 1, JSON.stringify(tr).slice(0, 200))
+check('端到端：空包名被丢弃、未知动作退回 optimize', tr.ok === true && tr.value.action === 'optimize' && !tr.value.items.some((it) => it.pkg === ''))
+check('端到端：记录有 finishedAt，可供页面显示「上次优化几时」', typeof tr.value.finishedAt === 'number')
+const trRead = m.readTranslateRun()
+check('端到端：记录真的写在磁盘上（宿主重载也不丢）', !!trRead && trRead.total === 3 && trRead.failed === 1, JSON.stringify(trRead).slice(0, 160))
+check('规范化：条目数有上限（不信任客户端输入）', m.normalizeTranslateRun({ action: 'optimize', items: new Array(200).fill({ pkg: 'x', state: 'applied' }) }).total === 60)
+check('规范化：非对象输入不抛错', m.normalizeTranslateRun(null).action === 'optimize' && m.normalizeTranslateRun('nope').total === 0)
+process.env.DSH_HOME = savedHomeT
 await new Promise((resolve) => server.close(resolve))
 
 // ─────────────────────── A2 边界用例 ───────────────────────
@@ -402,6 +423,18 @@ check('显示密度：指标收成一条紧凑数据带（不再是格子网格�
   !clientSrc.includes('minmax(94px') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap'))
 check('样式命名空间化，只用 DSH token 并带回落（亮/暗主题都跟随）',
   clientSrc.includes('--dsw-alias-border-l1,') && clientSrc.includes('--dsw-font-mono,') && clientSrc.includes('prefers-reduced-motion'))
+// ── A5d：翻译优化的「留痕 + 自愈」（用户两次追问「我明明点过翻译优化，为什么还是待应用/待生成」） ──
+check('留痕：一次运行的结果会上报宿主落盘，下次刷新可回看',
+  clientSrc.includes("call('translate-run'") && clientSrc.includes('var recordTranslate = useCallback(') &&
+  clientSrc.includes("recordTranslate('optimize'") && clientSrc.includes("'translate' in r"))
+check('留痕：行内标上次失败、悬停槽给该项的上次结果、指标带给上次时间',
+  clientSrc.includes("'上次失败'") && clientSrc.includes("'上次翻译优化'") && clientSrc.includes("'上次优化'"))
+check('自愈：catalog 有条目但文件不在盘上时自动补 apply，且只对插件页、每次挂载只做一次',
+  clientSrc.includes('r.inCatalog === true && r.localized !== true') &&
+  clientSrc.includes('if (IS_SKILL || healed || rows === null) return') &&
+  clientSrc.includes("recordTranslate('auto-apply'"))
+check('自愈不污染「本轮结果」（自愈不是用户点的动作）',
+  !/recordTranslate\('auto-apply'[\s\S]{0,300}?absorbResults\(/.test(clientSrc))
 check('无表情符号（gpt-tasteskill 硬规则：不得使用 emoji）',
   (clientSrc.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu) || []).length === 0,
   (clientSrc.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu) || []).join(''))

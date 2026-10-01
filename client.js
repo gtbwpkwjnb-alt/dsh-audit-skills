@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.9.1';
+    var CLIENT_REV = '2.9.2';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -328,7 +328,7 @@ window.__ModuleLoader__.load({
       unchanged: 'dim', pending: 'dim', running: 'dim',
       failed: 'err', fail: 'err', 'no-backup': 'warn', 'skipped-not-installed': 'warn',
     };
-    var ACTION_TEXT = { update: '更新', generate: '生成文案', apply: '应用', revert: '还原' };
+    var ACTION_TEXT = { update: '更新', generate: '生成文案', apply: '应用', revert: '还原', 'auto-apply': '自动补回' };
 
     function stateText(state) { return STATE_TEXT[state] || String(state === undefined || state === null ? '未知' : state); }
     function isBad(state) { return state === 'failed' || state === 'fail'; }
@@ -631,6 +631,12 @@ window.__ModuleLoader__.load({
          有意不挂 onMouseLeave —— 鼠标往槽位移动时不该把内容清掉（清了就来不及读）。
          槽位优先显示「点展开钉住」的那一行，否则显示最近悬停的一行。 */
       var hoverState = useState(''); var hoverPkg = hoverState[0]; var setHoverPkg = hoverState[1];
+      /* 上次翻译优化的落盘记录（宿主 /updates 的 translate 字段带回）。
+         存在的理由：翻译产物写在 node_modules 里，装包会洗掉；没有记录时，用户看到
+         「待生成文案」完全不知道「我明明点过翻译优化」。 */
+      var translateState = useState(null); var translate = translateState[0]; var setTranslate = translateState[1];
+      /* 本次挂载是否已做过自愈（避免「空列表 → 补应用 → 空列表」来回打转） */
+      var healedState = useState(false); var healed = healedState[0]; var setHealed = healedState[1];
 
       var absorb = useCallback(function (r) {
         if (r && typeof r.rev === 'string' && r.rev !== '') setHostRev(r.rev);
@@ -666,10 +672,48 @@ window.__ModuleLoader__.load({
         });
       }, []);
 
+      /**
+       * 把一次翻译运行的结果上报宿主落盘，并即时更新本页记录。
+       * 这样下一次刷新页面（甚至换一次会话）都能看到「上次翻译优化是什么时候、成了几项、哪项为什么失败」。
+       */
+      var recordTranslate = useCallback(function (action, items, message) {
+        var list = (Array.isArray(items) ? items : []).filter(function (it) { return it && typeof it.pkg === 'string' && it.pkg !== ''; });
+        if (list.length === 0) return Promise.resolve(null);
+        return call('translate-run', { action: action, items: list, message: message || '' }).then(function (r) {
+          if (r && r.ok && r.value) setTranslate(r.value);
+          return r;
+        });
+      }, []);
+
+      /**
+       * 自愈：catalog 里有条目、但文件不在盘上（`inCatalog && !localized`）→ 自动补一次 apply。
+       *
+       * 为什么需要：产物写在 node_modules 里，任何 pnpm install / 重新钉版都可能把它洗掉，
+       * 而「补回来」原本只发生在插件图重组合时。用户看到的就只是一个没有来历的「待应用」。
+       * 只对插件页做（技能侧 apply 会改写 SKILL.md，属于行为变更，绝不能由「打开页面」触发）；
+       * 每次挂载只做一次，且结果同样留痕。
+       */
+      useEffect(function () {
+        if (IS_SKILL || healed || rows === null) return;
+        var cand = rows.filter(function (r) { return r.inCatalog === true && r.localized !== true; }).map(function (r) { return r.pkg; });
+        if (cand.length === 0) return;
+        setHealed(true);
+        call('apply', { pkgs: cand }).then(absorb).then(function (r) {
+          if (!r || !r.ok) return;
+          var items = Array.isArray(r.value) ? r.value : [];
+          var applied = items.filter(function (x) { return x.state === 'applied'; }).length;
+          /* 只进「上次翻译优化」记录，**不进**「本轮结果」：
+             后者是「你刚做了什么」的日志，自愈不是你点的；也不要抢状态提示的文案。
+             自愈的可见性由指标带的「上次优化」+ 悬停槽承担。 */
+          recordTranslate('auto-apply', items, '打开设置页时自动补回 ' + applied + ' 项（产物曾不在盘上）');
+          if (applied > 0) return snapshot({ force: true });
+        });
+      }, [rows, healed, absorb, absorbResults, recordTranslate, snapshot, IS_SKILL]);
+
       // 唯一的数据入口：完整快照（状态 + 已装版本 + 最新版本 + 问题）
       var snapshot = useCallback(function (opts) {
         return call(IS_SKILL ? 'skills' : 'updates', opts || {}).then(absorb).then(function (r) {
-          if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); if (r.audit) setAudit(r.audit); return r.value; }
+          if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); if (r.audit) setAudit(r.audit); if ('translate' in r) setTranslate(r.translate || null); return r.value; }
           setNote({ kind: 'err', text: '读取失败：' + ((r && r.message) || '未知') });
           return null;
         });
@@ -843,6 +887,8 @@ window.__ModuleLoader__.load({
           }
           var genOk = 0;
           var genFail = [];
+          /* 本次运行的逐项结果（生成阶段）：最后与 apply 结果按包名合并，交给宿主落盘留痕。 */
+          var runItems = [];
           var i = 0;
           var stepGen = function () {
             if (i >= pending.length) {
@@ -852,6 +898,12 @@ window.__ModuleLoader__.load({
                 var items = ap && Array.isArray(ap.value) ? ap.value : [];
                 var applied = items.filter(function (x) { return x.state === 'applied'; }).length;
                 absorbResults('apply', items);
+                /* 留痕：生成结果与 apply 结果按包名合并（apply 为准），一个包只出现一次。 */
+                var merged = {};
+                runItems.forEach(function (x) { merged[x.pkg] = x; });
+                items.forEach(function (x) { merged[x.pkg] = x; });
+                recordTranslate('optimize', Object.keys(merged).map(function (k) { return merged[k]; }),
+                  '新生成 ' + genOk + ' 条，应用 ' + applied + ' 项，失败 ' + genFail.length + ' 个');
                 return snapshot({ force: true }).then(function (v) {
                   setBusy('');
                   if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用失败：' + ((ap && ap.message) || '未知') }); return; }
@@ -867,14 +919,12 @@ window.__ModuleLoader__.load({
             i += 1;
             setNote({ kind: 'note', text: '生成文案 ' + i + '/' + pending.length + '：' + pkg + ' …（调用模型，消耗 token）' });
             return call('generate', { pkg: pkg }).then(absorb).then(function (g) {
-              if (g && g.ok) {
-                genOk += 1;
-                absorbResults('generate', [{ pkg: pkg, state: 'generated', message: (g.entry && g.entry.zh && g.entry.zh.description) || '已写入覆盖层' }]);
-              } else {
-                var why = (g && g.message) || '未知';
-                genFail.push(pkg + '（' + why + '）');
-                absorbResults('generate', [{ pkg: pkg, state: 'failed', code: g && g.code, message: why }]);
-              }
+              var item = (g && g.ok)
+                ? { pkg: pkg, state: 'generated', message: (g.entry && g.entry.zh && g.entry.zh.description) || '已写入覆盖层' }
+                : { pkg: pkg, state: 'failed', code: (g && g.code), message: (g && g.message) || '未知' };
+              if (g && g.ok) genOk += 1; else genFail.push(pkg + '（' + item.message + '）');
+              runItems.push(item);
+              absorbResults('generate', [item]);
               return stepGen();
             });
           };
@@ -1156,6 +1206,15 @@ window.__ModuleLoader__.load({
               audit.counts.fact > 0 ? 'warn' : 'dim',
               function () { setOnlyFlagged(!onlyFlagged); })
           : kpiStat('k11', 0, '审查无发现', '本轮审查没有命中任何规则', 'ok'));
+        /* 上次翻译优化：让「我明明点过」有据可查（时间 + 成败），失败时数字变红。 */
+        if (translate && typeof translate.finishedAt === 'number') {
+          kpiCells.push(kpiStat('k12', agoText(translate.finishedAt),
+            '上次优化' + (translate.failed > 0 ? '（失败 ' + translate.failed + '）' : ''),
+            '上次翻译优化：' + agoText(translate.finishedAt) + ' · 动作 ' + (ACTION_TEXT[translate.action] || translate.action || 'optimize') +
+              ' · 生成 ' + (translate.generated || 0) + ' · 应用 ' + (translate.applied || 0) + ' · 失败 ' + (translate.failed || 0) +
+              (translate.message ? ' · ' + translate.message : ''),
+            translate.failed > 0 ? 'err' : 'dim'));
+        }
       }
       var kpiEl = kpiCells.length > 0 ? h('div', { className: 'das-stats', role: 'group' }, kpiCells) : null;
 
@@ -1181,6 +1240,11 @@ window.__ModuleLoader__.load({
          就把记录贴回该行 —— 这正是用户看到「状态栏说完成、行里还能点更新」时缺的那一句话。 */
       var recordByPkg = {};
       for (var ri = 0; ri < results.length; ri += 1) recordByPkg[results[ri].pkg] = results[ri];
+      /* 上次翻译优化的逐项结果（按包名索引）：行内标「上次失败」、悬停槽给「上次翻译优化」用。 */
+      var translateItems = {};
+      if (translate && Array.isArray(translate.items)) {
+        for (var ti = 0; ti < translate.items.length; ti += 1) translateItems[translate.items[ti].pkg] = translate.items[ti];
+      }
 
       var visible = (onlyFlagged && rows) ? rows.filter(function (r) { return (r.issues || []).length > 0 || (r.findings || []).length > 0; }) : rows;
 
@@ -1250,6 +1314,11 @@ window.__ModuleLoader__.load({
                   h('td', { className: 'das-name' }, h('div', { className: 'das-name-main', title: r.pkg }, nameLine)),
                   h('td', null,
                     chip('lo', stateText2, stateTone, optimizeTitle),
+                    (translateItems[r.pkg] && isBad(translateItems[r.pkg].state) && r.localized !== true)
+                      ? chip('tf', '上次失败', 'err',
+                          '上次翻译优化（' + agoText(translate.finishedAt) + '）里这一项失败了：' + (translateItems[r.pkg].message || '无原因') +
+                          ' —— 点「翻译优化」可重试；悬停本行看完整记录')
+                      : null,
                     facts.length > 0
                       ? h('span', {
                           className: 'das-sev ' + (SEV_CLASS[sev] || 'is-low'),
@@ -1338,6 +1407,11 @@ window.__ModuleLoader__.load({
           pairs.push(['审查', dFacts.map(function (f) { return (SEV[f.severity] || f.severity) + '·' + f.title; }).join('；')
             + (dInferred.length ? '（另有 ' + dInferred.length + ' 条推断）' : '')]);
         }
+        /* 「我明明点过翻译优化」的正面回答：这一项上次跑成了没有、失败原因是什么。 */
+        var tItem = translateItems[d.pkg];
+        pairs.push(['上次翻译优化', tItem
+          ? (stateText(tItem.state) + (tItem.message ? ' · ' + tItem.message : '') + '（' + agoText(translate.finishedAt) + '）')
+          : (translate ? '最近一次运行（' + agoText(translate.finishedAt) + '）没有这一项' : '无记录：还没跑过，或记录已被清理')]);
         return [
           h('div', { key: 'k', className: 'das-hover-head' },
             h('span', { className: 'das-hover-name' }, d.displayName || d.pkg),
