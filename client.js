@@ -45,7 +45,10 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.3';
+    var CLIENT_REV = '2.10.4';
+    /* 本插件自己的包名：客户端就是它自己，所以它自己的中文名不必等宿主提供
+       （否则列表里 6 行是中文、唯独自己那一行是包名，看着像坏了）。 */
+    var OWN_PKG = 'dsh-audit-skills';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -1387,6 +1390,7 @@ window.__ModuleLoader__.load({
                    过去把「包名（中文名） · 包名」整串塞进一格，等于把中文名藏起来、
                    还让列表看不到任何优化结果 —— 用户为此专门提过两次。 */
                 var zhName = zhNameOf(r.displayName, r.pkg);
+                if (zhName === '' && r.pkg === OWN_PKG) zhName = LABEL;
                 /* 宿主没给中文名时用内置快照兜底（仅当这一行的中文确实已落盘，
                    免得「还没应用」的行也显示中文，反而误导） */
                 var snap = zhName === '' ? catalogZh(r.pkg) : null;
@@ -1495,15 +1499,18 @@ window.__ModuleLoader__.load({
         var nameMissingHost = revGap && compareRev(hostRev, CLIENT_REV) < 0;
         var dSnap = (!d.displayName || d.displayName === d.pkg) ? catalogZh(d.pkg) : null;
         var dUseSnap = dSnap !== null && d.localized === true && dSnap.name !== '';
+        var isOwn = d.pkg === OWN_PKG;
         pairs.push(['名称', (d.displayName && d.displayName !== d.pkg)
           ? d.displayName + '（' + d.pkg + '）'
-          : (dUseSnap
-            ? dSnap.name + '（' + d.pkg + '）· 来自客户端内置快照'
-            : (d.pkg + (d.localized === true
-              ? (nameMissingHost
-                ? '（宿主半体 v' + hostRev + ' 未提供中文名 —— 重启 DSH 后这里会显示）'
-                : '（该条目没有中文名，只有原包名）')
-              : '')))]);
+          : (isOwn
+            ? LABEL + '（' + d.pkg + '）· 本插件自身'
+            : (dUseSnap
+              ? dSnap.name + '（' + d.pkg + '）· 来自客户端内置快照'
+              : (d.pkg + (d.localized === true
+                ? (nameMissingHost
+                  ? '（宿主半体 v' + hostRev + ' 未提供中文名 —— 重启 DSH 后这里会显示）'
+                  : '（该条目没有中文名，只有原包名）')
+                : ''))))]);
         if (d.localizedDescription) pairs.push(['中文说明', d.localizedDescription]);
         else if (dUseSnap && dSnap.desc) pairs.push(['中文说明', dSnap.desc + (nameMissingHost ? '（来自客户端内置快照；宿主 v' + hostRev + ' 未提供，重启后由宿主提供）' : '（来自客户端内置快照）')]);
         if (IS_SKILL && d.purpose) pairs.push(['作用', d.purpose]);

@@ -466,6 +466,15 @@ check('客户端：宿主太旧时解释「为什么没有中文名」（区分�
   check('快照来源被如实标注（悬停槽写明来自客户端内置快照）',
     clientSrc.includes('来自客户端内置快照'))
 }
+check('客户端：本插件自己的行也用中文名（客户端就是它自己，不必等宿主提供）',
+  clientSrc.includes("var OWN_PKG = 'dsh-audit-skills';") &&
+  clientSrc.includes("if (zhName === '' && r.pkg === OWN_PKG) zhName = LABEL;") &&
+  clientSrc.includes("· 本插件自身"))
+check('冒烟支持 --live：用真实线上快照渲染真客户端（无浏览器时的端到端证据）', (() => {
+  const smokeSrc = fs.readFileSync(path.join(REPO, 'scripts', 'render-smoke.mjs'), 'utf8')
+  return smokeSrc.includes("process.argv.includes('--live')") && smokeSrc.includes('【LIVE】') &&
+    smokeSrc.includes('api/dsh-audit-skills/updates')
+})())
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')

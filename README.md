@@ -85,6 +85,26 @@ DSH 插件页的标题来自 `locale/<lang>.json` 的 `meta.title`，**一旦写
 
 ## 脚本
 
+### `scripts/render-smoke.mjs` — 渲染冒烟（合成夹具 + 可选真实快照）
+
+```bash
+node scripts/render-smoke.mjs          # 合成夹具（进闸门，结果确定）
+node scripts/render-smoke.mjs --live   # 用 DSH 真实进程返回的 /updates 渲染真客户端（端到端证据）
+```
+
+`--live` 把线上真正的插件行灌进同一个真客户端并断言渲染文本：桥接不可达时 SKIP，不阻塞闸门。
+没有浏览器时，这是「列表到底显示成什么样」最硬的证据。
+
+### `scripts/build-client-catalog.mjs` — 内置 catalog 中文快照注入
+
+```bash
+node scripts/build-client-catalog.mjs          # 改完 references/dsh-plugin-locale-catalog.json 后重新注入
+node scripts/build-client-catalog.mjs --check  # 漂移校验（regression 里也逐条比对）
+```
+
+宿主 <2.9 的插件行**不发** `displayName`/`localizedDescription`（2.8.0 里 `displayName` 只在技能行），
+所以客户端半体内联这份仓库内置 catalog 的中文快照，刷新即可显示中文名与中文说明。
+
 ### `scripts/dsh_plugin_locale.mjs` — 插件页中文化落地
 
 ```bash

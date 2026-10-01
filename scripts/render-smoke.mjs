@@ -186,7 +186,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.10.3'
+const REV = '2.10.4'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -196,7 +196,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true, inCatalog: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.10.1', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.10.4', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -423,6 +423,12 @@ check('版本 chip 同时给出客户端与宿主版本', staleText.includes('v'
 check('【主功能】中文名优先展示，不再把「包名（中文）」整串塞进行内',
   staleText.includes('划词批注') && !staleText.includes('（划词批注） · '), staleText.slice(0, 160))
 /* 页面自己要把「本插件干什么」说清楚（用户：功能与简介缺乏展示） */
+check('【主功能】页面用一句话讲清价值，而不是只讲命名约定',
+  staleText.includes('精炼成中文') && staleText.includes('Plugins 页'), staleText.slice(0, 200))
+/* 本插件自己的那一行也必须显示中文名（客户端就是它自己，没必要等宿主提供） */
+const ownRow = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-audit-skills'))[0]
+check('【主功能】本插件自己的行也显示中文名（不依赖宿主）',
+  !!ownRow && textOf(ownRow).includes('插件与技能审查'), ownRow ? textOf(ownRow).slice(0, 160) : '未找到本插件行')
 /* ── 旧宿主兜底：内置 catalog 中文快照（宿主 <2.9 的插件行不发 displayName/localizedDescription） ── */
 const cj = JSON.parse(fs.readFileSync(path.join(REPO, 'references', 'dsh-plugin-locale-catalog.json'), 'utf8'))
 const zhOf = (pkg) => { const e = cj.entries.find((x) => x.pkg === pkg); return e && e.zh ? e.zh : null }
@@ -619,6 +625,55 @@ check('summary 视图返回一句话说明', typeof summary === 'string' && summ
 const inlineTree = (await renderSettled(inline.rt, rowConfig.component({ view: 'full' }))).tree
 check('full 视图渲染出完整面板', textOf(inlineTree).includes('dsh-free-search') && textOf(inlineTree).includes('精炼成中文'))
 check('full 视图无异常且无 undefined', inline.rt.errors.length === 0 && !/\bundefined\b/.test(textOf(inlineTree)))
+
+/* ───────────── 7 可选：--live 用**真实线上快照**渲染**真客户端**（没有浏览器时最硬的端到端证据） ─────────────
+   合成夹具只能证明「给定输入会这样渲染」；这一块把 DSH 真实进程返回的 /updates 灌进同一个真客户端，
+   再断言渲染文本。桥接不上就 SKIP（四道闸门不依赖活的 DSH，此时仍用 node scripts/render-smoke.mjs --live 手动跑）。 */
+if (process.argv.includes('--live')) {
+  console.log('\n7 LIVE · 真实线上快照 → 真客户端 → 真渲染')
+  let live = null
+  try {
+    const r = await fetch('http://127.0.0.1:19387/api/dsh-audit-skills/updates', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    })
+    live = await r.json()
+  } catch (error) {
+    console.log('  SKIP  桥接不可达：' + (error && error.message))
+  }
+  if (live && Array.isArray(live.value)) {
+    console.log('  线上快照 rev=' + live.rev + '，共 ' + live.value.length + ' 行')
+    /* 把合成夹具换成线上行（PLUGIN_ROWS 是被 fetchImpl 闭包捕获的同一个数组，原地替换即可） */
+    PLUGIN_ROWS.length = 0
+    for (const row of live.value) PLUGIN_ROWS.push(Object.assign(pluginRow({ pkg: row.pkg }), row))
+    const liveLoaded = loadClient(fetchImpl)
+    const liveSection = liveLoaded.registered.find((x) => x.desc.name === 'settings.section')
+    const liveTree = (await renderSettled(liveLoaded.rt, liveSection.component({}))).tree
+    const liveText = textOf(liveTree)
+    const rows = elementsOf(liveTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
+    check('【LIVE】真客户端渲染线上快照无异常', rows.length === live.value.length, 'rows=' + rows.length + ' expected=' + live.value.length)
+    check('【LIVE】渲染文本里没有 undefined', !/\bundefined\b/.test(liveText))
+    check('【LIVE】不再出现「包名（中文） · 包名」的整串重复形态', !/（[^）]{1,20}） · /.test(liveText), liveText.slice(0, 200))
+    /* 逐行：只要这份内置 catalog 覆盖它、且中文确实已落盘，渲染文本里就必须出现它的中文名 */
+    let covered = 0
+    const missed = []
+    for (const row of live.value) {
+      const zh = zhOf(row.pkg)
+      if (!zh) continue
+      const zhName = /[（(]([^（()）]+)[)）]\s*$/.exec(zh.title)
+      const name = zhName ? zhName[1] : zh.title
+      if (row.localized !== true) continue
+      covered += 1
+      const tr = rows.find((el) => textOf(el).includes(row.pkg))
+      if (!tr || !textOf(tr).includes(name)) missed.push(row.pkg + '→' + name)
+      check('【LIVE】' + row.pkg + ' 行内显示中文名「' + name + '」及中文说明',
+        !!tr && textOf(tr).includes(name) && textOf(tr).includes(String(zh.description).slice(0, 10)),
+        tr ? textOf(tr).slice(0, 160) : '未找到该行')
+    }
+    console.log('  覆盖：' + covered + '/' + live.value.length + ' 行' + (missed.length ? '，缺失：' + missed.join('、') : ''))
+    const ownLive = rows.find((el) => textOf(el).includes('dsh-audit-skills'))
+    check('【LIVE】本插件自己那行也显示中文名', !!ownLive && textOf(ownLive).includes('插件与技能审查'))
+  }
+}
 
 console.log('\nRENDER SMOKE  pass=' + pass + '  fail=' + fail)
 process.exitCode = fail === 0 ? 0 : 1
