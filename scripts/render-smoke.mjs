@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * render-smoke.mjs — 客户端半体的**真渲染**冒烟测试（v2.8.0 新增，常驻）
  *

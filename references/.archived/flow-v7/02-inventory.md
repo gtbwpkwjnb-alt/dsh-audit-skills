@@ -1,4 +1,4 @@
-﻿# ② 已安装技能清单（含容量采集 + 能力映射）
+# ② 已安装技能清单（含容量采集 + 能力映射）
 
 使用已加载 config.yaml 中所有 scan_paths，提取每个技能的 name/description/路径/来源/版本号。
 同时扫描 MCP 服务器（mcp_config.files），提取服务器+工具列表。去重：同name优先 editable=true→版本高者。

@@ -1,4 +1,4 @@
-﻿/* dsh-audit-skills — 客户端半体
+/* dsh-audit-skills — 客户端半体
  *
  * 形态要求（不可违反）：DSH 以传统 <script> 加载 client.js，
  * 不得有顶层 import/export，必须用 window.__ModuleLoader__.load({ id, factory }) 注册。

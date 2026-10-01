@@ -1,4 +1,4 @@
-﻿# skills-summarize-audit 测试套件
+# skills-summarize-audit 测试套件
 
 > 自动化验证覆盖版本、YAML、评分、发布契约和平台配置；Markdown 用例补充流程验收。
 > 每次修改后，先运行 `python tests/validate.py` 做自动化检查，再按 Markdown 套件逐项验证。

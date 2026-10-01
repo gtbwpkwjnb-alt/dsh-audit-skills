@@ -1,4 +1,4 @@
-﻿# ⑥ 生成报告
+# ⑥ 生成报告
 
 报告生成阶段默认只读。读取 `references/output-contract.md`，输出后不写入 `.data/stats.json`；用户确认保存审计历史后才在⑧持久化。
 

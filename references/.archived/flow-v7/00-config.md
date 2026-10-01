@@ -1,4 +1,4 @@
-﻿# ⓪ 前置：配置+记忆+模式
+# ⓪ 前置：配置+记忆+模式
 
 1. **前置目录检查**：确认当前目录存在，是项目根，深度合理
 2. **加载 config.yaml**：读取本技能目录下 config.yaml，加载 scan_paths、project_scan、health_thresholds 等

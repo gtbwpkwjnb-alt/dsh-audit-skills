@@ -1,4 +1,4 @@
-﻿# ⑦-c 执行
+# ⑦-c 执行
 
 若 `execution_blocked=true`，停止并只输出阻断原因与修复建议。否则仅用户层技能（editable=true）可修改；系统技能只读。操作：归档、修改描述、安装、更新、回滚。
 执行日志仅在用户确认了“保存执行日志”时写入 `{snapshot.dir}/{timestamp}/execution-log.json`。

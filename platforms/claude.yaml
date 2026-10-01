@@ -1,4 +1,4 @@
-﻿platform: claude-code
+platform: claude-code
 # Claude Code 平台特征配置（v5.9.1 平台适配）
 # scan_paths 定义在 config.yaml（唯一配置源），此文件仅存平台特征。
 # ⚠️ 触发词权威来源：SKILL.md 触发词矩阵。此文件不重复定义。
