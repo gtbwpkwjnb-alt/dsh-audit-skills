@@ -186,7 +186,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.9.0'
+const REV = '2.9.1'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -196,7 +196,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.9.0', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.9.1', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -267,13 +267,15 @@ function makeBatch(ageMs, interrupted) {
 function fetchImpl(state) {
   const json = (payload) => ({ ok: true, status: 200, json: async () => payload })
   return async (url) => {
+    /* 在调用时取，而不是构造时 —— scenario() 是在 loadClient() 之后才设 state.hostRev 的。 */
+    const hostRev = state.hostRev || REV
     const action = String(url).split('/').pop()
     state.calls.push(action)
-    if (action === 'updates') return json({ rev: REV, ok: true, audit: AUDIT, value: PLUGIN_ROWS })
-    if (action === 'skills') return json({ rev: REV, ok: true, audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
-    if (action === 'update-all-status') return json({ rev: REV, ok: true, batch: makeBatch(state.batchAgeMs, state.interrupted) })
-    if (action === 'update-status') return json({ rev: REV, ok: false, code: 'unknown-token', message: '任务不存在或已过期' })
-    return json({ rev: REV, ok: false, code: 'http-404', message: 'HTTP 404（接口 ' + action + ' 不存在？）' })
+    if (action === 'updates') return json({ rev: hostRev, ok: true, audit: AUDIT, value: PLUGIN_ROWS })
+    if (action === 'skills') return json({ rev: hostRev, ok: true, audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
+    if (action === 'update-all-status') return json({ rev: hostRev, ok: true, batch: makeBatch(state.batchAgeMs, state.interrupted) })
+    if (action === 'update-status') return json({ rev: hostRev, ok: false, code: 'unknown-token', message: '任务不存在或已过期' })
+    return json({ rev: hostRev, ok: false, code: 'http-404', message: 'HTTP 404（接口 ' + action + ' 不存在？）' })
   }
 }
 
@@ -344,10 +346,11 @@ function backToPlugin(loaded) {
   loaded.rt.api.__instances.get('Merged').hooks[0].v = 'plugin'
 }
 
-async function scenario(batchAgeMs, interrupted) {
+async function scenario(batchAgeMs, interrupted, hostRev) {
   const loaded = loadClient(fetchImpl)
   loaded.state.batchAgeMs = batchAgeMs
   loaded.state.interrupted = interrupted === true
+  if (hostRev) loaded.state.hostRev = hostRev
   const section = loaded.registered.find((r) => r.desc.name === 'settings.section')
   const element = section.component({})
   const first = await renderSettled(loaded.rt, element)
@@ -370,6 +373,13 @@ check('渲染无异常（apply / 渲染 / effect 都算）', stale.errors.length
 check('取到了 /updates 与 /update-all-status', stale.loaded.state.calls.includes('updates') && stale.loaded.state.calls.includes('update-all-status'), stale.loaded.state.calls.join(','))
 check('全部插件成行（' + PLUGIN_ROWS.length + ' 个）', PLUGIN_ROWS.every((r) => staleText.includes(r.pkg)), '缺：' + PLUGIN_ROWS.filter((r) => !staleText.includes(r.pkg)).map((r) => r.pkg).join(','))
 check('KPI 数据带渲染（可更新 / 待生成文案 / 无法比对）', staleText.includes('可更新') && staleText.includes('待生成文案') && staleText.includes('无法比对'))
+/* ── 用户第二条：KPI 数据带与提示行太占地方（先红后绿） ── */
+const statsBar = elementsOf(stale.pluginTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0)[0]
+check('【密度】KPI 收成一条数据带（.das-stats），不再是格子网格',
+  !!statsBar && !/\.das-kpi \{[^}]*display: grid/.test(clientSrc))
+check('【密度】数据带里没有块级格子（每项都是行内元素）',
+  !!statsBar && elementsOf(statsBar.kids, (n) => n.tag === 'div').length === 0,
+  statsBar ? 'divs=' + elementsOf(statsBar.kids, (n) => n.tag === 'div').length : '找不到 .das-stats')
 check('内置 bundle 显示随 DSH 提供而不是待生成文案', staleText.includes('@deepseek-ai/dsh-base') && staleText.includes('随 DSH 提供'))
 check('本轮结果合并到状态提示与对象行', staleText.includes('本轮处理 3 项') && staleTitles.includes('安装已执行，但版本未变（仍为 0.5.0）'))
 check('【核心】历史结果不再单独占表，页面说明当前按快照判定', staleText.includes('按最新快照') && !staleText.includes('记录不约束下表'))
@@ -477,7 +487,20 @@ check('【核心】不得出现「已中断」与「刚刚完成」同屏打架'
 check('行锁时间取自锁本身（单行更新后按结果暗下去）', brokenAfter.includes('已锁定 1 行'))
 check('单行更新失败如实报因并给下一步动作', brokenAfter.includes('HTTP 404') && brokenAfter.includes('重启 DSH'))
 
-// ───────────────────────── 4 技能视图 ─────────────────────────
+// ───────────────────────── 5 版本不一致：提示必须短，长解释进 title ─────────────────────────
+console.log('\n5 版本不一致（宿主落后于客户端）')
+const mismatch = await scenario(60 * 1000, false, '2.8.0')
+const mmText = textOf(mismatch.pluginTree)
+const mmTitles = titlesOf(mismatch.pluginTree)
+check('渲染无异常', mismatch.errors.length === 0, mismatch.errors.map((e) => e.message).join(' | '))
+check('不一致仍被如实指出，并给出下一步', mmText.includes('落后于客户端') && mmText.includes('重启 DSH'), 'mmText=' + mmText.slice(0, 200))
+check('【密度】长解释不再占版面（只在 title 里可悬停读到）',
+  !mmText.includes('因此可能缺少本页需要的接口') && !mmText.includes('宿主半体是旧的') &&
+  mmTitles.includes('因此可能缺少本页需要的接口') && mmTitles.includes('请重启 DSH。'), 'titles=' + mmTitles.slice(0, 120))
+check('技能页同样渲染成一条紧凑数据带',
+  elementsOf(stale.skillTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0).length === 1)
+
+// ───────────────────────── 6 技能视图 ─────────────────────────
 console.log('\n4 技能视图 · 版本/修订回落链与来源压缩')
 const skillText = textOf(stale.skillTree)
 check('切换视图后无异常（key={mode} 真重挂载并拉 /skills）', stale.loaded.state.calls.includes('skills'), stale.loaded.state.calls.join(','))

@@ -397,8 +397,9 @@ check('技能版本列：version → git 提交号 → 未声明 的回落链，
   clientSrc.includes('function skillRevision(') && clientSrc.includes("'git ' + shortShaOf(r.localSha)") && clientSrc.includes("'未声明'"))
 check('技能来源：只显示 GitHub 原作者仓库链接，不把本地路径当来源',
   clientSrc.includes('sourceUrl') && clientSrc.includes('GitHub 原作者仓库') && clientSrc.includes("target: '_blank'"))
-check('数据网格：KPI 露线法 + 表头吸顶 + 横向可滚（信息容纳量优先）',
-  clientSrc.includes('repeat(auto-fit, minmax(94px, 1fr))') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap'))
+check('显示密度：指标收成一条紧凑数据带（不再是格子网格）+ 表头吸顶 + 横向可滚',
+  clientSrc.includes('.das-stats {') && clientSrc.includes('function kpiStat(') &&
+  !clientSrc.includes('minmax(94px') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap'))
 check('样式命名空间化，只用 DSH token 并带回落（亮/暗主题都跟随）',
   clientSrc.includes('--dsw-alias-border-l1,') && clientSrc.includes('--dsw-font-mono,') && clientSrc.includes('prefers-reduced-motion'))
 check('无表情符号（gpt-tasteskill 硬规则：不得使用 emoji）',

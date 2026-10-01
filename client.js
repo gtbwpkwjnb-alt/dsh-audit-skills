@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.9.0';
+    var CLIENT_REV = '2.9.1';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -177,21 +177,21 @@ window.__ModuleLoader__.load({
       '.das-btn.das-primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover, #2f61e0); }',
       '.das-btn.das-mini { padding: 2px 8px; font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; }',
       '.das-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; }',
-      /* KPI 数据带：1px 露线法，格子铺满无空洞 */
-      '.das-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(94px, 1fr)); gap: 1px;',
-      '  background: var(--das-line2); border: 1px solid var(--das-line); border-radius: var(--das-r); overflow: hidden; }',
-      '.das-kpi-cell { background: var(--dsw-alias-bg-base, rgba(127,127,127,.04)); padding: 7px 10px;',
-      '  display: flex; flex-direction: column; gap: 1px; min-width: 0; text-align: left; border: 0; font: inherit; color: inherit; }',
-      'button.das-kpi-cell { cursor: pointer; appearance: none; transition: background .18s ease; }',
-      'button.das-kpi-cell:hover { background: var(--dsw-alias-interactive-bg-hover, var(--das-l1)); }',
-      '.das-kpi-n { font-family: var(--das-mono); font-variant-numeric: tabular-nums;',
-      '  font-size: var(--dsw-font-base-strong-16-font-size, 16px); font-weight: 600; line-height: 21px; }',
-      '.das-kpi-l { font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; color: var(--das-dim);',
-      '  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.das-kpi-cell.is-warn .das-kpi-n { color: var(--das-warn); }',
-      '.das-kpi-cell.is-err .das-kpi-n { color: var(--das-err); }',
-      '.das-kpi-cell.is-ok .das-kpi-n { color: var(--das-ok); }',
-      '.das-kpi-cell.is-dim .das-kpi-n { color: var(--das-dimmer); }',
+      /* 指标带：一行紧凑文本（用户反馈原来的格子网格太占地方）。
+         数字用等宽 + 主色，标签用次级色；每项都有 title 说明「这个数字是什么」。 */
+      '.das-stats { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; padding: 5px 10px;',
+      '  border: 1px solid var(--das-line); border-radius: var(--das-r); background: var(--das-l1);',
+      '  font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 16px; }',
+      '.das-stat { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; padding: 0; border: 0;',
+      '  background: transparent; color: inherit; font: inherit; text-align: left; }',
+      'button.das-stat { cursor: pointer; }',
+      'button.das-stat:hover .das-stat-l { text-decoration: underline; }',
+      '.das-stat-n { font-family: var(--das-mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; line-height: 17px; }',
+      '.das-stat-l { color: var(--das-dim); white-space: nowrap; }',
+      '.das-stat.is-warn .das-stat-n { color: var(--das-warn); }',
+      '.das-stat.is-err .das-stat-n { color: var(--das-err); }',
+      '.das-stat.is-ok .das-stat-n { color: var(--das-ok); }',
+      '.das-stat.is-dim .das-stat-n { color: var(--das-dimmer); }',
       /* 卡片 + 层叠入场（Card Stacking 的 CSS 等价物） */
       '.das-card { border: 1px solid var(--das-line); border-radius: var(--das-r); background: var(--dsw-alias-settings-card-fill, var(--das-l1)); overflow: hidden; }',
       '.das-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 12px;',
@@ -254,7 +254,7 @@ window.__ModuleLoader__.load({
       '.das-sev.is-medium { color: var(--das-warn); }',
       '.das-sev.is-low { color: var(--das-dim); }',
       /* 状态提示行 */
-      '.das-note { display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; border-radius: var(--das-r);',
+      '.das-note { display: flex; align-items: flex-start; gap: 8px; padding: 5px 10px; border-radius: var(--das-r);',
       '  border: 1px solid var(--das-line2); background: var(--das-l1); font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: 18px; }',
       '.das-note.is-err { border-color: var(--das-err); }',
       '.das-note.is-ok { border-color: var(--das-ok); }',
@@ -297,7 +297,7 @@ window.__ModuleLoader__.load({
       '.das-foot { font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 16px; color: var(--das-dimmer); }',
       '@media (prefers-reduced-motion: reduce) {',
       '  .das-rise { animation: none; }',
-      '  .das-btn, .das-seg-btn, .das-table tbody tr, .das-kpi-cell { transition: none; }',
+      '  .das-btn, .das-seg-btn, .das-table tbody tr, .das-stat { transition: none; }',
       '  .das-btn:hover:not(:disabled), .das-seg-btn:hover { transform: none; }',
       '}',
     ].join('\n');
@@ -460,16 +460,16 @@ window.__ModuleLoader__.load({
       }, text);
     }
 
-    function kpiCell(key, n, label, title, tone) {
-      return h('div', { key: key, className: 'das-kpi-cell' + (tone ? ' is-' + tone : ''), title: title },
-        h('span', { className: 'das-kpi-n' }, String(n)),
-        h('span', { className: 'das-kpi-l' }, label));
-    }
-
-    function kpiButton(key, n, label, title, tone, onClick) {
-      return h('button', { key: key, type: 'button', className: 'das-kpi-cell' + (tone ? ' is-' + tone : ''), title: title, onClick: onClick },
-        h('span', { className: 'das-kpi-n' }, String(n)),
-        h('span', { className: 'das-kpi-l' }, label));
+    /** 指标带里的一项：一行文本（数字 + 标签）。有 onClick 就是按钮（例如审查筛选）。 */
+    function kpiStat(key, n, label, title, tone, onClick) {
+      var kids = [
+        h('span', { key: 'n', className: 'das-stat-n' }, String(n)),
+        h('span', { key: 'l', className: 'das-stat-l' }, label),
+      ];
+      var cls = 'das-stat' + (tone ? ' is-' + tone : '');
+      return onClick === undefined
+        ? h('span', { key: key, className: cls, title: title }, kids)
+        : h('button', { key: key, type: 'button', className: cls, title: title, onClick: onClick }, kids);
     }
 
     /**
@@ -1112,15 +1112,20 @@ window.__ModuleLoader__.load({
           false, 'primary'));
 
       var revGap = hostRev !== '' && hostRev !== CLIENT_REV;
+      /* 长解释进 title（用户反馈这条提示太占地方）；可见的只留一行短句。
+         注意 regression 钉住 '宿主半体版本过旧' / '请重启 DSH。' / '请刷新页面。' 必须在源码里存续。 */
+      var revExplain = revGap
+        ? '客户端半体 v' + CLIENT_REV + ' 与运行中的宿主半体 v' + hostRev + ' 不一致：' +
+          (compareRev(hostRev, CLIENT_REV) < 0
+            ? '宿主半体是旧的 —— 它只在 DSH 进程启动时加载一次，因此可能缺少本页需要的接口（例如 /skills）。请重启 DSH。'
+            : '客户端半体是旧的（页面来自缓存）。请刷新页面。')
+        : '宿主半体版本过旧：运行中的是进程启动时加载的代码，因此缺少新接口。请重启 DSH 后重试。';
       var staleEl = (stale || revGap)
-        ? h('div', { className: 'das-note is-err' },
+        ? h('div', { className: 'das-note is-err', title: revExplain },
             chip('sg', '版本不一致', 'err'),
             h('span', { className: 'das-note-text' }, revGap
-              ? '客户端半体 v' + CLIENT_REV + ' 与运行中的宿主半体 v' + hostRev + ' 不一致：' +
-                (compareRev(hostRev, CLIENT_REV) < 0
-                  ? '宿主半体是旧的 —— 它只在 DSH 进程启动时加载一次，因此可能缺少本页需要的接口（例如 /skills）。请重启 DSH。'
-                  : '客户端半体是旧的（页面来自缓存）。请刷新页面。')
-              : '宿主半体版本过旧：运行中的是进程启动时加载的代码，因此缺少新接口。请重启 DSH 后重试。'))
+              ? '宿主半体 v' + hostRev + ' 落后于客户端 v' + CLIENT_REV + ' · 重启 DSH 生效'
+              : '宿主半体版本过旧 · 重启 DSH 后重试'))
         : null;
 
       var noteEl = note
@@ -1129,30 +1134,30 @@ window.__ModuleLoader__.load({
             h('span', { className: 'das-note-text' }, note.text))
         : null;
 
-      /* KPI 数据带：把汇总从「一行密文」拆成可扫读的格子，并给每格写明定义。 */
+      /* 指标带：一条紧凑文本行（原来的格子网格太占地方），每项 title 说明这个数字是什么。 */
       var kpiCells = [];
       if (s) {
-        kpiCells.push(kpiCell('k1', s.total, IS_SKILL ? '技能' : '插件', '本次快照里的条目总数'));
-        kpiCells.push(kpiCell('k2', s.refined, '已优化', '文案已落盘（插件：locale 覆盖层；技能：SKILL.md 已改写）', s.refined > 0 ? 'ok' : null));
-        kpiCells.push(kpiCell('k3', s.toApply, '待应用', '已有文案但未落盘；点「翻译优化」应用', s.toApply > 0 ? 'warn' : null));
-        kpiCells.push(kpiCell('k4', s.pending, '待生成文案', '没有文案条目，需要调用模型生成（消耗 token）', s.pending > 0 ? 'warn' : null));
-        kpiCells.push(kpiCell('k5', s.upd, '可更新', IS_SKILL ? '远端比本地新的 git 技能数' : 'npm 上比已装版本新的插件数', s.upd > 0 ? 'warn' : 'dim'));
-        kpiCells.push(kpiCell('k6', s.unk, '无法比对', IS_SKILL ? '是 git 仓库但远端查不到（不可比）' : '最新版本查询失败（不可比）', s.unk > 0 ? 'dim' : null));
+        kpiCells.push(kpiStat('k1', s.total, IS_SKILL ? '技能' : '插件', '本次快照里的条目总数'));
+        kpiCells.push(kpiStat('k2', s.refined, '已优化', '文案已落盘（插件：locale 覆盖层；技能：SKILL.md 已改写）', s.refined > 0 ? 'ok' : null));
+        kpiCells.push(kpiStat('k3', s.toApply, '待应用', '已有文案但未落盘；点「翻译优化」应用', s.toApply > 0 ? 'warn' : null));
+        kpiCells.push(kpiStat('k4', s.pending, '待生成文案', '没有文案条目，需要调用模型生成（消耗 token）', s.pending > 0 ? 'warn' : null));
+        kpiCells.push(kpiStat('k5', s.upd, '可更新', IS_SKILL ? '远端比本地新的 git 技能数' : 'npm 上比已装版本新的插件数', s.upd > 0 ? 'warn' : 'dim'));
+        kpiCells.push(kpiStat('k6', s.unk, '无法比对', IS_SKILL ? '是 git 仓库但远端查不到（不可比）' : '最新版本查询失败（不可比）', s.unk > 0 ? 'dim' : null));
         if (IS_SKILL) {
-          kpiCells.push(kpiCell('k7', s.noRepo, '本地目录', '不是 git 仓库，没有远端可比', s.noRepo > 0 ? 'dim' : null));
-          kpiCells.push(kpiCell('k8', s.bundled, '随 DSH 提供', '在 app.asar 内、没有可写路径，只入表不参与优化', s.bundled > 0 ? 'dim' : null));
-          kpiCells.push(kpiCell('k9', s.dirty, '有本地改动', 'git 工作区有未提交修改；快进会被 git 拒绝', s.dirty > 0 ? 'warn' : null));
-          kpiCells.push(kpiCell('k10', s.english, '描述为英文', '中文可读性较低；改写 description 属行为变更', s.english > 0 ? 'warn' : null));
+          kpiCells.push(kpiStat('k7', s.noRepo, '本地目录', '不是 git 仓库，没有远端可比', s.noRepo > 0 ? 'dim' : null));
+          kpiCells.push(kpiStat('k8', s.bundled, '随 DSH 提供', '在 app.asar 内、没有可写路径，只入表不参与优化', s.bundled > 0 ? 'dim' : null));
+          kpiCells.push(kpiStat('k9', s.dirty, '有本地改动', 'git 工作区有未提交修改；快进会被 git 拒绝', s.dirty > 0 ? 'warn' : null));
+          kpiCells.push(kpiStat('k10', s.english, '描述为英文', '中文可读性较低；改写 description 属行为变更', s.english > 0 ? 'warn' : null));
         }
         var findings = audit && audit.counts ? (audit.counts.fact + audit.counts.inferred) : 0;
         kpiCells.push(findings > 0
-          ? kpiButton('k11', findings, '审查 ' + (onlyFlagged ? '· 仅看命中' : '· 点此筛选'),
+          ? kpiStat('k11', findings, '审查' + (onlyFlagged ? '（仅看命中）' : '（点此筛选）'),
               '事实 ' + audit.counts.fact + ' 条 / 推断 ' + audit.counts.inferred + ' 条；点一下只看命中行',
               audit.counts.fact > 0 ? 'warn' : 'dim',
               function () { setOnlyFlagged(!onlyFlagged); })
-          : kpiCell('k11', 0, '审查无发现', '本轮审查没有命中任何规则', 'ok'));
+          : kpiStat('k11', 0, '审查无发现', '本轮审查没有命中任何规则', 'ok'));
       }
-      var kpiEl = kpiCells.length > 0 ? h('div', { className: 'das-kpi' }, kpiCells) : null;
+      var kpiEl = kpiCells.length > 0 ? h('div', { className: 'das-stats', role: 'group' }, kpiCells) : null;
 
       /* 「本轮结果」不再单独占一张表（用户报的那张灰表 + 动作列竖排就是它）：
          批量进度压成一条状态提示，逐项结果贴回对应对象行；口径原文进提示的 title，
@@ -1161,7 +1166,7 @@ window.__ModuleLoader__.load({
       var lockExplain = lockNote(batch, locked, lockedCount, IS_SKILL, lockReason, lockedAt);
       if (batch && batch.running === true) {
         resultHint = h('div', { className: 'das-note', role: 'status', title: lockExplain }, chip('rh', '执行中', 'info'), h('span', { className: 'das-note-text' },
-          (IS_SKILL ? '技能更新' : '插件更新') + ' ' + (Number(batch.index || 0) + 1) + '/' + Number(batch.total || 0) + '，宿主正在串行处理；下表会实时合并结果。'));
+          (IS_SKILL ? '技能更新' : '插件更新') + ' ' + (Number(batch.index || 0) + 1) + '/' + Number(batch.total || 0) + ' · 下表实时合并结果'));
       } else if (results.length > 0) {
         var failedResults = results.filter(function (item) { return isBad(item.state); }).length;
         var changedResults = results.filter(function (item) { return item.state === 'updated' || item.state === 'applied' || item.state === 'generated' || item.state === 'restored'; }).length;
@@ -1169,7 +1174,7 @@ window.__ModuleLoader__.load({
         var resultScope = locked ? '已锁定 ' + lockedCount + ' 行' : '按最新快照';
         resultHint = h('div', { className: 'das-note' + (interruptedResult ? '' : (failedResults > 0 ? ' is-err' : ' is-ok')), role: 'status', title: lockExplain },
           chip('rh', interruptedResult ? '已中断（未完成）' : (failedResults > 0 ? '有失败' : '已完成'), interruptedResult ? 'warn' : (failedResults > 0 ? 'err' : 'ok')),
-          h('span', { className: 'das-note-text' }, '本轮处理 ' + results.length + ' 项' + (changedResults ? ' · 已变化 ' + changedResults : '') + (failedResults ? ' · 失败 ' + failedResults : '') + ' · ' + resultScope + '；逐项说明已并入下表。'));
+          h('span', { className: 'das-note-text' }, '本轮处理 ' + results.length + ' 项' + (changedResults ? ' · 已变化 ' + changedResults : '') + (failedResults ? ' · 失败 ' + failedResults : '') + ' · ' + resultScope));
       }
 
       /* 行按钮与「本轮结果」记录一致时不必再说；一旦行按钮不再代表那一轮（记录已超期、锁已释放），
