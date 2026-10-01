@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * render-smoke.mjs — 客户端半体的**真渲染**冒烟测试（v2.8.0 新增，常驻）
  *
@@ -186,7 +186,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.10.2'
+const REV = '2.10.3'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 

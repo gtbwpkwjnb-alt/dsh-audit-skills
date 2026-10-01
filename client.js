@@ -1,4 +1,4 @@
-/* dsh-audit-skills — 客户端半体
+﻿/* dsh-audit-skills — 客户端半体
  *
  * 形态要求（不可违反）：DSH 以传统 <script> 加载 client.js，
  * 不得有顶层 import/export，必须用 window.__ModuleLoader__.load({ id, factory }) 注册。
@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.2';
+    var CLIENT_REV = '2.10.3';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -55,12 +55,15 @@ window.__ModuleLoader__.load({
        而客户端半体是热更新的，所以用这份仓库数据兜底，让列表在旧宿主下也能直接显示优化结果。
        只含仓库内置条目；用户覆盖层（LLM 生成）不在其中，缺失时如实说明而不是编造。 */
     var CATALOG_ZH = {
+      "@changfenhuang/dsh-annotation": ["@changfenhuang/dsh-annotation（划词批注）","选中助手回复中的文字即可批注，回车随消息一起发送；模型按编号逐条回应，回复里带可悬停的批注标签。只作用于对话输入，不改变模型能力。"],
       "@furongjun1999/dsh-memory": ["@furongjun1999/dsh-memory（灵枢记忆）","长期记忆与知识飞轮：对话自动沉淀为 md_cg 认知图，带自我认知与递归反思。会在每轮对话注入记忆上下文。"],
       "@linxin666/dsh-remote-web-ui": ["@linxin666/dsh-remote-web-ui（远程访问）","扫码把手机与电脑配对到同一个 Web GUI：一次性令牌、可撤销设备会话、局域网绑定开关与可选的 Cloudflare 隧道。"],
       "dsh-better-sidebar": ["dsh-better-sidebar（增强侧边栏）","右侧栏提供文件树、编辑器、文件变动、任务与侧边对话，每个会话独立。仅改变界面，不改变模型能力。"],
+      "dsh-computer-use-win": ["dsh-computer-use-win（Windows 桌面操控）","让模型读取并操作真实 Windows 桌面应用：UI Automation 树、截图、键入、OCR 与窗口管理。经 MCP 桥接，需 @deepseek-ai/dsh-mcp-client；会真实操作桌面，注意授权范围。"],
       "dsh-context": ["dsh-context（上下文洞察）","上下文洞察与管理：仪表盘、上下文浏览器、上下文动态与 /context 命令，看清上下文的构成与演变。只做分析，不改写会话内容。"],
       "dsh-find-plugins": ["dsh-find-plugins（插件检索）","在全 DSH 插件生态里按能力检索：聚合多个社区目录 + GitHub/npm 实时搜索，按相关度×可信度×新鲜度排序。只做发现，不负责安装。"],
       "dsh-free-search": ["dsh-free-search（免费搜索）","接管内置 web_search：13 个引擎自动降级，默认免 API key，支持时间过滤与平台搜索。只负责搜索，不接管网页抓取。"],
+      "dsh-plugin-marketplace": ["dsh-plugin-marketplace（DSH插件市场）","浏览并安装 GitHub 上标记为 topic:dsh-plugin 的 DSH 插件。插件来源完全依赖该 GitHub topic，只提供浏览与安装，安装操作会在本地新增插件。"],
       "dsh-web-fetch-playwright": ["dsh-web-fetch-playwright（浏览器抓取）","为 web_fetch 提供浏览器后端：真实浏览器渲染后经 Readability 去噪返回 Markdown。只负责抓取，不是搜索提供方。"],
       "dsh-whale-widget": ["dsh-whale-widget（余额小鲸鱼）","右下角挂件：显示 DeepSeek 余额、今日用量与峰谷定价，可自定义气泡、角色与音效。纯前端展示，不参与对话。"],
     };

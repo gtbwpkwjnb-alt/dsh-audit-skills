@@ -91,6 +91,39 @@
         "title": "dsh-find-plugins（插件检索）",
         "description": "在全 DSH 插件生态里按能力检索：聚合多个社区目录 + GitHub/npm 实时搜索，按相关度×可信度×新鲜度排序。只做发现，不负责安装。"
       }
+    },
+    {
+      "pkg": "@changfenhuang/dsh-annotation",
+      "en": {
+        "title": "@changfenhuang/dsh-annotation",
+        "description": "Selection-annotation for assistant replies: select text, annotate, press Enter to send the annotation with your message; the model answers each annotation by number with hoverable chips. Input-side only."
+      },
+      "zh": {
+        "title": "@changfenhuang/dsh-annotation（划词批注）",
+        "description": "选中助手回复中的文字即可批注，回车随消息一起发送；模型按编号逐条回应，回复里带可悬停的批注标签。只作用于对话输入，不改变模型能力。"
+      }
+    },
+    {
+      "pkg": "dsh-computer-use-win",
+      "en": {
+        "title": "dsh-computer-use-win",
+        "description": "Let the model read and act on real Windows desktop apps via a bundled MCP stdio server plus a PowerShell UI Automation backend. Bridged through dsh-mcp-client, so it needs that client; it really operates your desktop."
+      },
+      "zh": {
+        "title": "dsh-computer-use-win（Windows 桌面操控）",
+        "description": "让模型读取并操作真实 Windows 桌面应用：UI Automation 树、截图、键入、OCR 与窗口管理。经 MCP 桥接，需 @deepseek-ai/dsh-mcp-client；会真实操作桌面，注意授权范围。"
+      }
+    },
+    {
+      "pkg": "dsh-plugin-marketplace",
+      "en": {
+        "title": "dsh-plugin-marketplace",
+        "description": "Browse and install DSH plugins listed under the GitHub topic dsh-plugin. Its plugin source depends entirely on that GitHub topic, and installing a plugin adds it to your local DSH setup."
+      },
+      "zh": {
+        "title": "dsh-plugin-marketplace（DSH插件市场）",
+        "description": "浏览并安装 GitHub 上标记为 topic:dsh-plugin 的 DSH 插件。插件来源完全依赖该 GitHub topic，只提供浏览与安装，安装操作会在本地新增插件。"
+      }
     }
   ]
 }

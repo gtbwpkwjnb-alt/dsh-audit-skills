@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.10.3 — 2026-10-01 · 内置 catalog 扩到 11 条（本机 6/7 已装插件刷新即见中文）
+
+- 内置 catalog 从 8 条扩到 11 条，补入三个**公开**插件：`@changfenhuang/dsh-annotation`（划词批注）、
+  `dsh-computer-use-win`（Windows 桌面操控）、`dsh-plugin-marketplace`（DSH插件市场）。
+  文案与它们在本机覆盖层里**已验证生效**的一致（`en` 原文同时保留，便于以后复核）。
+- 客户端快照随之重新生成（11 条），旧宿主兜底范围扩大。
+- 刻意**不**把本插件自己写进 catalog：那会让 `apply` 反过来改写自己已发布包里的
+  `locale/zh.json`，属于自伤（包一升级就被 pnpm 还原，来回打架）。
+- 效果：本机 7 个已装插件里 **6 行刷新页面即显示中文名 + 中文说明**；第 7 行（本插件自己）
+  仍如实说明「宿主未提供中文名，重启后显示」。
+- 漂移闸门保持：regression 逐条比对 11/11 一致。
+- 闸门：preflight ALL PASS · render-smoke 95/0 · regression 311/0。
+
 ## 2.10.2 — 2026-10-01 · 旧宿主兜底：内置 catalog 中文快照（刷新即见中文，不必等重启）
 
 考古结论（代码层面确证，不是猜测）：2.8.0 的 `index.js` 里 `displayName` 只出现 **2 次，全是技能行**；
