@@ -186,7 +186,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.10.0'
+const REV = '2.10.1'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -196,7 +196,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true, inCatalog: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.10.0', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.10.1', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -229,7 +229,7 @@ const SKILL_ROWS = [
   skillRow({ pkg: 'agent-reach', version: '1.6.0', localized: false, needsText: true, descriptionLang: '英文' }),
   skillRow({ pkg: 'cangjie-skill', version: '0.2.0', localized: false, needsText: true }),
   skillRow({ pkg: 'gpt-tasteskill', version: '1.0.0', localized: false, needsText: true }),
-  skillRow({ pkg: 'learn', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/learn', sourceLabel: 'GitHub 原作者仓库', sourceUrl: 'https://github.com/x/learn', branch: 'main', localSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', remoteSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', hasUpdate: false, dirty: 3, purpose: '把长视频与播客蒸馏成可执行方法论', localizedDescription: '中文说明：学习一个视频并生成闪卡' }),
+  skillRow({ pkg: 'learn', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/learn', sourceLabel: 'GitHub 原作者仓库', sourceUrl: 'https://github.com/x/learn', branch: 'main', localSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', remoteSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', hasUpdate: false, dirty: 3, displayName: 'learn（学习一个视频）', purpose: '把长视频与播客蒸馏成可执行方法论', localizedDescription: '中文说明：学习一个视频并生成闪卡' }),
   skillRow({ pkg: 'luopan', version: null, localized: false, needsText: true, descriptionLang: '中文' }),
   skillRow({ pkg: 'ponytail', version: null, localized: false, needsText: true }),
   skillRow({ pkg: 'ruofeng-adversarial-review', version: '0.1.0', localized: false, needsText: true }),
@@ -422,6 +422,9 @@ check('版本 chip 同时给出客户端与宿主版本', staleText.includes('v'
    其余仍单行；密度靠字号与省略号控制。 */
 check('【主功能】中文名优先展示，不再把「包名（中文）」整串塞进行内',
   staleText.includes('划词批注') && !staleText.includes('（划词批注） · '), staleText.slice(0, 160))
+/* 页面自己要把「本插件干什么」说清楚（用户：功能与简介缺乏展示） */
+check('【主功能】页面用一句话讲清价值，而不是只讲命名约定',
+  staleText.includes('精炼成中文') && staleText.includes('Plugins 页'), staleText.slice(0, 200))
 check('【主功能】原包名仍可见（退为次级），不因中文名而丢失',
   staleText.includes('@changfenhuang/dsh-annotation'))
 check('【主功能】优化后的中文说明直接可见（不再是只在悬停里）',
@@ -545,11 +548,22 @@ const mmText = textOf(mismatch.pluginTree)
 const mmTitles = titlesOf(mismatch.pluginTree)
 check('渲染无异常', mismatch.errors.length === 0, mismatch.errors.map((e) => e.message).join(' | '))
 check('不一致仍被如实指出，并给出下一步', mmText.includes('落后于客户端') && mmText.includes('重启 DSH'), 'mmText=' + mmText.slice(0, 200))
+/* 宿主太旧时，必须说出「为什么看不到中文名/说明」——实测 2.8.0 宿主对插件行不发 displayName */
+check('【主功能】宿主太旧时明确告知：重启后才能看到插件的中文名与说明',
+  mmText.includes('重启 DSH 后才能看到插件的中文名'), mmText.slice(0, 220))
 check('【密度】长解释不再占版面（只在 title 里可悬停读到）',
   !mmText.includes('因此可能缺少本页需要的接口') && !mmText.includes('宿主半体是旧的') &&
   mmTitles.includes('因此可能缺少本页需要的接口') && mmTitles.includes('请重启 DSH。'), 'titles=' + mmTitles.slice(0, 120))
 check('技能页同样渲染成一条紧凑数据带',
   elementsOf(stale.skillTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0).length === 1)
+/* 旧宿主（对插件行不发 displayName）下，「已优化」却不显示中文名必须被解释清楚 */
+backToPlugin(mismatch.loaded)
+const noNameRow = elementsOf(mismatch.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-better-sidebar'))[0]
+check('【主功能】本地化但没有中文名的行可悬停（用于说明原因）',
+  !!noNameRow && typeof noNameRow.props.onMouseEnter === 'function')
+if (noNameRow && typeof noNameRow.props.onMouseEnter === 'function') noNameRow.props.onMouseEnter()
+const noNameText = textOf((await renderSettled(mismatch.loaded.rt, mismatch.element)).tree)
+check('【主功能】槽位写出「宿主未提供中文名，重启后可见」', noNameText.includes('未提供中文名'), noNameText.slice(0, 240))
 
 // ───────────────────────── 6 技能视图 ─────────────────────────
 console.log('\n4 技能视图 · 版本/修订回落链与来源压缩')
@@ -564,6 +578,8 @@ check('技能来源显示 GitHub 原作者仓库，不刷本地 Windows 路径',
 check('如实标出本地改动文件数', skillText.includes('本地改动 3 个文件') && skillText.includes('本地改动 2 个文件'))
 check('技能页 KPI 含本地目录 / 随 DSH 提供 / 有本地改动 / 描述为英文', skillText.includes('本地目录') && skillText.includes('随 DSH 提供') && skillText.includes('有本地改动') && skillText.includes('描述为英文'))
 check('技能页版本列表头写明「版本 / 修订」与「来源 / 远端」', skillText.includes('版本 / 修订') && skillText.includes('来源 / 远端'))
+check('【主功能】技能侧中文名同样优先展示（不再整串「包名（中文）」）',
+  skillText.includes('学习一个视频') && !skillText.includes('（学习一个视频） · '), skillText.slice(0, 160))
 check('技能页说明写入边界但不铺陈长段落', skillText.includes('翻译会写入 SKILL.md 并保留备份') && !skillText.includes('技能改写会真实写入 SKILL.md'))
 check('技能视图不出现插件批量记录（两页各自渲染自己的更新结果）', !skillText.includes('安装已执行，但版本未变'))
 check('技能视图文本里没有 undefined', !/\bundefined\b/.test(skillText), skillText.slice(0, 160))
@@ -590,7 +606,7 @@ const rowConfig = inline.registered.find((r) => r.desc.name === 'plugins.row.con
 const summary = rowConfig.component({ view: 'summary' })
 check('summary 视图返回一句话说明', typeof summary === 'string' && summary.includes('翻译优化'))
 const inlineTree = (await renderSettled(inline.rt, rowConfig.component({ view: 'full' }))).tree
-check('full 视图渲染出完整面板', textOf(inlineTree).includes('dsh-free-search') && textOf(inlineTree).includes('插件视图'))
+check('full 视图渲染出完整面板', textOf(inlineTree).includes('dsh-free-search') && textOf(inlineTree).includes('精炼成中文'))
 check('full 视图无异常且无 undefined', inline.rt.errors.length === 0 && !/\bundefined\b/.test(textOf(inlineTree)))
 
 console.log('\nRENDER SMOKE  pass=' + pass + '  fail=' + fail)

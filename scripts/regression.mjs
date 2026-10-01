@@ -438,6 +438,13 @@ check('自愈不污染「本轮结果」（自愈不是用户点的动作）',
 check('无表情符号（gpt-tasteskill 硬规则：不得使用 emoji）',
   (clientSrc.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu) || []).length === 0,
   (clientSrc.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu) || []).join(''))
+check('客户端：中文名优先展示对**两个视图**都生效（技能侧同样拆开）',
+  clientSrc.includes('var zhName = zhNameOf(r.displayName, r.pkg);') && clientSrc.includes('function zhNameOf('))
+check('客户端：首屏第一句讲价值（不是命名约定），机制说明退到 title',
+  clientSrc.includes('把插件的英文标题与说明精炼成中文') && clientSrc.includes('Plugins 页会直接显示中文') &&
+  clientSrc.includes('命名约定：标题保留原包名'))
+check('客户端：宿主太旧时解释「为什么没有中文名」（区分宿主未提供 / 条目本来没有）',
+  clientSrc.includes('重启 DSH 后才能看到插件的中文名与说明') && clientSrc.includes('未提供中文名') && clientSrc.includes('该条目没有中文名'))
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')

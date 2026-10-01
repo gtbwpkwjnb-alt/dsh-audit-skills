@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.0';
+    var CLIENT_REV = '2.10.1';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -1199,7 +1199,9 @@ window.__ModuleLoader__.load({
         ? h('div', { className: 'das-note is-err', title: revExplain },
             chip('sg', '版本不一致', 'err'),
             h('span', { className: 'das-note-text' }, revGap
-              ? '宿主半体 v' + hostRev + ' 落后于客户端 v' + CLIENT_REV + ' · 重启 DSH 生效'
+              ? (compareRev(hostRev, CLIENT_REV) < 0
+                ? '宿主半体 v' + hostRev + ' 落后于客户端 v' + CLIENT_REV + ' · 重启 DSH 后才能看到插件的中文名与说明'
+                : '客户端半体 v' + CLIENT_REV + ' 落后于宿主 v' + hostRev + ' · 刷新页面生效')
               : '宿主半体版本过旧 · 重启 DSH 后重试'))
         : null;
 
@@ -1352,7 +1354,7 @@ window.__ModuleLoader__.load({
                 /* 主功能展示：中文名做主标题、原包名次级、优化后的中文说明直接占一行。
                    过去把「包名（中文名） · 包名」整串塞进一格，等于把中文名藏起来、
                    还让列表看不到任何优化结果 —— 用户为此专门提过两次。 */
-                var zhName = IS_SKILL ? '' : zhNameOf(r.displayName, r.pkg);
+                var zhName = zhNameOf(r.displayName, r.pkg);
                 var primaryName = zhName !== '' ? zhName : (r.displayName || r.pkg);
                 var showPkg = zhName !== '' || (r.displayName && r.displayName !== r.pkg) ? r.pkg : '';
                 var optimizeTitle = (readOnly
@@ -1449,7 +1451,16 @@ window.__ModuleLoader__.load({
         var dFacts = (d.findings || []).filter(function (f) { return f.confidence === 'fact'; });
         var dInferred = (d.findings || []).filter(function (f) { return f.confidence !== 'fact'; });
         var pairs = [];
-        pairs.push(['名称', (d.displayName && d.displayName !== d.pkg) ? d.displayName + '（' + d.pkg + '）' : d.pkg]);
+        /* 名称这一行要解释「为什么没有中文名」——否则「已优化」却不显示中文，用户只会觉得坏了。
+           两种成因分开说：宿主太旧没提供（重启即可），或该条目本来就只有原包名。 */
+        var nameMissingHost = revGap && compareRev(hostRev, CLIENT_REV) < 0;
+        pairs.push(['名称', (d.displayName && d.displayName !== d.pkg)
+          ? d.displayName + '（' + d.pkg + '）'
+          : (d.pkg + (d.localized === true
+            ? (nameMissingHost
+              ? '（宿主半体 v' + hostRev + ' 未提供中文名 —— 重启 DSH 后这里会显示）'
+              : '（该条目没有中文名，只有原包名）')
+            : ''))]);
         if (d.localizedDescription) pairs.push(['中文说明', d.localizedDescription]);
         if (IS_SKILL && d.purpose) pairs.push(['作用', d.purpose]);
         if (IS_SKILL && d.descriptionLang) pairs.push(['描述语言', d.descriptionLang]);
@@ -1489,9 +1500,16 @@ window.__ModuleLoader__.load({
             chip('cr', 'v' + CLIENT_REV, 'dim', '客户端半体版本（随页面刷新热更新）', true),
             chip('hr', hostRev ? '宿主 v' + hostRev : '宿主未知', revGap ? 'err' : 'dim',
               '宿主半体只在 DSH 进程启动时加载一次；它与客户端版本不一致时，新接口可能不存在', true)),
-          h('p', { className: 'das-sub' }, IS_SKILL
-            ? '技能视图：一源数据、一套规则。技能不是 npm 包，因此没有可比的「最新版本」——「版本 / 修订」显示 SKILL.md 声明的 version，未声明就回落到 git 提交号。'
-            : '插件视图：命名约定为标题保留原包名、中文名以（）附加。刷新即包含状态、版本与更新检查（同一份快照）。')),
+          /* 首屏第一句必须讲「本插件给你什么」，而不是讲命名约定 ——
+             用户原话：当前对插件的功能、简介缺乏展示。命名约定这类机制说明退到 title。 */
+          h('p', {
+            className: 'das-sub',
+            title: IS_SKILL
+              ? '命名约定：name 保留原文，中文名以（）附加；技能不是 npm 包，版本取 SKILL.md 声明的 version，未声明则回落到 git 提交号。'
+              : '命名约定：标题保留原包名，中文名以（）附加；中文化写入插件自身的 locale，因此 DSH 内置 Plugins 页会原生显示中文。',
+          }, IS_SKILL
+            ? '把技能的英文说明精炼成中文，写回 SKILL.md —— 下次对话里模型就是按这份中文描述来选择技能；本页同时汇总来源、修订与描述语言。'
+            : '把插件的英文标题与说明精炼成中文（保留原包名），写入插件自身的 locale —— DSH 内置的 Plugins 页会直接显示中文。本页同时汇总版本、更新与冲突。')),
         head,
         staleEl,
         kpiEl,
