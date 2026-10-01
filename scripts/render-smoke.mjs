@@ -186,7 +186,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.10.1'
+const REV = '2.10.2'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -423,8 +423,19 @@ check('版本 chip 同时给出客户端与宿主版本', staleText.includes('v'
 check('【主功能】中文名优先展示，不再把「包名（中文）」整串塞进行内',
   staleText.includes('划词批注') && !staleText.includes('（划词批注） · '), staleText.slice(0, 160))
 /* 页面自己要把「本插件干什么」说清楚（用户：功能与简介缺乏展示） */
-check('【主功能】页面用一句话讲清价值，而不是只讲命名约定',
-  staleText.includes('精炼成中文') && staleText.includes('Plugins 页'), staleText.slice(0, 200))
+/* ── 旧宿主兜底：内置 catalog 中文快照（宿主 <2.9 的插件行不发 displayName/localizedDescription） ── */
+const cj = JSON.parse(fs.readFileSync(path.join(REPO, 'references', 'dsh-plugin-locale-catalog.json'), 'utf8'))
+const zhOf = (pkg) => { const e = cj.entries.find((x) => x.pkg === pkg); return e && e.zh ? e.zh : null }
+const side = zhOf('dsh-better-sidebar')
+const sideName = side ? /[（(]([^（()）]+)[)）]\s*$/.exec(side.title)[1] : ''
+check('【主功能】旧宿主下用内置快照显示中文名（不必等重启）',
+  sideName !== '' && staleText.includes(sideName), '期望中文名=' + sideName + ' | ' + staleText.slice(0, 160))
+check('【主功能】旧宿主下连中文说明也显示，并标注来源是内置快照',
+  !!side && staleText.includes(String(side.description).slice(0, 12)) && staleTitles.includes('来自客户端内置快照'),
+  'desc前12=' + JSON.stringify(side && String(side.description).slice(0, 12)) + ' text命中=' + (!!side && staleText.includes(String(side.description).slice(0, 12))) +
+  ' title命中=' + staleTitles.includes('来自客户端内置快照'))
+check('【主功能】快照只覆盖内置 catalog：不在快照里的行仍如实说明（不编造）',
+  !staleText.includes('dsh-sidebar-qa（'), staleText.slice(0, 160))
 check('【主功能】原包名仍可见（退为次级），不因中文名而丢失',
   staleText.includes('@changfenhuang/dsh-annotation'))
 check('【主功能】优化后的中文说明直接可见（不再是只在悬停里）',
@@ -556,9 +567,9 @@ check('【密度】长解释不再占版面（只在 title 里可悬停读到）
   mmTitles.includes('因此可能缺少本页需要的接口') && mmTitles.includes('请重启 DSH。'), 'titles=' + mmTitles.slice(0, 120))
 check('技能页同样渲染成一条紧凑数据带',
   elementsOf(stale.skillTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0).length === 1)
-/* 旧宿主（对插件行不发 displayName）下，「已优化」却不显示中文名必须被解释清楚 */
+/* 旧宿主（对插件行不发 displayName）下：不在内置快照里的行必须解释清楚为什么没有中文 */
 backToPlugin(mismatch.loaded)
-const noNameRow = elementsOf(mismatch.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-better-sidebar'))[0]
+const noNameRow = elementsOf(mismatch.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-sidebar-qa'))[0]
 check('【主功能】本地化但没有中文名的行可悬停（用于说明原因）',
   !!noNameRow && typeof noNameRow.props.onMouseEnter === 'function')
 if (noNameRow && typeof noNameRow.props.onMouseEnter === 'function') noNameRow.props.onMouseEnter()

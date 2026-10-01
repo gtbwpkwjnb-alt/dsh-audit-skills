@@ -45,11 +45,26 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.1';
+    var CLIENT_REV = '2.10.2';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
     var LOCK_MS = 10 * 60 * 1000;
+    /* @catalog-snapshot:start（由 scripts/build-client-catalog.mjs 生成，勿手改） */
+    /* 内置 catalog 的中文快照（8 条以内、约 1KB）：旧宿主（<2.9）不发 displayName/localizedDescription，
+       而客户端半体是热更新的，所以用这份仓库数据兜底，让列表在旧宿主下也能直接显示优化结果。
+       只含仓库内置条目；用户覆盖层（LLM 生成）不在其中，缺失时如实说明而不是编造。 */
+    var CATALOG_ZH = {
+      "@furongjun1999/dsh-memory": ["@furongjun1999/dsh-memory（灵枢记忆）","长期记忆与知识飞轮：对话自动沉淀为 md_cg 认知图，带自我认知与递归反思。会在每轮对话注入记忆上下文。"],
+      "@linxin666/dsh-remote-web-ui": ["@linxin666/dsh-remote-web-ui（远程访问）","扫码把手机与电脑配对到同一个 Web GUI：一次性令牌、可撤销设备会话、局域网绑定开关与可选的 Cloudflare 隧道。"],
+      "dsh-better-sidebar": ["dsh-better-sidebar（增强侧边栏）","右侧栏提供文件树、编辑器、文件变动、任务与侧边对话，每个会话独立。仅改变界面，不改变模型能力。"],
+      "dsh-context": ["dsh-context（上下文洞察）","上下文洞察与管理：仪表盘、上下文浏览器、上下文动态与 /context 命令，看清上下文的构成与演变。只做分析，不改写会话内容。"],
+      "dsh-find-plugins": ["dsh-find-plugins（插件检索）","在全 DSH 插件生态里按能力检索：聚合多个社区目录 + GitHub/npm 实时搜索，按相关度×可信度×新鲜度排序。只做发现，不负责安装。"],
+      "dsh-free-search": ["dsh-free-search（免费搜索）","接管内置 web_search：13 个引擎自动降级，默认免 API key，支持时间过滤与平台搜索。只负责搜索，不接管网页抓取。"],
+      "dsh-web-fetch-playwright": ["dsh-web-fetch-playwright（浏览器抓取）","为 web_fetch 提供浏览器后端：真实浏览器渲染后经 Readability 去噪返回 Markdown。只负责抓取，不是搜索提供方。"],
+      "dsh-whale-widget": ["dsh-whale-widget（余额小鲸鱼）","右下角挂件：显示 DeepSeek 余额、今日用量与峰谷定价，可自定义气泡、角色与音效。纯前端展示，不参与对话。"],
+    };
+/* @catalog-snapshot:end */
 
     /** 比较点分版本号；非数字段按 0 算。 */
     function compareRev(a, b) {
@@ -513,7 +528,21 @@ window.__ModuleLoader__.load({
       return '';
     }
 
-    /** 技能来源里的根目录压短成 .dsh/skills、.agents/skills，省掉整条 Windows 路径。 */    function shortRoot(source) {
+    /**
+     * 内置 catalog 的中文快照查询（只含仓库内置条目）。
+     * 用途：宿主 <2.9 的插件行**不发** displayName/localizedDescription（2.8.0 的 index.js 里
+     * displayName 只出现在技能行），于是「已优化」的行不显示任何中文 —— 用户会以为功能没生效。
+     * 客户端半体是热更新的，所以用这份快照兜底。用户覆盖层（LLM 生成）不在快照里，
+     * 命中不了就如实说明，绝不编造。
+     */
+    function catalogZh(pkg) {
+      var hit = CATALOG_ZH[pkg];
+      if (!hit) return null;
+      return { name: zhNameOf(hit[0], pkg), desc: hit[1] || '' };
+    }
+
+    /** 技能来源里的根目录压短成 .dsh/skills、.agents/skills，省掉整条 Windows 路径。 */
+    function shortRoot(source) {
       return String(source === undefined || source === null ? '' : source).replace(/[A-Za-z]:\\[^·]*[\\/](\.dsh|\.agents)[\\/]skills/, '$1/skills');
     }
 
@@ -1355,6 +1384,13 @@ window.__ModuleLoader__.load({
                    过去把「包名（中文名） · 包名」整串塞进一格，等于把中文名藏起来、
                    还让列表看不到任何优化结果 —— 用户为此专门提过两次。 */
                 var zhName = zhNameOf(r.displayName, r.pkg);
+                /* 宿主没给中文名时用内置快照兜底（仅当这一行的中文确实已落盘，
+                   免得「还没应用」的行也显示中文，反而误导） */
+                var snap = zhName === '' ? catalogZh(r.pkg) : null;
+                var useSnap = snap !== null && r.localized === true;
+                if (useSnap && snap.name !== '') zhName = snap.name;
+                var descText = r.localizedDescription || (useSnap ? snap.desc : '');
+                var descFromSnap = useSnap && !r.localizedDescription;
                 var primaryName = zhName !== '' ? zhName : (r.displayName || r.pkg);
                 var showPkg = zhName !== '' || (r.displayName && r.displayName !== r.pkg) ? r.pkg : '';
                 var optimizeTitle = (readOnly
@@ -1362,15 +1398,15 @@ window.__ModuleLoader__.load({
                     ? '该对象来自 DSH 内置运行时，在 app.asar 内没有可写路径，不参与翻译优化。'
                     : '该对象由宿主管理，当前没有可写路径，不参与翻译优化。')
                   : (r.localized ? '文案已落盘' : (r.needsText ? '还没有文案条目，需要调用模型生成' : '已有文案但未落盘，点「翻译优化」应用')))
-                  + (r.localizedDescription ? ' 说明：' + r.localizedDescription : '');
+                  + (descText ? ' 说明：' + descText : '');
                 /* 一行一项：行内只留 名称 · 优化状态 · 版本 · 更新状态(+本轮记录) · 操作。
                    中文说明、作用、描述语言、管理器异常、审查标题、原名统统进悬停槽与 title。 */
                 var cells = [
                   h('td', { className: 'das-name' },
                     h('span', { className: 'das-name-main', title: r.pkg }, primaryName),
                     showPkg !== '' ? h('span', { className: 'das-name-pkg', title: r.pkg }, showPkg) : null,
-                    r.localizedDescription
-                      ? h('div', { className: 'das-desc-line', title: r.localizedDescription }, r.localizedDescription)
+                    descText
+                      ? h('div', { className: 'das-desc-line', title: descText + (descFromSnap ? '（来自客户端内置快照；宿主未提供，重启 DSH 后由宿主提供）' : '') }, descText)
                       : null),
                   h('td', null,
                     chip('lo', stateText2, stateTone, optimizeTitle),
@@ -1452,16 +1488,21 @@ window.__ModuleLoader__.load({
         var dInferred = (d.findings || []).filter(function (f) { return f.confidence !== 'fact'; });
         var pairs = [];
         /* 名称这一行要解释「为什么没有中文名」——否则「已优化」却不显示中文，用户只会觉得坏了。
-           两种成因分开说：宿主太旧没提供（重启即可），或该条目本来就只有原包名。 */
+           三种情况分开说：宿主给了／内置快照兜底（并标注来源）／确实没有（宿主太旧 或 条目本来没有）。 */
         var nameMissingHost = revGap && compareRev(hostRev, CLIENT_REV) < 0;
+        var dSnap = (!d.displayName || d.displayName === d.pkg) ? catalogZh(d.pkg) : null;
+        var dUseSnap = dSnap !== null && d.localized === true && dSnap.name !== '';
         pairs.push(['名称', (d.displayName && d.displayName !== d.pkg)
           ? d.displayName + '（' + d.pkg + '）'
-          : (d.pkg + (d.localized === true
-            ? (nameMissingHost
-              ? '（宿主半体 v' + hostRev + ' 未提供中文名 —— 重启 DSH 后这里会显示）'
-              : '（该条目没有中文名，只有原包名）')
-            : ''))]);
+          : (dUseSnap
+            ? dSnap.name + '（' + d.pkg + '）· 来自客户端内置快照'
+            : (d.pkg + (d.localized === true
+              ? (nameMissingHost
+                ? '（宿主半体 v' + hostRev + ' 未提供中文名 —— 重启 DSH 后这里会显示）'
+                : '（该条目没有中文名，只有原包名）')
+              : '')))]);
         if (d.localizedDescription) pairs.push(['中文说明', d.localizedDescription]);
+        else if (dUseSnap && dSnap.desc) pairs.push(['中文说明', dSnap.desc + (nameMissingHost ? '（来自客户端内置快照；宿主 v' + hostRev + ' 未提供，重启后由宿主提供）' : '（来自客户端内置快照）')]);
         if (IS_SKILL && d.purpose) pairs.push(['作用', d.purpose]);
         if (IS_SKILL && d.descriptionLang) pairs.push(['描述语言', d.descriptionLang]);
         pairs.push([IS_SKILL ? '修订' : '版本', (IS_SKILL ? skillRevision(d).text : (d.version || '—')) +

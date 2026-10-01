@@ -445,6 +445,27 @@ check('客户端：首屏第一句讲价值（不是命名约定），机制说�
   clientSrc.includes('命名约定：标题保留原包名'))
 check('客户端：宿主太旧时解释「为什么没有中文名」（区分宿主未提供 / 条目本来没有）',
   clientSrc.includes('重启 DSH 后才能看到插件的中文名与说明') && clientSrc.includes('未提供中文名') && clientSrc.includes('该条目没有中文名'))
+// ── A5e：内置 catalog 中文快照（旧宿主兜底）+ 漂移闸门 ──
+// 宿主 <2.9 的插件行不发 displayName/localizedDescription（2.8.0 的 index.js 里 displayName 只在技能行），
+// 所以客户端内联一份仓库内置 catalog 的中文快照；这里校验它与 catalog 文件**逐条一致**，防止漂移。
+{
+  const catJson = JSON.parse(fs.readFileSync(path.join(REPO, 'references', 'dsh-plugin-locale-catalog.json'), 'utf8'))
+  const entries = (catJson.entries || []).filter((e) => e && e.zh && typeof e.zh.title === 'string')
+  const blockSrc = clientSrc.slice(clientSrc.indexOf('var CATALOG_ZH = {'), clientSrc.indexOf('/* @catalog-snapshot:end */'))
+  const missing = entries.filter((e) => !blockSrc.includes(JSON.stringify(e.pkg) + ': ' + JSON.stringify([e.zh.title, e.zh.description || '']) + ','))
+  check('客户端内联的 catalog 中文快照与 references/dsh-plugin-locale-catalog.json 逐条一致（无漂移）',
+    blockSrc !== '' && missing.length === 0,
+    '缺失/不一致 ' + missing.length + '/' + entries.length + '：' + missing.map((e) => e.pkg).join(','))
+  check('快照注入脚本存在且支持 --check（漂移时的修复入口）',
+    fs.existsSync(path.join(REPO, 'scripts', 'build-client-catalog.mjs')) &&
+    fs.readFileSync(path.join(REPO, 'scripts', 'build-client-catalog.mjs'), 'utf8').includes('--check'))
+  check('快照只在「宿主没给中文名」且「这一行中文确实已落盘」时才用（不误导待应用的行）',
+    clientSrc.includes('var snap = zhName === \'\' ? catalogZh(r.pkg) : null;') &&
+    clientSrc.includes('var useSnap = snap !== null && r.localized === true;') &&
+    clientSrc.includes('function catalogZh(pkg)'))
+  check('快照来源被如实标注（悬停槽写明来自客户端内置快照）',
+    clientSrc.includes('来自客户端内置快照'))
+}
 const updateAllBody = clientSrc.slice(clientSrc.indexOf('var updateAll ='), clientSrc.indexOf('var s = rows ?'))
 check('客户端不再自己跑更新循环（改由宿主侧执行）', updateAllBody.includes("call('update-all'") && updateAllBody.includes('pollBatch') && !updateAllBody.includes('var step = function'))
 const idxSrcA5 = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
