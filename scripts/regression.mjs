@@ -930,7 +930,19 @@ if (gitOk !== true) {
   fs.rmSync(base13, { recursive: true, force: true })
 }
 check('客户端：插件与技能合并为一页（只注册一个 settings.section）', (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 && clientSrc.includes("'插件与技能审查'"))
-check('客户端：合并页用页内切换区分 插件/技能', clientSrc.includes('function Merged') && clientSrc.includes("tab('plugin'") && clientSrc.includes("tab('skill'") && clientSrc.includes('h(Panel, { key: mode, target: mode })'))
+check('客户端：合并页用页内切换区分 插件/技能（页签与标题同处一行头部）',
+  clientSrc.includes('function Merged') && clientSrc.includes("tab('plugin'") && clientSrc.includes("tab('skill'") &&
+  clientSrc.includes('var segEl = h(') && clientSrc.includes('das-seg') &&
+  clientSrc.includes('h(Panel, { key: mode, target: mode, seg: segEl })') &&
+  clientSrc.includes('props && props.seg ? props.seg : null'))
+check('客户端：悬停详情用锚定浮层（fixed + 钳制视口），不再占用表格下方的槽位',
+  /\.das-hover \{[^}]*position: fixed/.test(clientSrc) && !/\.das-hover \{[^}]*min-height: 52px/.test(clientSrc) &&
+  clientSrc.includes('function placeCard(') && clientSrc.includes('function boxFromEvent(') &&
+  clientSrc.includes('onMouseLeave'))
+check('客户端：随 DSH 提供的对象默认隐藏，但给出数量与显示开关（不静默隐藏）',
+  clientSrc.includes("var bundledList = (rows || []).filter(function (r) { return r.bundled === true; });") &&
+  clientSrc.includes("'随 DSH 提供'") && clientSrc.includes('setShowBundled(!showBundled)') &&
+  clientSrc.includes("r.bundled !== true"))
 check('客户端：技能视图如实声明会写入 SKILL.md（含备份与还原）', clientSrc.includes('技能改写会真实写入 SKILL.md') && clientSrc.includes('.dsh-skill.backup') && clientSrc.includes('行为变更'))
 check('客户端：技能视图把 优化状态 与 描述语言 分栏如实呈现',
   (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 &&

@@ -125,6 +125,7 @@ function createRuntime() {
         } catch (error) {
           /* 复刻 error boundary：类组件声明了 getDerivedStateFromError 就由它兜住。 */
           if (typeof type.getDerivedStateFromError === 'function') {
+            if (process.env.DAS_SMOKE_TRACE) console.error('BOUNDARY ' + (error && error.stack))
             inst.instance.state = Object.assign({}, inst.instance.state, type.getDerivedStateFromError(error))
             return renderNode(inst.instance.render())
           }
@@ -186,7 +187,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.10.4'
+const REV = '2.10.5'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -196,7 +197,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true, inCatalog: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.10.4', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.10.5', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -304,7 +305,7 @@ function loadClient(fetchFn) {
   const state = { calls: [], posted: [] }
   const timers = { n: 0 }
   const sb = {
-    window: { __ModuleLoader__: { load: () => {} } },
+    window: { __ModuleLoader__: { load: () => {} }, innerWidth: 1024, innerHeight: 768 },
     console: { warn: () => {}, error: () => {}, log: () => {} },
     fetch: fetchFn(state),
     setTimeout: (fn, ms) => { if (timers.n > 200) return 0; timers.n += 1; return setTimeout(fn, Math.min(Number(ms) || 0, 5)) },
@@ -336,7 +337,7 @@ function loadClient(fetchFn) {
 async function renderSettled(rt, element) {
   let tree = null
   const safeRender = () => {
-    try { tree = rt.renderNode(element) } catch (error) { rt.errors.push(error); tree = null }
+    try { tree = rt.renderNode(element) } catch (error) { rt.errors.push(error); if (process.env.DAS_SMOKE_TRACE) console.error('RENDER ' + (error && error.stack)); tree = null }
   }
   safeRender()
   for (let i = 0; i < 30; i++) {
@@ -344,7 +345,7 @@ async function renderSettled(rt, element) {
     if (pending.length === 0 && !rt.isDirty()) break
     rt.clearDirty()
     for (const fn of pending) {
-      try { await fn() } catch (error) { rt.errors.push(error) }
+      try { await fn() } catch (error) { rt.errors.push(error); if (process.env.DAS_SMOKE_TRACE) console.error('EFFECT ' + (error && error.stack)) }
     }
     await new Promise((resolve) => setTimeout(resolve, 6))
     safeRender()
@@ -388,9 +389,15 @@ console.log('\n1 插件视图 · 批量记录已完成但已超出锁定保鲜�
 const stale = await scenario(92 * 60 * 1000)
 const staleText = textOf(stale.pluginTree)
 const staleTitles = titlesOf(stale.pluginTree)
+/* 行集合与允许的块级白名单：后面多处复用，定义提前（同一个模块作用域，不能重复声明） */
+const NAME_BLOCKS = ['das-name-main', 'das-desc-line']
+const dataRows = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
 check('渲染无异常（apply / 渲染 / effect 都算）', stale.errors.length === 0, stale.errors.map((e) => e.message).join(' | '))
 check('取到了 /updates 与 /update-all-status', stale.loaded.state.calls.includes('updates') && stale.loaded.state.calls.includes('update-all-status'), stale.loaded.state.calls.join(','))
-check('全部插件成行（' + PLUGIN_ROWS.length + ' 个）', PLUGIN_ROWS.every((r) => staleText.includes(r.pkg)), '缺：' + PLUGIN_ROWS.filter((r) => !staleText.includes(r.pkg)).map((r) => r.pkg).join(','))
+/* 随 DSH 提供的行默认隐藏，所以断言「除内置行外都在表里」 */
+check('全部非内置插件成行（' + PLUGIN_ROWS.filter((r) => r.bundled !== true).length + ' 个）',
+  PLUGIN_ROWS.filter((r) => r.bundled !== true).every((r) => staleText.includes(r.pkg)),
+  '缺：' + PLUGIN_ROWS.filter((r) => r.bundled !== true && !staleText.includes(r.pkg)).map((r) => r.pkg).join(','))
 check('KPI 数据带渲染（可更新 / 待生成文案 / 无法比对）', staleText.includes('可更新') && staleText.includes('待生成文案') && staleText.includes('无法比对'))
 /* ── 用户第二条：KPI 数据带与提示行太占地方（先红后绿） ── */
 const statsBar = elementsOf(stale.pluginTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0)[0]
@@ -399,7 +406,11 @@ check('【密度】KPI 收成一条数据带（.das-stats），不再是格子�
 check('【密度】数据带里没有块级格子（每项都是行内元素）',
   !!statsBar && elementsOf(statsBar.kids, (n) => n.tag === 'div').length === 0,
   statsBar ? 'divs=' + elementsOf(statsBar.kids, (n) => n.tag === 'div').length : '找不到 .das-stats')
-check('内置 bundle 显示随 DSH 提供而不是待生成文案', staleText.includes('@deepseek-ai/dsh-base') && staleText.includes('随 DSH 提供'))
+/* 用户：插件中随 DSH 提供的，隐藏 —— 默认不占列表，但要如实给出数量且能一键显示 */
+check('【内置行】默认隐藏随 DSH 提供的对象（列表里不再出现）',
+  !staleText.includes('@deepseek-ai/dsh-base'), staleText.slice(0, 160))
+check('【内置行】给出隐藏数量并提供显示入口（不是静默隐藏）',
+  staleText.includes('随 DSH 提供') && /点此显示/.test(staleText), staleText.slice(0, 220))
 check('本轮结果合并到状态提示与对象行', staleText.includes('本轮处理 3 项') && staleTitles.includes('安装已执行，但版本未变（仍为 0.5.0）'))
 check('【核心】历史结果不再单独占表，页面说明当前按快照判定', staleText.includes('按最新快照') && !staleText.includes('记录不约束下表'))
 check('超期状态保持紧凑且不重复渲染结果表', (staleText.match(/本轮处理 3 项/g) || []).length === 1)
@@ -467,7 +478,51 @@ check('【密度】名称列单行截断（ellipsis），不靠换行堆叠',
   /\.das-table td \{[^}]*text-overflow: ellipsis/.test(clientSrc))
 check('【更新状态】更新列给出显式状态 chip（已最新 / 不可比）',
   staleText.includes('已最新') && staleText.includes('不可比'))
-check('【悬停】未悬停时槽位给出提示，而不是留一片空白', staleText.includes('把鼠标移到'))
+/* 用户：悬停预览显示在页面下方、要滚动才看得到 —— 改成锚定在行旁的浮层（借鉴本机 dsh-annotation：
+   position:fixed + getBoundingClientRect + 下方放不下就翻上方 + 双轴钳制视口） */
+check('【悬停卡】用固定定位浮层，不再占用表格下方的布局槽位',
+  /\.das-hover \{[^}]*position: fixed/.test(clientSrc) && !/\.das-hover \{[^}]*min-height: 52px/.test(clientSrc))
+{
+  backToPlugin(stale.loaded)   /* scenario() 结尾把 Merged 切到了技能视图，悬停卡要先切回插件视图 */
+  const hoverRow = dataRows.find((tr) => textOf(tr).includes('dsh-context-doctor'))
+  check('【悬停卡】找到可悬停的行', !!hoverRow && typeof hoverRow.props.onMouseEnter === 'function')
+  /* 视口 1024x768（夹具 window 提供）；行在视口下方 → 必须翻到行的上方 */
+  hoverRow.props.onMouseEnter({
+    currentTarget: { getBoundingClientRect: () => ({ top: 700, bottom: 724, left: 40, right: 420, width: 380, height: 24 }) },
+  })
+  const card = elementsOf((await renderSettled(stale.loaded.rt, stale.element)).tree,
+    (n) => n.props && n.props.className === 'das-hover')[0]
+  const st = (card && card.props.style) || {}
+  check('【悬停卡】下方放不下时翻到行的上方（top 在行上方）',
+    !!card && typeof st.top === 'number' && st.top + 200 <= 700,
+    'card=' + !!card + ' style=' + JSON.stringify(st))
+  check('【悬停卡】水平与垂直都被钳制在视口内（不会跑出屏幕）',
+    !!card && st.left >= 0 && st.left <= 1024 - 200 && st.top >= 0 && st.top <= 768,
+    JSON.stringify(st))
+  check('【悬停卡】给出最大高度，内容超高时卡片内部滚动而不是溢出视口',
+    !!card && typeof st.maxHeight === 'number' && st.maxHeight > 100 && st.maxHeight <= 768, JSON.stringify(st))
+  /* 行在视口顶部 → 放在行的下方 */
+  hoverRow.props.onMouseEnter({
+    currentTarget: { getBoundingClientRect: () => ({ top: 60, bottom: 84, left: 40, right: 420, width: 380, height: 24 }) },
+  })
+  const card2 = elementsOf((await renderSettled(stale.loaded.rt, stale.element)).tree,
+    (n) => n.props && n.props.className === 'das-hover')[0]
+  const st2 = (card2 && card2.props.style) || {}
+  check('【悬停卡】上方空间不足/行在上方时放在行的下方', !!card2 && st2.top >= 84, JSON.stringify(st2))
+}
+/* 用户：切换按钮参考插件市场，位置上移，腾出显示位置 —— 头部只留一行：页签与标题同一行 */
+check('【提示】未悬停时也说明「怎么看到完整信息」（提示不随槽位一起消失）',
+  staleText.includes('把鼠标移到'), staleText.slice(0, 200))
+{
+  const heads = elementsOf(stale.pluginTree, (n) => n.props && n.props.className === 'das-head')
+  const segs = elementsOf(stale.pluginTree, (n) => n.props && n.props.className === 'das-seg')
+  check('【头部】只剩一行头部（页签与标题合并）', heads.length === 1, 'heads=' + heads.length)
+  check('【头部】页签与标题在同一行里（标题上移、腾出内容高度）',
+    heads.length === 1 && segs.length === 1 &&
+    elementsOf(heads[0], (n) => n.tag === 'h3').length === 1 &&
+    textOf(heads[0]).includes('插件') && textOf(heads[0]).includes('插件与技能审查'),
+    heads.length ? textOf(heads[0]).slice(0, 160) : 'no head')
+}
 const ctxRow = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-context') && !textOf(n).includes('doctor'))[0]
 check('【悬停】行节点挂了 onMouseEnter', !!ctxRow && typeof ctxRow.props.onMouseEnter === 'function')
 let hoverText = ''
@@ -482,11 +537,9 @@ check('【悬停】悬停后槽位显示该行完整信息（长文案 + 已装/
 check('【留痕】悬停槽显示该行的上次翻译优化结果', hoverText.includes('上次翻译优化'), 'hoverText=' + hoverText.slice(0, 240))
 /* 「一行一项」的结构化证明（按用户本轮要求放宽）：块级堆叠只允许出现在名称列
    （中文名 + 一行中文说明），其它列必须保持单行；名称列最多两行。 */
-const NAME_BLOCKS = ['das-name-main', 'das-desc-line']
-const dataRows = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
 const stackedRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) < 0).length > 0)
 check('【密度】块级堆叠只出现在名称列，其它列仍单行',
-  dataRows.length >= PLUGIN_ROWS.length && stackedRows.length === 0,
+  dataRows.length >= PLUGIN_ROWS.filter((r) => r.bundled !== true).length && stackedRows.length === 0,
   'stacked=' + stackedRows.length + '/' + dataRows.length)
 /* ── 用户第二次追问「我明明点过翻译优化」→ 运行必须留痕 + 能自愈（先红后绿） ── */
 check('【留痕】行内标出「上次翻译优化失败」，不再是无来历的待生成文案',
@@ -650,13 +703,17 @@ if (process.argv.includes('--live')) {
     const liveTree = (await renderSettled(liveLoaded.rt, liveSection.component({}))).tree
     const liveText = textOf(liveTree)
     const rows = elementsOf(liveTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
-    check('【LIVE】真客户端渲染线上快照无异常', rows.length === live.value.length, 'rows=' + rows.length + ' expected=' + live.value.length)
+    const listed = live.value.filter((r) => r.bundled !== true)
+    const hidden = live.value.length - listed.length
+    check('【LIVE】真客户端渲染线上快照无异常（含隐藏 ' + hidden + ' 个随 DSH 提供的对象）',
+      rows.length === listed.length, 'rows=' + rows.length + ' expected=' + listed.length + '（总 ' + live.value.length + '）')
     check('【LIVE】渲染文本里没有 undefined', !/\bundefined\b/.test(liveText))
     check('【LIVE】不再出现「包名（中文） · 包名」的整串重复形态', !/（[^）]{1,20}） · /.test(liveText), liveText.slice(0, 200))
     /* 逐行：只要这份内置 catalog 覆盖它、且中文确实已落盘，渲染文本里就必须出现它的中文名 */
     let covered = 0
     const missed = []
     for (const row of live.value) {
+      if (row.bundled === true) continue
       const zh = zhOf(row.pkg)
       if (!zh) continue
       const zhName = /[（(]([^（()）]+)[)）]\s*$/.exec(zh.title)

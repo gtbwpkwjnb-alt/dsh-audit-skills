@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.4';
+    var CLIENT_REV = '2.10.5';
     /* 本插件自己的包名：客户端就是它自己，所以它自己的中文名不必等宿主提供
        （否则列表里 6 行是中文、唯独自己那一行是包名，看着像坏了）。 */
     var OWN_PKG = 'dsh-audit-skills';
@@ -176,12 +176,14 @@ window.__ModuleLoader__.load({
       '.das-root p { margin: 0; }',
       '.das-root h3 { margin: 0; }',
       /* 命令头（原 Hero 位）：居中、单行、行内版本 chip */
-      '.das-head { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding-top: 2px; }',
-      '.das-title { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;',
+      /* 头部压成两行：第一行 = 页签 + 标题（版本 chip），第二行 = 一句话价值。
+         页签从独立一行并进标题行，省下一整行高度给内容。 */
+      '.das-head { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; padding-top: 2px; text-align: left; }',
+      '.das-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0;',
       '  font-size: var(--dsw-font-l-20-font-size, 20px); line-height: var(--dsw-font-l-20-line-height, 28px);',
       '  font-weight: var(--dsw-font-l-20-font-weight, 600); letter-spacing: -.01em; }',
       '.das-sub { font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: var(--dsw-font-xxs-12-line-height, 18px);',
-      '  color: var(--das-dim); max-width: 92ch; }',
+      '  color: var(--das-dim); max-width: 92ch; flex-basis: 100%; }',
       /* 分段控件 */
       '.das-seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--das-line); border-radius: 999px; background: var(--das-l1); }',
       '.das-seg-btn { appearance: none; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit;',
@@ -299,9 +301,13 @@ window.__ModuleLoader__.load({
       '.das-inline-item.is-ok { border-left-color: var(--das-ok); }',
       '.das-inline-title { font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: 17px; }',
       '.das-inline-copy { color: var(--das-text2); font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; overflow-wrap: anywhere; }',
-      /* 悬停详情槽：固定在表格下方、高度预留 —— 换内容不改布局，所以不会跳行 */
-      '.das-hover { min-height: 52px; padding: 7px 10px; border: 1px solid var(--das-line); border-radius: var(--das-r);',
-      '  background: var(--das-l1); font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 16px; display: flex; flex-direction: column; gap: 3px; }',
+      /* 悬停详情卡：**锚定在被悬停行的旁边**（借鉴本机 dsh-annotation 的做法：position:fixed +
+         getBoundingClientRect + 下方放不下就翻到上方 + 双轴钳制视口）。
+         此前它是表格下方一个固定槽位 —— 行在上方时，详情出现在页面底部，必须滚动才看得见。 */
+      '.das-hover { position: fixed; z-index: 60; width: 420px; max-width: calc(100vw - 16px); padding: 8px 10px;',
+      '  border: 1px solid var(--das-line); border-radius: var(--das-r); box-shadow: 0 10px 30px rgba(0, 0, 0, .28);',
+      '  background: var(--dsw-alias-bg-elevated, var(--das-l1)); font-size: var(--dsw-font-xxxs-11-font-size, 11px);',
+      '  line-height: 16px; display: flex; flex-direction: column; gap: 3px; overflow: auto; }',
       '.das-hover-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }',
       '.das-hover-name { font-weight: 600; font-size: var(--dsw-font-xxs-12-font-size, 12px); }',
       '.das-hover-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 16px; }',
@@ -535,6 +541,34 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把悬停详情卡摆在被悬停行的旁边（仿本机 dsh-annotation 的浮层定位）：
+     * 优先放行的下方；下方放不下就放上方；两边都不够就把 top 钳进视口，并给出 maxHeight
+     * 让卡片内部滚动 —— 结果是「无论行在上还是在下，都不用滚动就能看到详情」。
+     * 视口尺寸在 Node 侧（冒烟）取不到时回落到 1024x768，保证定位逻辑可被确定性测试。
+     */
+    function placeCard(rect, estH, cardW) {
+      var vw = (typeof window !== 'undefined' && window.innerWidth) || 1024;
+      var vh = (typeof window !== 'undefined' && window.innerHeight) || 768;
+      var gap = 8, m = 8;
+      var left = Math.max(m, Math.min(rect.left, vw - cardW - m));
+      var below = rect.bottom + gap;
+      var top;
+      if (below + estH <= vh - m) top = below;
+      else if (rect.top - estH - gap >= m) top = rect.top - estH - gap;
+      else top = Math.max(m, Math.min(below, vh - Math.min(estH, vh - 2 * m) - m));
+      top = Math.max(m, Math.min(top, Math.max(m, vh - m - 120)));
+      return { left: left, top: top, maxHeight: Math.max(120, vh - top - m) };
+    }
+
+      /** 从鼠标事件取被悬停行的位置，算出卡片该摆在哪（取不到 DOM 时给安全的兜底位置）。 */
+      function boxFromEvent(event) {
+        var el = event && event.currentTarget;
+        var rect = el && typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+        if (!rect || (rect.width === 0 && rect.height === 0)) return { left: 12, top: 64, maxHeight: 480 };
+        return placeCard(rect, 260, 420);
+      }
+
+    /**
      * 内置 catalog 的中文快照查询（只含仓库内置条目）。
      * 用途：宿主 <2.9 的插件行**不发** displayName/localizedDescription（2.8.0 的 index.js 里
      * displayName 只出现在技能行），于是「已优化」的行不显示任何中文 —— 用户会以为功能没生效。
@@ -691,6 +725,10 @@ window.__ModuleLoader__.load({
          有意不挂 onMouseLeave —— 鼠标往槽位移动时不该把内容清掉（清了就来不及读）。
          槽位优先显示「点展开钉住」的那一行，否则显示最近悬停的一行。 */
       var hoverState = useState(''); var hoverPkg = hoverState[0]; var setHoverPkg = hoverState[1];
+      /* 悬停卡的位置（固定定位，锚在被悬停行旁）；null 时用下面那块兜底位置 */
+      var hoverBoxState = useState(null); var hoverBox = hoverBoxState[0]; var setHoverBox = hoverBoxState[1];
+      /* 随 DSH 提供的对象默认隐藏（用户要求）；给出数量并可一键显示 */
+      var bundledState = useState(false); var showBundled = bundledState[0]; var setShowBundled = bundledState[1];
       /* 上次翻译优化的落盘记录（宿主 /updates 的 translate 字段带回）。
          存在的理由：翻译产物写在 node_modules 里，装包会洗掉；没有记录时，用户看到
          「待生成文案」完全不知道「我明明点过翻译优化」。 */
@@ -1248,6 +1286,10 @@ window.__ModuleLoader__.load({
 
       /* 指标带：一条紧凑文本行（原来的格子网格太占地方），每项 title 说明这个数字是什么。 */
       var kpiCells = [];
+      /* 随 DSH 提供的对象默认隐藏（用户要求：它们在 app.asar 里，既不能优化也没有可比版本，
+         留在表里只占位置）。不是静默隐藏 —— 指标带上给出数量并可一键显示。
+         必须在这里（KPI 之前）算好：放到表格段落会被 var 提升成 undefined，KPI 引用即崩。 */
+      var bundledList = (rows || []).filter(function (r) { return r.bundled === true; });
       if (s) {
         kpiCells.push(kpiStat('k1', s.total, IS_SKILL ? '技能' : '插件', '本次快照里的条目总数'));
         kpiCells.push(kpiStat('k2', s.refined, '已优化', '文案已落盘（插件：locale 覆盖层；技能：SKILL.md 已改写）', s.refined > 0 ? 'ok' : null));
@@ -1255,9 +1297,15 @@ window.__ModuleLoader__.load({
         kpiCells.push(kpiStat('k4', s.pending, '待生成文案', '没有文案条目，需要调用模型生成（消耗 token）', s.pending > 0 ? 'warn' : null));
         kpiCells.push(kpiStat('k5', s.upd, '可更新', IS_SKILL ? '远端比本地新的 git 技能数' : 'npm 上比已装版本新的插件数', s.upd > 0 ? 'warn' : 'dim'));
         kpiCells.push(kpiStat('k6', s.unk, '无法比对', IS_SKILL ? '是 git 仓库但远端查不到（不可比）' : '最新版本查询失败（不可比）', s.unk > 0 ? 'dim' : null));
+        /* 随 DSH 提供的对象：两个视图都要有这个开关（插件页同样有 @deepseek-ai/* 内置行）。 */
+        kpiCells.push(kpiStat('k8', bundledList.length, '随 DSH 提供' + (bundledList.length > 0 ? (showBundled ? '· 点此隐藏' : '· 点此显示') : ''),
+          bundledList.length > 0
+            ? '这些对象在 app.asar 内、没有可写路径，不参与翻译优化，也没有可比的远端版本，所以默认隐藏；点一下' + (showBundled ? '收起' : '把它们列出来')
+            : '没有随 DSH 提供的对象',
+          bundledList.length > 0 ? 'dim' : null,
+          bundledList.length > 0 ? function () { setShowBundled(!showBundled); } : undefined));
         if (IS_SKILL) {
           kpiCells.push(kpiStat('k7', s.noRepo, '本地目录', '不是 git 仓库，没有远端可比', s.noRepo > 0 ? 'dim' : null));
-          kpiCells.push(kpiStat('k8', s.bundled, '随 DSH 提供', '在 app.asar 内、没有可写路径，只入表不参与优化', s.bundled > 0 ? 'dim' : null));
           kpiCells.push(kpiStat('k9', s.dirty, '有本地改动', 'git 工作区有未提交修改；快进会被 git 拒绝', s.dirty > 0 ? 'warn' : null));
           kpiCells.push(kpiStat('k10', s.english, '描述为英文', '中文可读性较低；改写 description 属行为变更', s.english > 0 ? 'warn' : null));
         }
@@ -1328,9 +1376,11 @@ window.__ModuleLoader__.load({
         for (var ti = 0; ti < translate.items.length; ti += 1) translateItems[translate.items[ti].pkg] = translate.items[ti];
       }
 
-      var visible = (onlyFlagged && rows) ? rows.filter(function (r) {
+      /* 表格要列的行：默认排除随 DSH 提供的对象（上面已算好 bundledList）。 */
+      var listed = (rows === null || showBundled) ? rows : (rows || []).filter(function (r) { return r.bundled !== true; });
+      var visible = (onlyFlagged && listed) ? listed.filter(function (r) {
         return (r.issues || []).length > 0 || (r.findings || []).some(function (f) { return f.confidence === 'fact' || f.severity !== 'low'; });
-      }) : rows;
+      }) : listed;
 
       var table = rows === null
         ? h('div', { className: 'das-note' }, h('span', { className: 'das-note-text' }, IS_SKILL ? '正在读取技能状态…' : '正在读取插件状态…'))
@@ -1455,7 +1505,11 @@ window.__ModuleLoader__.load({
                 var row = h('tr', {
                   key: r.profileDir + '|' + r.pkg,
                   className: r.installed === false ? 'is-dim' : undefined,
-                  onMouseEnter: function () { setHoverPkg(r.pkg); },
+                  onMouseEnter: function (event) {
+                    setHoverPkg(r.pkg);
+                    setHoverBox(boxFromEvent(event));
+                  },
+                  onMouseLeave: function () { if (openPkg === '') setHoverPkg(''); },
                 }, cells);
                 if (openPkg !== r.pkg || (issues.length === 0 && findings.length === 0)) return row;
                 var inlineItems = [];
@@ -1484,11 +1538,16 @@ window.__ModuleLoader__.load({
          优先显示「点展开钉住」的那一行，否则显示最近悬停的一行。 */
       var detailPkg = openPkg || hoverPkg;
       var detailRow = rows ? rows.filter(function (r) { return r.pkg === detailPkg; })[0] : null;
-      var hoverEl = h('div', { className: 'das-hover', role: 'status' }, (function () {
-        if (!detailRow) {
-          return h('div', { className: 'das-hover-hint' },
-            '把鼠标移到某一行，这里显示该行的完整信息：中文说明、作用、描述语言、版本对照、来源、本轮结果与审查发现。点行内「展开」可钉住。');
-        }
+      /* 卡片只在真的有详情行时渲染；位置由 placeCard 决定（锚在行旁、钳在视口内）。
+         不再预留槽位 → 表格下方的整块高度都还给内容。 */
+      var hoverEl = !detailRow ? null : h('div', {
+        className: 'das-hover', role: 'status',
+        style: {
+          left: (hoverBox || { left: 12 }).left,
+          top: (hoverBox || { top: 64 }).top,
+          maxHeight: (hoverBox || { maxHeight: 480 }).maxHeight,
+        },
+      }, (function () {
         var d = detailRow;
         var dRecord = recordByPkg[d.pkg];
         var dFacts = (d.findings || []).filter(function (f) { return f.confidence === 'fact'; });
@@ -1547,6 +1606,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'das-root' },
         h('div', { className: 'das-head' },
+          props && props.seg ? props.seg : null,
           h('h3', { className: 'das-title' }, LABEL,
             chip('cr', 'v' + CLIENT_REV, 'dim', '客户端半体版本（随页面刷新热更新）', true),
             chip('hr', hostRev ? '宿主 v' + hostRev : '宿主未知', revGap ? 'err' : 'dim',
@@ -1570,8 +1630,8 @@ window.__ModuleLoader__.load({
         h('p', { className: 'das-sub', title: IS_SKILL
           ? '技能改写会真实写入 SKILL.md；写入前保留 .dsh-skill.backup，必要时可还原；改写描述属于行为变更。'
           : undefined }, IS_SKILL
-          ? '技能表已合并来源、修订、翻译、更新与审查；翻译会写入 SKILL.md 并保留备份。'
-          : '插件表已合并优化状态、版本、更新、审查与本轮结果；安装和更新由第一方管理器执行。'));
+          ? '技能表已合并来源、修订、翻译、更新与审查；翻译会写入 SKILL.md 并保留备份。· 把鼠标移到任意一行，详情卡贴在该行旁边（点「展开」可钉住）。'
+          : '插件表已合并优化状态、版本、更新、审查与本轮结果；安装和更新由第一方管理器执行。· 把鼠标移到任意一行，详情卡贴在该行旁边（点「展开」可钉住）。'));
     }
 
     /* 合并页：插件与技能共用一个设置页，切换按钮在页面上方。
@@ -1594,13 +1654,14 @@ window.__ModuleLoader__.load({
           onClick: function () { setMode(key); },
         }, text);
       };
+      /* 页签由 Merged 建好、传进来，和标题同处一行：省掉一整行头部高度（用户要求位置上移、
+         把显示位置腾给内容）。 */
+      var segEl = h('div', { className: 'das-seg', role: 'tablist' },
+        tab('plugin', '插件', '插件半体：翻译优化、版本与更新、冲突与兼容审查'),
+        tab('skill', '技能', '技能 SKILL.md：翻译优化、来源、作用与审查'));
       return h('div', { className: 'das-root' },
         h('style', { key: 'das-css' }, CSS),
-        h('div', { className: 'das-head' },
-          h('div', { className: 'das-seg', role: 'tablist' },
-            tab('plugin', '插件', '插件半体：翻译优化、版本与更新、冲突与兼容审查'),
-            tab('skill', '技能', '技能 SKILL.md：翻译优化、来源、作用与审查'))),
-        h(Panel, { key: mode, target: mode }));
+        h(Panel, { key: mode, target: mode, seg: segEl }));
     }
 
     function safe(what, fn) {
