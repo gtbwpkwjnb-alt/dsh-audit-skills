@@ -186,17 +186,17 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.9.2'
+const REV = '2.10.0'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
 const PLUGIN_ROWS = [
   pluginRow({ pkg: '@deepseek-ai/dsh-base', version: '2.4.0', latest: null, hasUpdate: null, reason: '内置运行时', localized: false, needsText: true, bundled: true, translationEligible: false, readOnlyReason: 'unaddressable' }),
-  pluginRow({ pkg: '@changfenhuang/dsh-annotation', version: '1.4.10', latest: '1.4.10', hasUpdate: false, localized: true, needsText: false }),
+  pluginRow({ pkg: '@changfenhuang/dsh-annotation', version: '1.4.10', latest: '1.4.10', hasUpdate: false, localized: true, needsText: false, displayName: '@changfenhuang/dsh-annotation（划词批注）', localizedDescription: '选中助手回复中的文字即可批注，回车随消息一起发送' }),
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true, inCatalog: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.9.2', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.10.0', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -206,7 +206,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: 'dsh-better-sidebar', version: '0.21.1', latest: '0.21.1', hasUpdate: false, localized: true, needsText: false }),
   pluginRow({ pkg: 'dsh-compact-button', version: '1.1.0', latest: '0.5.0', hasUpdate: false, localized: true, needsText: false }),
   pluginRow({ pkg: 'dsh-computer-use-win', version: '0.1.2', latest: '0.2.2', hasUpdate: true, localized: true, needsText: false }),
-  pluginRow({ pkg: 'dsh-context', version: '0.56.2', latest: '0.56.2', hasUpdate: false, localized: true, needsText: false, localizedDescription: '中文说明：给模型提供上下文面板' }),
+  pluginRow({ pkg: 'dsh-context', version: '0.56.2', latest: '0.56.2', hasUpdate: false, localized: true, needsText: false, displayName: 'dsh-context（上下文面板）', localizedDescription: '中文说明：给模型提供上下文面板' }),
   /* 第 4 个「可更新」的插件，且**不在** batchItems() 里 —— 有了它，
      「未锁的行不受影响」「锁有效时不必再贴记录」这两条才不是恒真的空断言。 */
   pluginRow({ pkg: 'dsh-context-doctor', version: '0.1.0', latest: '0.2.0', hasUpdate: true, localized: true, needsText: false }),
@@ -417,8 +417,30 @@ check('渲染文本里没有 undefined', !/\bundefined\b/.test(staleText), stale
 check('版本 chip 同时给出客户端与宿主版本', staleText.includes('v' + REV) && staleText.includes('宿主 v' + REV))
 
 /* ── 用户三条「显示优化」的验收点（先红后绿）：一行一项 / 悬停展开 / 更新状态 ── */
-check('【密度】长文案不进表格行，只在悬停详情里',
-  !staleText.includes('中文说明：给模型提供上下文面板') && staleTitles.includes('中文说明：给模型提供上下文面板'))
+/* ── 用户本轮要求：列表要直接展示「优化结果」（中文名 + 中文说明），本名要优化 ──
+   注意：这是**有意**放宽上一轮的「严格一行」——中文名与一行中文说明各占一行，
+   其余仍单行；密度靠字号与省略号控制。 */
+check('【主功能】中文名优先展示，不再把「包名（中文）」整串塞进行内',
+  staleText.includes('划词批注') && !staleText.includes('（划词批注） · '), staleText.slice(0, 160))
+check('【主功能】原包名仍可见（退为次级），不因中文名而丢失',
+  staleText.includes('@changfenhuang/dsh-annotation'))
+check('【主功能】优化后的中文说明直接可见（不再是只在悬停里）',
+  staleText.includes('选中助手回复中的文字即可批注'))
+check('【主功能】密度靠字号与省略号：次级包名 11px、说明单行截断',
+  /\.das-name-pkg \{[^}]*font-size: var\(--dsw-font-xxxs-11-font-size, 11px\)/.test(clientSrc) &&
+  /\.das-desc-line \{[^}]*text-overflow: ellipsis/.test(clientSrc))
+/* ── 审查：只统计事实级；推断级降噪（线上 14 条全是 inferred·low，其中 13 条是旧宿主
+   看不到 app.asar 模块造成的假阳性） ── */
+check('【审查】KPI 只报「需处置」的发现，低置信推断不占数字',
+  staleText.includes('无待处置发现') || /审查（需处置）/.test(staleText), staleText.slice(0, 200))
+check('【审查】推断级只在 title 里说明（可悬停，不喧宾夺主）',
+  staleTitles.includes('推断'), staleTitles.slice(0, 160))
+check('【主功能/密度】窄容器用容器查询收起次级包名（不再靠视口宽度猜）',
+  clientSrc.includes('container-type: inline-size') && /@container \(max-width: 820px\) \{ \.das-name-pkg \{ display: none; \} \}/.test(clientSrc))
+
+/* 悬停详情与行内密度（原「长文案不进表格行」已按用户新要求改写） */
+check('【密度】长文案在行内单行截断，完整版仍在悬停里',
+  staleTitles.includes('中文说明：给模型提供上下文面板'))
 check('【密度】td 默认 nowrap —— 不再出现「更/新」这种竖排文字',
   /\.das-table td \{[^}]*white-space: nowrap/.test(clientSrc))
 check('【密度】名称列单行截断（ellipsis），不靠换行堆叠',
@@ -438,11 +460,12 @@ check('【悬停】悬停后槽位显示该行完整信息（长文案 + 已装/
   hoverText.includes('中文说明：给模型提供上下文面板') && hoverText.includes('0.56.2'),
   'hoverText=' + hoverText.slice(0, 240))
 check('【留痕】悬停槽显示该行的上次翻译优化结果', hoverText.includes('上次翻译优化'), 'hoverText=' + hoverText.slice(0, 240))
-/* 「一行一项」的结构化证明：数据行里除名称列那个省略号 div 之外，不允许再出现块级 div
-   （块级堆叠 = 一个格子塞多行，正是用户抱怨的信息过多）。 */
+/* 「一行一项」的结构化证明（按用户本轮要求放宽）：块级堆叠只允许出现在名称列
+   （中文名 + 一行中文说明），其它列必须保持单行；名称列最多两行。 */
+const NAME_BLOCKS = ['das-name-main', 'das-desc-line']
 const dataRows = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
-const stackedRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'div' && n.props.className !== 'das-name-main').length > 0)
-check('【密度】每个插件严格占一行：行内没有堆叠的块级元素',
+const stackedRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) < 0).length > 0)
+check('【密度】块级堆叠只出现在名称列，其它列仍单行',
   dataRows.length >= PLUGIN_ROWS.length && stackedRows.length === 0,
   'stacked=' + stackedRows.length + '/' + dataRows.length)
 /* ── 用户第二次追问「我明明点过翻译优化」→ 运行必须留痕 + 能自愈（先红后绿） ── */
@@ -452,8 +475,9 @@ check('【留痕】指标带给出上次优化时间', staleText.includes('上�
 check('【自愈】检测到「有条目但不在盘上」的对象时自动补应用',
   stale.loaded.state.calls.indexOf('apply') >= 0 && stale.loaded.state.posted.some((b) => b.action === 'auto-apply'),
   'calls=' + stale.loaded.state.calls.join(',') + ' posted=' + stale.loaded.state.posted.map((b) => b.action).join(','))
-check('【密度】每行单元格里最多一个文本块（chip 用 span，不换行）',
-  dataRows.every((tr) => elementsOf(tr, (n) => n.tag === 'td').every((td) => elementsOf(td, (n) => n.tag === 'div').length <= 1)))
+check('【密度】名称列最多两行（中文名 + 一行说明）',
+  dataRows.every((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) >= 0).length <= 2),
+  dataRows.map((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) >= 0).length).join(','))
 
 /* 模拟用户点「详情」：Panel 的 openPkg 是它的第 4 个 hook。
    这一步同时验证 FindingCard / IssueCard —— 此前它们从未被渲染过。

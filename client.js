@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.9.2';
+    var CLIENT_REV = '2.10.0';
     /* 行锁保鲜期。必须与宿主半体的 BATCH_STALE_MS 同值（10 分钟）：
        宿主用这个窗口判「批量是否还在跑」，客户端用同一个窗口判「这批结果还算不算数」。
        超期后记录仍如实显示，但不再锁定下表，并在页面上写明原因。 */
@@ -147,6 +147,11 @@ window.__ModuleLoader__.load({
       '  display: flex; flex-direction: column; gap: 12px; width: 100%;',
       '}',
       '.das-root *, .das-root *::before, .das-root *::after { box-sizing: border-box; }',
+      /* 设置页的可见宽度取决于窗口与分区，视口宽度骗不了它 —— 用容器查询：
+         窄的时候把次级包名收起来（包名仍在该行 title 与悬停槽里，不丢信息），
+         宽的时候再展示。这是本轮「字体/内容/行数/信息容纳量」取舍的落点。 */
+      '.das-root { container-type: inline-size; }',
+      '@container (max-width: 820px) { .das-name-pkg { display: none; } }',
       '.das-root p { margin: 0; }',
       '.das-root h3 { margin: 0; }',
       /* 命令头（原 Hero 位）：居中、单行、行内版本 chip */
@@ -220,7 +225,11 @@ window.__ModuleLoader__.load({
       '.das-table tr.is-dim td { opacity: .5; }',
       '.das-name { font-family: var(--das-mono); font-size: var(--dsw-font-xxs-12-font-size, 12px); word-break: break-all; }',
       '.das-name small { display: block; font-family: inherit; color: var(--das-dim); font-size: var(--dsw-font-xxxs-11-font-size, 11px); }',
-      '.das-name-main { font-family: var(--dsw-font-family, system-ui), "Microsoft YaHei UI", sans-serif; font-weight: 600; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.das-name-main { display: inline-block; font-family: var(--dsw-font-family, system-ui), "Microsoft YaHei UI", sans-serif; font-weight: 600; max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: baseline; }',
+      /* 原包名退为次级：等宽 + 11px，挤在一行内，超长省略 */
+      '.das-name-pkg { font-family: var(--das-mono); font-size: var(--dsw-font-xxxs-11-font-size, 11px); color: var(--das-dim); margin-left: 6px; max-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: baseline; }',
+      /* 优化结果直接展示：一行中文说明，超长省略，完整版在 title 与悬停槽 */
+      '.das-desc-line { font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; color: var(--das-text2); max-width: 38ch; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
       '.das-name-pkg { font-family: var(--das-mono); }',
       '.das-mono { font-family: var(--das-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }',
       '.das-num { font-family: var(--das-mono); font-variant-numeric: tabular-nums; }',
@@ -487,8 +496,24 @@ window.__ModuleLoader__.load({
       return { text: '未声明', title: 'SKILL.md 的 frontmatter 没有 version 字段，且该技能不是 git 仓库 —— 技能没有 npm 式版本号，只能靠提交历史或人工维护' };
     }
 
-    /** 技能来源里的根目录压短成 .dsh/skills、.agents/skills，省掉整条 Windows 路径。 */
-    function shortRoot(source) {
+    /**
+     * 从「包名（中文名）」里取出中文名 —— 本插件的主功能就是让英文插件可读，
+     * 而宿主给的 displayName 形态是「原包名（中文名）」（命名约定刻意保留原名）。
+     * 列表里如果原样整串渲染，等于把包名打印两遍、把中文埋在括号里；
+     * 所以这里拆开：中文名做主标题，原包名退成次级小字。
+     * 取不到就返回 ''（调用方回落到 displayName / pkg，不编造）。
+     */
+    function zhNameOf(displayName, pkg) {
+      var t = String(displayName === undefined || displayName === null ? '' : displayName).trim();
+      if (t === '' || t === pkg) return '';
+      var m = /[（(]\s*([^（()）]{1,30}?)\s*[)）]\s*$/.exec(t);
+      if (m !== null && m[1] !== '') return m[1];
+      // 没有括号形态：只要它不以包名开头，就把它本身当中文名
+      if (t.indexOf(String(pkg)) !== 0) return t;
+      return '';
+    }
+
+    /** 技能来源里的根目录压短成 .dsh/skills、.agents/skills，省掉整条 Windows 路径。 */    function shortRoot(source) {
       return String(source === undefined || source === null ? '' : source).replace(/[A-Za-z]:\\[^·]*[\\/](\.dsh|\.agents)[\\/]skills/, '$1/skills');
     }
 
@@ -1199,13 +1224,33 @@ window.__ModuleLoader__.load({
           kpiCells.push(kpiStat('k9', s.dirty, '有本地改动', 'git 工作区有未提交修改；快进会被 git 拒绝', s.dirty > 0 ? 'warn' : null));
           kpiCells.push(kpiStat('k10', s.english, '描述为英文', '中文可读性较低；改写 description 属行为变更', s.english > 0 ? 'warn' : null));
         }
-        var findings = audit && audit.counts ? (audit.counts.fact + audit.counts.inferred) : 0;
-        kpiCells.push(findings > 0
-          ? kpiStat('k11', findings, '审查' + (onlyFlagged ? '（仅看命中）' : '（点此筛选）'),
-              '事实 ' + audit.counts.fact + ' 条 / 推断 ' + audit.counts.inferred + ' 条；点一下只看命中行',
-              audit.counts.fact > 0 ? 'warn' : 'dim',
-              function () { setOnlyFlagged(!onlyFlagged); })
-          : kpiStat('k11', 0, '审查无发现', '本轮审查没有命中任何规则', 'ok'));
+        /* 审查：只把「有证据、可处置」的发现计入数字与筛选。
+           事实级 = 有证据；**推断级但严重度中/高** 也算 —— 否则真问题会被低置信噪音淹没。
+           线上实测 14 条全是 inferred·low，其中 13 条是「客户端依赖 @deepseek-ai/dsh-client-*
+           无法确认是否可满足」，即旧宿主看不到 app.asar 模块造成的假阳性（2.9.x 已按 asar 判定）。
+           把这种条目做成「点此筛选」的按钮，用户点进去只能看到自己无法处置的东西，
+           所以低置信推断只保留在行的展开详情与 title 里，不再占指标带、不再参与筛选。 */
+        var factCount = 0;
+        var notableInferred = 0;
+        var lowInferred = 0;
+        (rows || []).forEach(function (r) {
+          (r.findings || []).forEach(function (f) {
+            if (f.confidence === 'fact') factCount += 1;
+            else if (f.severity === 'low') lowInferred += 1;
+            else notableInferred += 1;
+          });
+        });
+        var actionable = factCount + notableInferred;
+        kpiCells.push(actionable > 0
+          ? kpiStat('k11', actionable, '审查（需处置）' + (onlyFlagged ? '· 仅看命中' : '· 点此筛选'),
+              '事实级 ' + factCount + ' 条' + (notableInferred > 0 ? ' + 推断·中高 ' + notableInferred + ' 条' : '') +
+              '（有证据或影响明确，建议处置）；另有 ' + lowInferred + ' 条低置信推断，只在行的展开详情里',
+              factCount > 0 ? 'err' : 'warn', function () { setOnlyFlagged(!onlyFlagged); })
+          : kpiStat('k11', 0, '审查：无待处置发现' + (lowInferred > 0 ? '（低置信推断 ' + lowInferred + '）' : ''),
+              lowInferred > 0
+                ? '没有需要处置的发现；另有 ' + lowInferred + ' 条低置信推断，未纳入筛选（展开对应行可看）'
+                : '本轮审查没有命中任何规则',
+              'ok'));
         /* 上次翻译优化：让「我明明点过」有据可查（时间 + 成败），失败时数字变红。 */
         if (translate && typeof translate.finishedAt === 'number') {
           kpiCells.push(kpiStat('k12', agoText(translate.finishedAt),
@@ -1246,7 +1291,9 @@ window.__ModuleLoader__.load({
         for (var ti = 0; ti < translate.items.length; ti += 1) translateItems[translate.items[ti].pkg] = translate.items[ti];
       }
 
-      var visible = (onlyFlagged && rows) ? rows.filter(function (r) { return (r.issues || []).length > 0 || (r.findings || []).length > 0; }) : rows;
+      var visible = (onlyFlagged && rows) ? rows.filter(function (r) {
+        return (r.issues || []).length > 0 || (r.findings || []).some(function (f) { return f.confidence === 'fact' || f.severity !== 'low'; });
+      }) : rows;
 
       var table = rows === null
         ? h('div', { className: 'das-note' }, h('span', { className: 'das-note-text' }, IS_SKILL ? '正在读取技能状态…' : '正在读取插件状态…'))
@@ -1302,6 +1349,12 @@ window.__ModuleLoader__.load({
                     : '本地目录')
                   : (r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'));
                 var nameLine = (r.displayName && r.displayName !== r.pkg) ? r.displayName + ' · ' + r.pkg : (r.displayName || r.pkg);
+                /* 主功能展示：中文名做主标题、原包名次级、优化后的中文说明直接占一行。
+                   过去把「包名（中文名） · 包名」整串塞进一格，等于把中文名藏起来、
+                   还让列表看不到任何优化结果 —— 用户为此专门提过两次。 */
+                var zhName = IS_SKILL ? '' : zhNameOf(r.displayName, r.pkg);
+                var primaryName = zhName !== '' ? zhName : (r.displayName || r.pkg);
+                var showPkg = zhName !== '' || (r.displayName && r.displayName !== r.pkg) ? r.pkg : '';
                 var optimizeTitle = (readOnly
                   ? (r.bundled === true
                     ? '该对象来自 DSH 内置运行时，在 app.asar 内没有可写路径，不参与翻译优化。'
@@ -1311,7 +1364,12 @@ window.__ModuleLoader__.load({
                 /* 一行一项：行内只留 名称 · 优化状态 · 版本 · 更新状态(+本轮记录) · 操作。
                    中文说明、作用、描述语言、管理器异常、审查标题、原名统统进悬停槽与 title。 */
                 var cells = [
-                  h('td', { className: 'das-name' }, h('div', { className: 'das-name-main', title: r.pkg }, nameLine)),
+                  h('td', { className: 'das-name' },
+                    h('span', { className: 'das-name-main', title: r.pkg }, primaryName),
+                    showPkg !== '' ? h('span', { className: 'das-name-pkg', title: r.pkg }, showPkg) : null,
+                    r.localizedDescription
+                      ? h('div', { className: 'das-desc-line', title: r.localizedDescription }, r.localizedDescription)
+                      : null),
                   h('td', null,
                     chip('lo', stateText2, stateTone, optimizeTitle),
                     (translateItems[r.pkg] && isBad(translateItems[r.pkg].state) && r.localized !== true)

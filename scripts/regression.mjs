@@ -636,7 +636,14 @@ check('定向应用对空列表什么都不做', m.applyLocale([sandbox], { entr
 process.env.DSH_HOME = savedHome4
 // 客户端契约：跳过已优化 + 去启用列 + 措辞
 check('客户端：翻译优化会跳过已优化（只对未 localized 的包调 apply）', clientSrc.includes('var toApply = cur.filter') && clientSrc.includes("call('apply', { pkgs: toApply.map"))
-check('客户端：优化后的中文名显示在插件名称位置', clientSrc.includes('das-name-main') && clientSrc.includes('r.displayName || r.pkg'))
+check('客户端：优化后的中文名显示在插件名称位置（中文名优先、原包名次级）',
+  clientSrc.includes('das-name-main') && clientSrc.includes('function zhNameOf(') &&
+  clientSrc.includes('das-name-pkg') && clientSrc.includes('das-desc-line') && clientSrc.includes('primaryName'))
+check('客户端：审查只把「需处置」的计入数字与筛选，低置信推断降噪',
+  clientSrc.includes('notableInferred') && clientSrc.includes('lowInferred') &&
+  clientSrc.includes("f.severity !== 'low'") && clientSrc.includes('无待处置发现'))
+check('客户端：窄容器用容器查询收起次级包名（不是靠视口宽度）',
+  clientSrc.includes('container-type: inline-size') && clientSrc.includes('@container (max-width: 820px)'))
 check('客户端：优化列显示已落盘的中文说明', clientSrc.includes('das-optimized-copy') && clientSrc.includes('r.localizedDescription'))
 check('客户端：更新结果透传管理器错误码与同版本重装标记', clientSrc.includes('job.code ||') && clientSrc.includes('versionUnchanged') && clientSrc.includes("incompatible-version"))
 check('客户端：全部已优化时直接返回不做事', clientSrc.includes('均已优化，无需处理'))
