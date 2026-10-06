@@ -881,9 +881,132 @@ function lockfileCommit(profileDir, pkg, range, repoUrl) {
   }
   return null
 }
-function remoteRefCandidates(ref) {
-  if (!ref || ref === 'HEAD') return ['HEAD']
-  return ['refs/heads/' + ref, 'refs/tags/' + ref, ref]
+/**
+ * git ls-remote 的候选查询。
+ *
+ * 附注标签（`git tag -a`）在 ls-remote 里给的是**标签对象**的 sha，而不是它指向的提交。
+ * 拿它和 lockfile 里的提交比对，同一个 tag 也会被判成「有更新」——本插件自己就被这么误判过
+ * （v2.10.5 是附注标签：847947f6 是标签对象，9bd914e 才是提交）。所以标签一律把
+ * `^{}`（peeled → 提交）一起查，再由 pickRemoteCommit 优先取 peeled 行。
+ */
+export function remoteRefCandidates(ref) {
+  if (!ref || ref === 'HEAD') return [['HEAD']]
+  return [
+    ['refs/heads/' + ref],
+    ['refs/tags/' + ref, 'refs/tags/' + ref + '^{}'],
+    [ref],
+  ]
+}
+
+/** 从 ls-remote 输出里取**提交** sha：有 peeled 行（附注标签）就用 peeled，没有就用第一行。 */
+export function pickRemoteCommit(stdout) {
+  const lines = String(stdout === undefined || stdout === null ? '' : stdout)
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter((x) => /^[0-9a-f]{40}\s/.test(x))
+  if (lines.length === 0) return null
+  const chosen = lines.find((x) => x.endsWith('^{}')) || lines[0]
+  const sha = chosen.split(/\s+/)[0]
+  return sha === undefined || sha === '' ? null : sha.toLowerCase()
+}
+
+const remoteTagsCache = new Map()
+
+/** 远端 tag 表（name → **提交** sha）。用于给 git 直装插件找「更新的版本」。 */
+export async function remoteTagsFor(repoUrl, profileDir, force = false) {
+  const key = String(repoUrl)
+  const hit = remoteTagsCache.get(key)
+  if (force !== true && hit !== undefined) {
+    const ttl = hit.tags === null ? REMOTE_TTL_FAIL_MS : REMOTE_TTL_OK_MS
+    if (Date.now() - hit.at < ttl) return hit
+  }
+  const r = await gitRun(['ls-remote', '--tags', repoUrl], profileDir, GIT_TIMEOUT_MS)
+  let entry
+  if (r.ok !== true) {
+    const firstErr = (r.stderr || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean)
+    entry = { tags: null, reason: r.timedOut === true ? '远端查询超时' : ('远端不可达：' + (firstErr || '未返回标签')), at: Date.now() }
+  } else {
+    const tags = {}
+    for (const raw of String(r.stdout || '').split(/\r?\n/)) {
+      const m = /^([0-9a-f]{40})\s+refs\/tags\/(.+?)(\^\{\})?$/.exec(raw.trim())
+      if (m === null) continue
+      if (m[3] === '^{}' || tags[m[2]] === undefined) tags[m[2]] = m[1].toLowerCase()
+    }
+    entry = { tags, reason: null, at: Date.now() }
+  }
+  remoteTagsCache.set(key, entry)
+  return entry
+}
+
+/** 比当前 ref 更高的**最高版本 tag**（只认 v1.2.3 / 1.2.3 形态）；没有更高的就返回 null。 */
+export function newestTagAbove(tags, currentRef) {
+  if (tags === null || tags === undefined) return null
+  const current = String(currentRef || '').replace(/^v/, '')
+  const currentTriple = /^\d+\.\d+\.\d+/.exec(current)
+  let best = null
+  for (const name of Object.keys(tags)) {
+    const ver = name.replace(/^v/, '')
+    if (!/^\d+\.\d+\.\d+/.test(ver)) continue
+    if (currentTriple !== null && !isNewerVersion(ver, currentTriple[0])) continue
+    if (best === null || isNewerVersion(ver, best.ver)) best = { name: name, ver: ver }
+  }
+  return best
+}
+
+/**
+ * git 直装插件的安装规格必须**与现状不同**。
+ *
+ * 宿主的插件管理器是按「package.json 依赖字符串是否变化」判断这次装的是哪个包的；
+ * 原样重装 `github:repo#v2.10.5` 时字符串不变 → 它抛 ambiguous-install（已从 DSH 核心实现证实）。
+ * 所以有更新的 tag 就换成新 tag；跟分支/HEAD 的依赖改用远端提交固定下来。
+ */
+export function gitUpdateSpec(range, ref) {
+  if (typeof range !== 'string' || range === '' || typeof ref !== 'string' || ref === '') return null
+  const hash = range.indexOf('#')
+  const base = hash >= 0 ? range.slice(0, hash) : range
+  const spec = base + '#' + ref
+  return spec === range ? null : spec
+}
+
+/** 挑出「值得装的那一条」：更高版本的 tag 优先；跟分支的用远端提交；标签已是最新则 null（不装）。 */
+export function gitUpdateTarget(status, range) {
+  if (status === null || status === undefined || status.kind !== 'git') return null
+  const parsed = parseGitDependencySpec(range)
+  if (parsed === undefined) return null
+  const newest = status.newestTag
+  if (newest !== null && newest !== undefined && newest.name !== parsed.ref && gitUpdateSpec(range, newest.name) !== null) {
+    return { tag: newest.name }
+  }
+  /* 钉在版本号 tag 上且没有更高的 tag：原样重装必被管理器拒绝，这里如实返回「无需更新」 */
+  if (/^v?\d+\.\d+\.\d+/.test(parsed.ref)) return null
+  if (status.remoteCommit && status.currentCommit && status.remoteCommit !== status.currentCommit) return { sha: status.remoteCommit }
+  return null
+}
+
+/* 宿主管理器的失败码 → 人话。用户不该在页面上看到裸的 ambiguous-install。 */
+const MANAGER_FAILURE_TEXT = {
+  'ambiguous-install': '宿主管理器无法确认这次安装对应哪个包（git 直装依赖重装时依赖字符串不变就会出现）——已阻止，未做任何改动。',
+  'invalid-spec': '宿主管理器不接受这个依赖规格，请检查依赖写法。',
+  'unknown-plugin': '宿主管理器不认识这个包。',
+  'management-required': '该对象由宿主管理，不能从这里更新。',
+  'unaddressable': '该包在 app.asar 内，没有可写路径。',
+  'not-bundle': '该包不是 DSH bundle，无法按插件更新。',
+  'not-removable': '该包不可移除。',
+  'stop-profile': '该 profile 已停止，无法安装。',
+  'bundle-in-use': '该 bundle 正在使用中，宿主拒绝在运行中替换（重启 DSH 后再试）。',
+  'stale-approval': '审批已过期，请重新发起安装。',
+  'incompatible-version': '目标版本与当前 DSH 运行时不兼容。',
+  'operation-error': '宿主管理器执行出错。',
+}
+
+/** 失败码 + 宿主原话 → 可直接展示给用户的说明（原话永远保留）。 */
+export function describeManagerFailure(code, diagnostic) {
+  const key = String(code === undefined || code === null ? '' : code)
+  const raw = String(diagnostic === undefined || diagnostic === null ? '' : diagnostic).trim()
+  const known = MANAGER_FAILURE_TEXT[key]
+  if (known !== undefined) return raw === '' || raw === key ? known : known + '（宿主原话：' + raw + '）'
+  if (raw !== '' && raw !== key) return raw
+  return key === '' ? '插件管理器报告安装失败，但没有给出原因码' : '插件管理器报告安装失败（' + key + '）'
 }
 
 /** 用 lockfile commit 与远端 ref 比对 git 直装插件；不能比对时明确说明原因。 */
@@ -896,17 +1019,24 @@ export async function gitDependencyUpdateStatus(profileDir, pkg, range, force = 
   if (force !== true && hit && Date.now() - hit.at < ttl) return hit
   let remoteCommit = null
   let errorReason = null
-  for (const ref of remoteRefCandidates(parsed.ref)) {
-    const r = await gitRun(['ls-remote', parsed.repoUrl, ref], profileDir, GIT_TIMEOUT_MS)
-    const line = r.stdout.split(/\r?\n/).map((x) => x.trim()).find((x) => /^[0-9a-f]{40}\s/.test(x))
-    if (r.ok === true && line) {
-      remoteCommit = line.split(/\s+/)[0].toLowerCase()
+  for (const patterns of remoteRefCandidates(parsed.ref)) {
+    const r = await gitRun(['ls-remote', parsed.repoUrl, ...patterns], profileDir, GIT_TIMEOUT_MS)
+    const commit = r.ok === true ? pickRemoteCommit(r.stdout) : null
+    if (commit !== null) {
+      remoteCommit = commit
       break
     }
     const firstErr = (r.stderr || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean)
     errorReason = r.timedOut ? '远端查询超时' : ('远端不可达：' + (firstErr || '未返回对应 ref'))
   }
   const currentCommit = lockfileCommit(profileDir, pkg, range, parsed.repoUrl)
+  const pinnedTag = /^v?\d+\.\d+\.\d+/.test(parsed.ref)
+  const tagInfo = await remoteTagsFor(parsed.repoUrl, profileDir, force)
+  const newestTag = newestTagAbove(tagInfo.tags, parsed.ref)
+  /* 有更高的版本 tag → 可更新；否则比提交（现在是 peeled 提交，不会再拿标签对象比）。 */
+  const hasUpdate = newestTag !== null
+    ? true
+    : (remoteCommit !== null && currentCommit !== null ? remoteCommit !== currentCommit : null)
   const entry = {
     kind: 'git',
     updateKind: 'git',
@@ -915,8 +1045,9 @@ export async function gitDependencyUpdateStatus(profileDir, pkg, range, force = 
     currentCommit,
     remoteCommit,
     remoteSha: remoteCommit,
-    latest: remoteCommit ? shortSha(remoteCommit) : null,
-    hasUpdate: remoteCommit && currentCommit ? remoteCommit !== currentCommit : null,
+    newestTag,
+    latest: newestTag !== null ? newestTag.name : (pinnedTag ? parsed.ref : (remoteCommit ? shortSha(remoteCommit) : null)),
+    hasUpdate,
     reason: remoteCommit === null ? (errorReason || '远端没有返回对应 ref') : (currentCommit === null ? '已确认来源，但 lockfile 没有当前提交，暂时无法比对' : null),
     at: Date.now(),
   }
@@ -2491,6 +2622,9 @@ export function normalizeTranslateRun(raw) {
     applied: items.filter((it) => it.state === 'applied').length,
     failed: items.filter((it) => it.state === 'failed').length,
     skipped: items.filter((it) => it.state === 'skipped-not-installed').length,
+    /* 「已安装但缺少精炼文案」以前既不算失败也不算跳过 —— 条目在计数里凭空消失，
+       于是出现「计数全 0、文案却说失败 2 个」的自相矛盾。 */
+    needsCatalog: items.filter((it) => it.state === 'needs-catalog').length,
     finishedAt: typeof body.finishedAt === 'number' ? body.finishedAt : Date.now(),
     message: String(body.message === undefined || body.message === null ? '' : body.message).slice(0, 400),
   }
@@ -2526,15 +2660,40 @@ const UPDATE_WAIT_MS = 120000
 export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_MS) {
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, message: plan.reason }
+  const from0 = installedVersion(profileDir, pkg)
+  let spec = plan.spec
+  if (plan.kind === 'git') {
+    /* 复用**审计刚跑出来的** git 状态（同一缓存键），不在这里再联网：
+       管理器按「依赖字符串是否变化」认包装了哪个包，原样重装必被拒（ambiguous-install）。
+       所以只在「能确定远端没有更新」时如实返回未变化；状态不确定时仍按原样尝试，不假装。 */
+    const cached = gitDependencyCache.get(String(profileDir) + '|' + String(pkg) + '|' + plan.range)
+    const fresh = cached !== undefined && Date.now() - cached.at < (cached.remoteCommit ? REMOTE_TTL_OK_MS : REMOTE_TTL_FAIL_MS)
+    if (fresh) {
+      const target = gitUpdateTarget(cached, plan.range)
+      const next = target === null ? null : gitUpdateSpec(plan.range, target.tag || target.sha)
+      if (next !== null) spec = next
+      else if (cached.hasUpdate === false) {
+        return {
+          ok: true,
+          state: 'unchanged',
+          unchanged: true,
+          updateKind: 'git',
+          from: from0,
+          to: from0,
+          message: '远端没有更新的版本（远端最新 ' + String(cached.latest || cached.ref) + '，本地锁定 ' + String(cached.currentCommit || '').slice(0, 7) + '）；已跳过这次安装。',
+        }
+      }
+    }
+  }
   const pm = getPluginManager(ctx)
   if (pm === undefined) return { ok: false, message: '插件管理器服务未就绪' }
   if (typeof pm.installBundle !== 'function') return { ok: false, message: '插件管理器未提供 installBundle' }
-  const from = installedVersion(profileDir, pkg)
+  const from = from0
   let failure = null
   let settled = false
   let managerResult = null
   Promise.resolve()
-    .then(() => pm.installBundle(plan.spec, {}))
+    .then(() => pm.installBundle(spec, {}))
     .then((result) => { managerResult = result; settled = true })
     .catch((error) => { failure = String((error && error.message) || error); settled = true })
 
@@ -2546,8 +2705,9 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
       const incompatible = Array.isArray(error.incompatible) ? error.incompatible : []
       const diagnostic = error.diagnostic || error.code
       const output = managerResult.packageResult && managerResult.packageResult.output
-      const detail = diagnostic || output || '插件管理器报告安装失败'
       const code = error.code || (incompatible.length > 0 ? 'incompatible-version' : 'update-failed')
+      /* 失败码必须翻成人话：以前页面上会出现裸的 ambiguous-install（用户看不懂，也不知道该做什么）。 */
+      const human = describeManagerFailure(code, diagnostic || output)
       const compatibility = incompatible.map((item) => {
         const name = item && item.name ? item.name : pkg
         const version = item && item.version ? ' v' + item.version : ''
@@ -2558,7 +2718,7 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
         ok: false,
         state: 'failed',
         code,
-        message: compatibility === '' ? String(detail) : String(detail) + '：' + compatibility,
+        message: compatibility === '' ? String(human) : String(human) + ' 兼容性明细：' + compatibility,
         from,
         application: managerResult.application,
         changed: managerResult.changed === true,

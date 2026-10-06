@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.10.5+patch2 — 2026-10-06 · 更新失败（git 直装）与翻译留痕（宿主 + 客户端）
+
+**症状**（真机留痕）：`update-batch.json` 里 8 项中有 2 项 `ambiguous-install`（本插件自己、dsh-plugin-marketplace）；
+`translate-run.json` 里 3 项中有 2 项 `needs-catalog`，而计数是 `generated:0 / failed:0 / skipped:0`，文案却说「失败 2 个」。
+
+### 根因（都在本插件代码里，逐条有证据）
+
+1. **附注标签被当成提交比**：`git ls-remote <repo> refs/tags/v2.10.5` 返回的是**标签对象** sha（847947f6），
+   而 lockfile 里的本地 sha 是**提交**（9bd914e）→ 同一个 tag 也判成「有更新」→ 本插件永久假「可更新」。
+2. **git 直装的安装规格不会变**：`resolveUpdateSpec` 对 `github:` 依赖原样返回旧 range，
+   而宿主管理器是按「package.json 依赖字符串是否变化」认包装了哪个包的（已从 DSH 核心实现证实：
+   `if (installed.length !== 1 || target === undefined) throw new ManagementFailure('ambiguous-install')`）
+   → git 直装插件**永远**更新不了，点一次失败一次。
+3. **翻译失败原因被覆盖**：按包名合并「生成结果 + 应用结果」时 apply 为准，
+   于是「模型生成失败的真实原因」被 `needs-catalog`（已安装但缺少精炼文案）顶掉，用户只看到一句无从追查的结论。
+4. **计数与文案两张皮**：宿主按最终 state 计数，`needs-catalog` 既不算失败也不算跳过 → 条目在计数里凭空消失。
+5. **失败码原样上屏**：页面上会出现裸的 `ambiguous-install`，用户看不懂也不知道该做什么。
+
+### 改动
+
+- **F1**：`remoteRefCandidates` 把 `refs/tags/<ref>^{}`（peeled → 提交）一起查，`pickRemoteCommit` 优先取 peeled 行；
+  git 依赖的「最新」在有更高版本 tag 时显示 tag 名（如 `v2.10.6`），否则显示 pin 的 tag，不再把对象 sha 当版本。
+- **F2**：新增 `remoteTagsFor` / `newestTagAbove` / `gitUpdateSpec` / `gitUpdateTarget`。
+  有更高版本 tag → 安装规格换成新 tag；跟分支/HEAD 的 → 换成远端提交 sha（**字符串一定变化**，管理器才认得出）。
+  能确定「远端没有更新」时直接如实返回未变化，不再制造一次注定失败的安装（复用审计的缓存，不额外联网）。
+- **F3**：`/translate-run` 记录**生成与应用各留一条**（不再按包名覆盖）；规范化新增 `needsCatalog` 计数；
+  客户端汇总文案与条目状态自洽；悬停/「上次失败」徽章优先取失败那条，用户直接看到真实原因；
+  页脚补一句「仍有 N 个包缺文案，再点一次只会重试它们」。
+- **F5**：`describeManagerFailure` 把管理器失败码翻成人话（客户端 `fixOf` 同步补），原话永远保留在 `code` 与括号里。
+
+### 验证
+
+- 先红后绿：新增 17 条断言（冒烟 5 + 回归 12）先失败后转绿。红的时候记录里只剩 `needs-catalog`、文案说「失败 1 个」而条目里没有任何 failed —— 与真机症状逐字一致。
+- 闸门：preflight ALL PASS / crash-rehearsal 47-0 / render-smoke 120-0 / --live 129-0 / regression 338-0。
+- **真远端实测**（真 profile + 真 GitHub）：
+  - 钉在 `#v2.10.5`：`remoteCommit == currentCommit == 9bd914e…`（peeled）→ `hasUpdate:false`、`latest:v2.10.5` → **假「可更新」消失**；
+  - 假设钉在 `#v2.10.4`：`newestTag:v2.10.5` → 目标 `{tag:'v2.10.5'}` → 规格变为 `…/dsh-audit-skills#v2.10.5`（≠ 原规格）→ 更新链路真的通了。
+
+### 生效条件与已知缺口
+
+- 客户端半体：刷新页面即生效。**宿主半体 `index.js` 只在 DSH 启动时加载一次 → 更新判定与安装规格的修复需要重启 DSH。**
+- 已知缺口：技能页的翻译优化仍不写「上次翻译优化」留痕（两页共用 `translate-run.json`，
+  要正确隔离需要给记录加 `scope` 字段，本版没做，避免把插件页的留痕冲掉）。
+- 未定位：`dsh-doublecheck` / `dsh-industry-research` 上次报 `restart-required` 但版本字段未变，
+  只确认「未生效」，没定位到管理器内部原因。
+
 ## 2.10.5+patch1 — 2026-10-02 · 客户端半体补丁：列表密度（一行一项 / 列宽预算 / 去横向滚动条）
 
 **只改客户端半体 `client.js`，没有改版本号，也不需要重启 DSH**（刷新页面即生效）。

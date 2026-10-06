@@ -112,6 +112,12 @@ window.__ModuleLoader__.load({
       if (c === 'unsupported-spec') return '该包是内置或本地依赖，请在插件页处理。'
       if (/^http-4/.test(c)) return '宿主半体没有这个接口（运行的是启动时加载的旧代码）→ 请重启 DSH。'
       if (c === 'llm-unavailable') return 'LLM 服务不可用或未注册；请确认模型服务已启用后重试。'
+      /* 宿主插件管理器自己的失败码：以前页面上会出现裸的 ambiguous-install，用户既看不懂也不知道做什么。 */
+      if (c === 'ambiguous-install') return '宿主管理器无法确认这次安装对应哪个包（git 直装依赖重装时依赖字符串不变就会出现）→ 已阻止，未做任何改动。'
+      if (c === 'invalid-spec') return '宿主管理器不接受这个依赖规格，请检查 profile 里的依赖写法。'
+      if (c === 'bundle-in-use') return '该 bundle 正在使用中，宿主拒绝在运行中替换；重启 DSH 后再试。'
+      if (c === 'management-required' || c === 'unaddressable') return '该对象由宿主管理（或在 app.asar 内），没有可写路径，不能从这里更新。'
+      if (c === 'stale-approval') return '安装审批已过期，请重新发起。'
       if (c === 'out-of-scope') return '该对象已归档或不属于 DSH 管理范围，已阻止误操作。'
       if (c === 'skill-overlay-write-failed' || c === 'overlay-write-failed') return '模型结果已生成，但写入翻译覆盖层失败；检查文件权限和磁盘空间后重试。'
       if (c === 'no-model') return '找不到默认模型，请先在设置里选定默认模型再重试。'
@@ -1134,20 +1140,25 @@ window.__ModuleLoader__.load({
                 var items = ap && Array.isArray(ap.value) ? ap.value : [];
                 var applied = items.filter(function (x) { return x.state === 'applied'; }).length;
                 absorbResults('apply', items);
-                /* 留痕：生成结果与 apply 结果按包名合并（apply 为准），一个包只出现一次。 */
-                var merged = {};
-                runItems.forEach(function (x) { merged[x.pkg] = x; });
-                items.forEach(function (x) { merged[x.pkg] = x; });
-                recordTranslate('optimize', Object.keys(merged).map(function (k) { return merged[k]; }),
-                  '新生成 ' + genOk + ' 条，应用 ' + applied + ' 项，失败 ' + genFail.length + ' 个');
+                /* 留痕：**生成与应用各留一条**，绝不按包名覆盖。
+                   上一版按包名合并（apply 为准），于是「模型生成失败的真实原因」被
+                   apply 的「已安装但缺少精炼文案」顶掉，用户只看到一句无从追查的结论（线上实测发生过）。 */
+                var applyFailed = items.filter(function (x) { return x.state === 'failed'; }).length;
+                var needsCatalog = items.filter(function (x) { return x.state === 'needs-catalog'; }).length;
+                recordTranslate('optimize', runItems.concat(items),
+                  '新生成 ' + genOk + ' 条，应用 ' + applied + ' 项' +
+                  (needsCatalog ? '，待补文案 ' + needsCatalog + ' 个' : '') +
+                  '，失败 ' + (genFail.length + applyFailed) + ' 个');
                 return snapshot({ force: true }).then(function (v) {
                   setBusy('');
                   if (!ap || !ap.ok) { setNote({ kind: 'err', text: (ap && ap.partial ? '部分应用完成：' : '应用失败：') + ((ap && (ap.message || ap.nextAction)) || '请展开对应行查看失败原因并重试') }); return; }
                   var s = v ? summarize(v) : null;
+                  var stillMissing = v ? v.filter(function (r) { return r.translationEligible !== false && r.needsText === true; }).length : 0;
                   setNote({ kind: genFail.length ? 'err' : 'ok',
                     text: '翻译优化完成：新生成 ' + genOk + '/' + pending.length + ' 条文案，应用 ' + applied + ' 项，跳过已优化 ' + skipped + ' 个' +
                       (s ? '；当前已优化 ' + s.refined + '/' + s.total : '') +
-                      (genFail.length ? ' · 生成失败：' + compactFailures(genFail) + '；详情见对应行' : '') });
+                      (genFail.length ? ' · 生成失败：' + compactFailures(genFail) : '') +
+                      (stillMissing ? ' · 仍有 ' + stillMissing + ' 个包缺文案，再点一次「翻译优化」只会重试它们' : '') });
                 });
               });
             }
@@ -1526,7 +1537,13 @@ window.__ModuleLoader__.load({
       /* 上次翻译优化的逐项结果（按包名索引）：行内标「上次失败」、悬停槽给「上次翻译优化」用。 */
       var translateItems = {};
       if (translate && Array.isArray(translate.items)) {
-        for (var ti = 0; ti < translate.items.length; ti += 1) translateItems[translate.items[ti].pkg] = translate.items[ti];
+        for (var ti = 0; ti < translate.items.length; ti += 1) {
+          var tItemCur = translate.items[ti];
+          var tItemPrev = translateItems[tItemCur.pkg];
+          /* 一个包现在有两条（生成 + 应用）：悬停与「上次失败」徽章必须看到**失败那条**的真实原因，
+             不能被后面那条「已应用 / 待补文案」盖掉。 */
+          if (tItemPrev === undefined || (isBad(tItemCur.state) && !isBad(tItemPrev.state))) translateItems[tItemCur.pkg] = tItemCur;
+        }
       }
 
       /* 表格要列的行：默认排除随 DSH 提供的对象（上面已算好 bundledList）。 */
@@ -1819,8 +1836,8 @@ window.__ModuleLoader__.load({
         h('p', { className: 'das-sub', title: IS_SKILL
           ? '技能改写会真实写入 SKILL.md；写入前保留 .dsh-skill.backup，必要时可还原；改写描述属于行为变更。'
           : undefined }, IS_SKILL
-          ? '技能表已合并来源、修订、翻译、更新与审查；翻译会写入 SKILL.md 并保留备份。· 把鼠标移到任意一行，详情卡贴在该行旁边（点「展开」可钉住）。'
-          : '插件表已合并优化状态、版本、更新、审查与本轮结果；安装和更新由第一方管理器执行。· 把鼠标移到任意一行，详情卡贴在该行旁边（点「展开」可钉住）。'));
+          ? '技能表已合并来源、修订、翻译、更新与审查；翻译会写入 SKILL.md 并保留备份。· 把鼠标移到任意一行，详情卡贴在该行旁边（点状态列的「需处置 N」可钉住）。'
+          : '插件表已合并优化状态、版本、更新、审查与本轮结果；安装和更新由第一方管理器执行。· 把鼠标移到任意一行，详情卡贴在该行旁边（点状态列的「需处置 N」可钉住）。'));
     }
 
     /* 合并页：插件与技能共用一个设置页，切换按钮在页面上方。

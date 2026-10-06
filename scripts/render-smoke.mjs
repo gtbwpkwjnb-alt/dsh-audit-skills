@@ -280,6 +280,10 @@ function translateRecord() {
   }
 }
 
+/* 可按用例切换的 generate / apply 返回值（默认 null = 与历史行为一致，零影响） */
+let mockGenerate = null
+let mockApplyValue = null
+
 function fetchImpl(state) {
   const json = (payload) => ({ ok: true, status: 200, json: async () => payload })
   return async (url, init) => {
@@ -288,11 +292,27 @@ function fetchImpl(state) {
     const action = String(url).split('/').pop()
     state.calls.push(action)
     if (init && typeof init.body === 'string') {
-      try { state.posted.push(Object.assign({ action: action }, JSON.parse(init.body))) } catch { state.posted.push({ action: action }) }
+      /* url 段单独留一份：请求体自己带 action 时（/translate-run 的 body 是 {action:'optimize',…}）
+         会盖住 action 字段，测试里按 url 找才不会被误导。 */
+      try { state.posted.push(Object.assign({ url: action }, JSON.parse(init.body))) } catch { state.posted.push({ url: action, action: action }) }
     }
     if (action === 'updates') return json({ rev: hostRev, ok: true, audit: AUDIT, translate: translateRecord(), value: PLUGIN_ROWS })
     if (action === 'skills') return json({ rev: hostRev, ok: true, translate: translateRecord(), audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
-    if (action === 'apply') return json({ rev: hostRev, ok: true, value: [{ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', state: 'applied', exportNote: 'added-locale-export' }] })
+    /* generate / apply 的返回值可按用例切换（默认保持原行为：generate 走 404 兜底、apply 报 applied） */
+    if (action === 'generate') {
+      return mockGenerate === null
+        ? json({ rev: hostRev, ok: false, code: 'http-404', message: 'HTTP 404（接口 generate 不存在？）' })
+        : json(Object.assign({ rev: hostRev }, mockGenerate))
+    }
+    if (action === 'apply') {
+      return json({
+        rev: hostRev,
+        ok: true,
+        value: mockApplyValue === null
+          ? [{ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', state: 'applied', exportNote: 'added-locale-export' }]
+          : mockApplyValue,
+      })
+    }
     if (action === 'translate-run') return json({ rev: hostRev, ok: true, value: { action: 'auto-apply', items: [], total: 0 } })
     if (action === 'update-all-status') return json({ rev: hostRev, ok: true, batch: makeBatch(state.batchAgeMs, state.interrupted) })
     if (action === 'update-status') return json({ rev: hostRev, ok: false, code: 'unknown-token', message: '任务不存在或已过期' })
@@ -582,6 +602,34 @@ check('【列宽】四列都有明确宽度（合计 100%），表格有 max-wid
   /\.das-table \{[^}]*max-width: 100%/.test(clientSrc))
 check('【密度】行内不再有「展开看建议」这类常驻提示（都进悬停卡）',
   !clientSrc.includes('das-row-hint'))
+
+/* ── 用户：《翻译优化…为什么没有顺利生效、失败原因》──
+   实测那一次：模型生成阶段失败，但落盘记录里只剩应用阶段的「已安装但缺少精炼文案」——
+   原因是按包名合并结果时 apply 结果覆盖了生成结果，**真实失败原因就此消失**。
+   现在两个阶段各自留痕，且页脚要说明还剩几个包缺文案、再点一次只重试它们。 */
+{
+  backToPlugin(stale.loaded)
+  mockGenerate = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已自动重试 1 次）', reason: '模型输出缺少 en/zh.title/description，或不是合法 JSON' }
+  mockApplyValue = [{ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', state: 'needs-catalog', message: '已安装但缺少精炼文案' }]
+  const optimized = await clickAndSettle(stale.loaded.rt, stale.element, stale.pluginTree, '翻译优化')
+  const trPost = stale.loaded.state.posted.filter((b) => b.url === 'translate-run' && Array.isArray(b.items)).pop()
+  const trItems = (trPost && trPost.items) || []
+  check('【翻译】生成失败的真实原因留在记录里（不被应用阶段的 needs-catalog 覆盖）',
+    trItems.some((x) => x.pkg === '@wxg-prc-cpg/browser-skill-dsh-plugin' && x.state === 'failed' && x.code === 'bad-output' && /无法解析|合法 JSON/.test(String(x.message))),
+    JSON.stringify(trItems))
+  check('【翻译】一个包的两阶段都留痕（生成失败 + 待补文案），不再二选一',
+    trItems.filter((x) => x.pkg === '@wxg-prc-cpg/browser-skill-dsh-plugin').length === 2 &&
+    trItems.some((x) => x.state === 'needs-catalog'), JSON.stringify(trItems))
+  const trMessage = String((trPost && trPost.message) || '')
+  check('【翻译】汇总文案与条目状态自洽（失败数 = 条目里 failed 的条数）',
+    trItems.filter((x) => x.state === 'failed').length === 1 && /失败 1 个/.test(trMessage) && /待补文案 1 个|应用 0 项/.test(trMessage),
+    'message=' + trMessage + ' items=' + JSON.stringify(trItems))
+  check('【翻译】页脚说明还剩几个缺文案、再点一次只会重试它们',
+    textOf(optimized.tree).indexOf('再点一次') >= 0,
+    'calls=' + stale.loaded.state.calls.slice(-10).join(',') + ' | posted=' + stale.loaded.state.posted.map((b) => b.action).join(','))
+  mockGenerate = null
+  mockApplyValue = null
+}
 
 /* 模拟用户点「详情」：Panel 的 openPkg 是它的第 4 个 hook。
    这一步同时验证 FindingCard / IssueCard —— 此前它们从未被渲染过。

@@ -120,3 +120,23 @@ curl.exe -sS https://raw.githubusercontent.com/cclank/dsh-plugin-hub/main/data/p
   <https://github.com/gtbwpkwjnb-alt/dsh-audit-skills/releases/tag/v2.10.0>；重新钉 profile 到 `#v2.10.0`。
   期间遇到 §5 的 EPERM（`dsh-computer-use-win` 被自己的进程占住），已按其步骤修复并补回 locale。
 - 待办：npm 发布（缺 token）；人工表单与 Awesome PR（需登录态/分类确认）。
+
+## 8 为什么 git 直装的插件「更新」会失败（`ambiguous-install`）
+
+2026-10-06 定位，宿主核心 `@deepseek-ai/dsh-plugin-manager` 的安装收尾代码是这么认包的：
+
+```js
+const after = readProfileManifest('dsh', this.profile.dir).dependencies ?? {}
+const installed = Object.keys(after).filter((name) => before[name] !== after[name])
+if (installed.length === 0) installed.push(...Object.keys(after).filter((name) => spec === name || spec.startsWith(`${name}@`)))
+if (installed.length !== 1 || target === undefined) throw new ManagementFailure('ambiguous-install')
+```
+
+也就是说它靠**「package.json 依赖字符串有没有变」**判断这次装的是哪个包。`github:owner/repo#v1.2.3`
+这种规格重装时字符串不变 → `installed` 为空 → 回退的包名匹配对 `github:` 也不成立 → `ambiguous-install`。
+
+**所以：给 git 直装插件做更新，安装规格必须指向一个新的 ref**（新 tag 或新提交 sha），
+或者先改成 `file:`/registry 依赖。本插件（≥2.10.5+patch2）已按此实现：见 `gitUpdateSpec` / `gitUpdateTarget`。
+
+另外注意 **附注 tag**：`git ls-remote <repo> refs/tags/vX.Y.Z` 给出的是**标签对象** sha，
+不是它指向的提交；必须同时查 `refs/tags/vX.Y.Z^{}` 才能比对提交（否则同一个 tag 也会被当成「有更新」）。

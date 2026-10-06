@@ -170,6 +170,66 @@ const trRead = m.readTranslateRun()
 check('端到端：记录真的写在磁盘上（宿主重载也不丢）', !!trRead && trRead.total === 3 && trRead.failed === 1, JSON.stringify(trRead).slice(0, 160))
 check('规范化：条目数有上限（不信任客户端输入）', m.normalizeTranslateRun({ action: 'optimize', items: new Array(200).fill({ pkg: 'x', state: 'applied' }) }).total === 60)
 check('规范化：非对象输入不抛错', m.normalizeTranslateRun(null).action === 'optimize' && m.normalizeTranslateRun('nope').total === 0)
+
+// ─────── A1c 本轮修复：更新失败（git 直装）与「翻译优化看不到失败原因」（先红后绿） ───────
+console.log(String.fromCharCode(10) + 'A1c 更新失败 + 翻译失败原因留痕')
+/* 1) 附注标签：`git ls-remote refs/tags/v2.10.5` 给的是**标签对象** sha，不是提交。
+   实测本插件（v2.10.5 是附注标签）因此被永久误判「可更新」，点更新必然失败。 */
+const lsRemoteAnnotated = [
+  '847947f0fa81d8715ceb1c70301774d436c2825a\trefs/tags/v2.10.5',
+  '9bd914e0fa81d8715ceb1c70301774d436c2825a\trefs/tags/v2.10.5^{}',
+].join('\n')
+check('[更新] 附注标签取 peeled 提交，而不是标签对象',
+  m.pickRemoteCommit(lsRemoteAnnotated) === '9bd914e0fa81d8715ceb1c70301774d436c2825a', String(m.pickRemoteCommit(lsRemoteAnnotated)))
+check('[更新] 只有分支行时照常取该 sha；空输出返回 null（不猜）',
+  m.pickRemoteCommit('a'.repeat(40) + '\trefs/heads/main') === 'a'.repeat(40) && m.pickRemoteCommit('') === null)
+check('[更新] 标签查询候选里同时包含 `^{}`（否则拿不到 peeled 提交）',
+  JSON.stringify(m.remoteRefCandidates('v2.10.5')).includes('refs/tags/v2.10.5^{}'))
+/* 2) git 直装插件的安装规格必须是「会变的那一条」：宿主管理器按依赖字符串是否变化判断装了哪个包，
+   原样重装 `github:repo#v2.10.5` 时字符串不变 → 管理器抛 ambiguous-install（已从 DSH 核心代码证实）。 */
+check('[更新] 有更新的 tag 时把 spec 换成新 tag（依赖字符串改变，管理器才认得出）',
+  m.gitUpdateSpec('github:repo-owner/dsh-x#v2.10.5', 'v2.10.6') === 'github:repo-owner/dsh-x#v2.10.6',
+  String(m.gitUpdateSpec('github:repo-owner/dsh-x#v2.10.5', 'v2.10.6')))
+check('[更新] 跟分支的 git 依赖改用远端提交 sha 固定（同样让字符串变化）',
+  m.gitUpdateSpec('github:a/b', 'b'.repeat(40)) === 'github:a/b#' + 'b'.repeat(40))
+check('[更新] 目标 ref 与现状相同时返回 null（不许拿同样的 spec 去重装）',
+  m.gitUpdateSpec('github:a/b#v1.0.0', 'v1.0.0') === null)
+check('[更新] 已是最新的 tag pin：没有更新目标（不再调用管理器，从根上避免 ambiguous-install）',
+  m.gitUpdateTarget({ kind: 'git', newestTag: null, remoteCommit: 'c'.repeat(40), currentCommit: 'c'.repeat(40) }, 'github:a/b#v1.0.0') === null)
+check('[更新] 有更高版本的 tag：给出 tag 目标',
+  JSON.stringify(m.gitUpdateTarget({ kind: 'git', newestTag: { name: 'v2.0.0' }, remoteCommit: 'd'.repeat(40), currentCommit: 'c'.repeat(40) }, 'github:a/b#v1.0.0')) === '{"tag":"v2.0.0"}')
+check('[更新] 跟 HEAD/分支：远端提交不同则给出 sha 目标',
+  JSON.stringify(m.gitUpdateTarget({ kind: 'git', newestTag: null, remoteCommit: 'e'.repeat(40), currentCommit: 'c'.repeat(40) }, 'github:a/b')) === '{"sha":"' + 'e'.repeat(40) + '"}')
+check('[更新] 最高版本 tag 的挑选：忽略比当前低的、忽略非版本号 tag',
+  (() => {
+    const tags = { 'v2.10.4': 'a', 'v2.10.6': 'b', 'v2.10.5': 'c', nightly: 'd', 'v1.0.0': 'e' }
+    const best = m.newestTagAbove(tags, 'v2.10.5')
+    return !!best && best.name === 'v2.10.6' && m.newestTagAbove({ 'v1.0.0': 'e', nightly: 'd' }, 'v2.10.5') === null
+  })())
+check('[更新] 管理器失败码有人话解释，不再把 ambiguous-install 原样丢给用户',
+  /不确定|无法确认|不能确认/.test(m.describeManagerFailure('ambiguous-install', 'ambiguous-install')) &&
+  m.describeManagerFailure('bundle-in-use', '').length > 8 &&
+  m.describeManagerFailure('某个没见过的码', '未知诊断').includes('未知诊断'),
+  String(m.describeManagerFailure('ambiguous-install', 'ambiguous-install')))
+/* 3) 翻译留痕：生成阶段的失败原因不能被应用阶段的 needs-catalog 覆盖；needs-catalog 必须出现在计数里 */
+const trMixed = m.normalizeTranslateRun({
+  action: 'optimize',
+  message: '新生成 0 条，应用 1 项，待补文案 1 个，失败 1 个',
+  items: [
+    { pkg: 'a', state: 'failed', message: '模型返回无法解析为约定 JSON（已自动重试 1 次）' },
+    { pkg: 'a', state: 'needs-catalog', message: '已安装但缺少精炼文案' },
+    { pkg: 'b', state: 'generated', message: '已写入覆盖层' },
+    { pkg: 'b', state: 'applied', message: '已写入 locale/zh.json' },
+  ],
+})
+check('[翻译] 生成失败原因与应用阶段结论同时留在记录里（一个包两条，各自可见）',
+  trMixed.items.filter((it) => it.pkg === 'a').length === 2 &&
+  trMixed.items.some((it) => it.state === 'failed' && it.message.includes('无法解析')), JSON.stringify(trMixed.items))
+check('[翻译] needs-catalog 计入独立计数（原来既不算失败也不算跳过，条目在计数里凭空消失）',
+  trMixed.needsCatalog === 1 && trMixed.failed === 1 && trMixed.generated === 1 && trMixed.applied === 1, JSON.stringify(trMixed))
+check('[翻译] 文案里的数字与宿主数出来的计数一致（不再自相矛盾）',
+  trMixed.message.indexOf('应用 1 项') >= 0 && trMixed.message.indexOf('失败 1 个') >= 0 &&
+  trMixed.applied === 1 && trMixed.failed === 1)
 process.env.DSH_HOME = savedHomeT
 await new Promise((resolve) => server.close(resolve))
 
