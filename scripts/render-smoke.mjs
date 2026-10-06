@@ -772,6 +772,13 @@ const plainFailSection = plainFail.registered.find((r) => r.desc.name === 'setti
 const plainFailText = textOf((await renderSettled(plainFail.rt, plainFailSection.component({}))).tree)
 mockSnapshotFailure = null
 check('无失败码时仍原样透出宿主原因', plainFailText.includes('读取失败：boom'), plainFailText.slice(0, 240))
+/* 关键：**运行中的旧宿主**没有 H3 的 code，只有那句英文。靠报文兜底识别，用户刷新页面就能拿到重启指引。 */
+mockSnapshotFailure = { ok: false, message: 'cannot get property "legacyField" without inject' }
+const legacyFail = loadClient(fetchImpl)
+const legacyFailSection = legacyFail.registered.find((r) => r.desc.name === 'settings.section')
+const legacyFailText = textOf((await renderSettled(legacyFail.rt, legacyFailSection.component({}))).tree)
+mockSnapshotFailure = null
+check('旧宿主（无 code）也能按报文识别并给出重启指引', legacyFailText.includes('legacyField') && legacyFailText.includes('请重启 DSH。'), legacyFailText.slice(0, 300))
 
 // ───────────────────────── 7 行内卡片（plugins.row.config） ─────────────────────────
 console.log('\n7 插件行内卡片')

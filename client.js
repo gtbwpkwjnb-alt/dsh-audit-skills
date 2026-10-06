@@ -899,8 +899,9 @@ window.__ModuleLoader__.load({
         return call(IS_SKILL ? 'skills' : 'updates', opts || {}).then(absorb).then(function (r) {
           if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); if (r.audit) setAudit(r.audit); if ('translate' in r) setTranslate(r.translate || null); return r.value; }
           var why = (r && r.message) || '未知';
-          /* 原始原因必须留着（可诊断），但注入类错误还要给出下一步，否则用户只看到一句英文。 */
-          if (r && r.code === 'host-inject') why = why + '　' + fixOf('host-inject');
+          /* 原始原因必须留着（可诊断），但注入类错误还要给出下一步，否则用户只看到一句英文。
+             同时按报文兜底识别：**运行中的旧宿主**没有 H3 的 code，只认识那句英文原文。 */
+          if (r && (r.code === 'host-inject' || /without inject/.test(String((r && r.message) || '')))) why = why + '　' + fixOf('host-inject');
           /* sticky：读取失败必须活到下一次成功读取。挂载期的「批量历史恢复」也会 setNote，
              会把它顶掉、整页只剩空表（冒烟测试已复现），所以它不能被普通提示覆盖。 */
           setNote({ kind: 'err', text: '读取失败：' + why, sticky: true });

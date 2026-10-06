@@ -26,6 +26,8 @@
 - **H3**：新增 `classifyHostFailure()`，在统一响应出口把 `cannot get property "X" without inject`
   归类为 `code: 'host-inject'` + 中文 `reason`（**不改原文**，可诊断性保留）；
   客户端 `fixOf('host-inject')` 给出「宿主半体版本过旧或未重启 → 请重启 DSH。」。
+  客户端**同时按报文兜底识别**（`without inject` 文本）：因为运行中的旧宿主还没有 H3 的 code，
+  这样用户只要刷新页面（客户端热更新）就能拿到「请重启 DSH」这一步，不必先重启。
 - **H4**：读取失败改为 **sticky 提示**：不参与旧批量提示的折叠规则，挂载期批量恢复也不再覆盖它；
   表格区改说「状态未读取成功，原因见上方提示。」，不再假装仍在加载。
   实现上**零新增 hook**（避免打乱组件 hook 顺序 —— 首次尝试新增 `useState` 时正是被冒烟测试抓出来的）。
