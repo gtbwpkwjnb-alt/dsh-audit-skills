@@ -2258,6 +2258,42 @@ export function settingsOf(ctx) {
   return undefined
 }
 
+/**
+ * 安全读取宿主上下文字段。
+ *
+ * 与 llmOf/settingsOf 同一原因（见上方注释）：Cordis 上下文是注入式 proxy，读未注入的字段会抛
+ * `cannot get property "..." without inject`。裸读且不在 try 内时，异常会冒泡成整条路由失败
+ * —— 实测 POST /api/dsh-audit-skills/skills 返回
+ * `{ok:false, message:'cannot get property "includeExternalSkills" without inject'}`，
+ * 技能页与设置页同时显示「读取失败」，技能行还会被上层的 try 静默吞掉。
+ * 因此凡是需要直读属性的地方一律走这里；读不到即视为「宿主未声明」。
+ */
+export function ctxProp(ctx, name) {
+  try {
+    if (ctx === undefined || ctx === null) return undefined
+    return ctx[name]
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 归类「宿主上下文注入失败」。
+ *
+ * 路由 catch 会把 Cordis 的 `cannot get property "X" without inject` 原样写进 message，
+ * 客户端只能照抄英文（用户实测看到的就是这句）。这里只补 code/reason、不改原文：
+ * 换来的是一条可执行的提示（重启 DSH 以加载新的宿主半体）。
+ */
+export function classifyHostFailure(body) {
+  if (!body || body.ok !== false || body.code !== undefined) return body
+  const m = /^cannot get property "([^"]+)" without inject$/.exec(String(body.message ?? ''))
+  if (m === null) return body
+  return Object.assign({}, body, {
+    code: 'host-inject',
+    reason: '宿主上下文没有注入「' + m[1] + '」：插件读了宿主未提供的字段（宿主半体版本过旧或未重启）。',
+  })
+}
+
 const GENERATION_TIMEOUT_MS = 45000
 const generationTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('模型响应超时'), { code: 'generation-timeout' })), ms))
 
@@ -2334,7 +2370,9 @@ export function collectSkills(ctx) {
   const cands = scanSkillCandidates()
   const visibleRecords = visibleSkillRecords(ctx)
   const visible = visibleRecords === undefined ? undefined : new Set(visibleRecords.map((x) => (x.candidate ? x.candidate.name : x.name)).filter((x) => typeof x === 'string'))
-  const includeExternal = ctx && ctx.includeExternalSkills === true
+  // 宿主是否把外部共享目录（rank≥500，如 Codex/ZCode）也算作可见技能。
+  // 必须走安全读取：读不到就按「宿主未声明」处理 → 回到 dshManagedVisibleRecord 的保守判定。
+  const includeExternal = ctxProp(ctx, 'includeExternalSkills') === true
   const dshRoot = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'skills')
   const byName = new Map()
   const inScope = (c) => {
@@ -3208,7 +3246,7 @@ export function registerBridge(ctx, dirs) {
         try {
           res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
           // 每个响应都带上本插件版本，供客户端检测宿主半体是否过旧
-          res.end(JSON.stringify(Object.assign({ rev: OWN_REV }, body)))
+          res.end(JSON.stringify(Object.assign({ rev: OWN_REV }, classifyHostFailure(body))))
         } catch {
           /* 响应已结束等情况忽略 */
         }

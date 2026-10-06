@@ -283,6 +283,8 @@ function translateRecord() {
 /* 可按用例切换的 generate / apply 返回值（默认 null = 与历史行为一致，零影响） */
 let mockGenerate = null
 let mockApplyValue = null
+/* /skills 读取失败的可切换返回值（默认 null = 正常返回 SKILL_ROWS）。 */
+let mockSnapshotFailure = null
 
 function fetchImpl(state) {
   const json = (payload) => ({ ok: true, status: 200, json: async () => payload })
@@ -295,6 +297,10 @@ function fetchImpl(state) {
       /* url 段单独留一份：请求体自己带 action 时（/translate-run 的 body 是 {action:'optimize',…}）
          会盖住 action 字段，测试里按 url 找才不会被误导。 */
       try { state.posted.push(Object.assign({ url: action }, JSON.parse(init.body))) } catch { state.posted.push({ url: action, action: action }) }
+    }
+    /* 插件视图与技能视图共用同一条「读取失败」提示路径，夹具对 updates/skills 同时生效。 */
+    if ((action === 'updates' || action === 'skills') && mockSnapshotFailure !== null) {
+      return json(Object.assign({ rev: hostRev }, mockSnapshotFailure))
     }
     if (action === 'updates') return json({ rev: hostRev, ok: true, audit: AUDIT, translate: translateRecord(), value: PLUGIN_ROWS })
     if (action === 'skills') return json({ rev: hostRev, ok: true, translate: translateRecord(), audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
@@ -747,6 +753,25 @@ const faultText = textOf(faulted.tree)
 check('Panel 渲染期抛错时不外抛（页面其余部分仍可渲染）', fault.rt.errors.length === 0, fault.rt.errors.map((e) => e.message).join(' | '))
 check('Boundary 输出隔离说明而不是白屏', faultText.includes('dsh-audit-skills 渲染失败，已隔离'), faultText.slice(0, 160))
 check('隔离说明带上原始异常信息（可诊断）', faultText.includes('注入的渲染期异常'))
+
+// ───────────────────────── 6b 读取失败：注入类错误必须给可执行提示 ─────────────────────────
+console.log('\n6b 读取失败 · 宿主注入失败不能只把英文原文甩给用户')
+mockSnapshotFailure = { ok: false, code: 'host-inject', message: 'cannot get property "includeExternalSkills" without inject' }
+const injLoaded = loadClient(fetchImpl)
+const injSection = injLoaded.registered.find((r) => r.desc.name === 'settings.section')
+const injText = textOf((await renderSettled(injLoaded.rt, injSection.component({}))).tree)
+mockSnapshotFailure = null
+check('注入失败：原始原因保留（可诊断）', injText.includes('cannot get property "includeExternalSkills" without inject'), injText.slice(0, 240))
+check('注入失败：不被挂载期的批量历史提示顶掉', injText.includes('读取失败：') && !/^\s*上次批量执行/.test(injText), injText.slice(0, 240))
+check('注入失败：表格区不再假装仍在加载', injText.includes('状态未读取成功，原因见上方提示。'), injText.slice(0, 240))
+check('注入失败：给出可执行下一步（重启 DSH）', injText.includes('请重启 DSH。'), injText.slice(0, 240))
+check('注入失败：点明是两端版本/未重启而非数据问题', injText.includes('宿主半体版本过旧或未重启'), injText.slice(0, 240))
+mockSnapshotFailure = { ok: false, message: 'boom' }
+const plainFail = loadClient(fetchImpl)
+const plainFailSection = plainFail.registered.find((r) => r.desc.name === 'settings.section')
+const plainFailText = textOf((await renderSettled(plainFail.rt, plainFailSection.component({}))).tree)
+mockSnapshotFailure = null
+check('无失败码时仍原样透出宿主原因', plainFailText.includes('读取失败：boom'), plainFailText.slice(0, 240))
 
 // ───────────────────────── 7 行内卡片（plugins.row.config） ─────────────────────────
 console.log('\n7 插件行内卡片')

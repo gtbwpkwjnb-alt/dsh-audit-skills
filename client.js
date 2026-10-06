@@ -109,6 +109,8 @@ window.__ModuleLoader__.load({
     function fixOf(code) {
       var c = String(code === undefined || code === null ? '' : code);
       if (c === 'manager-unavailable') return '插件管理器服务未就绪，重启 DSH 后可重试。'
+      /* 宿主上下文注入失败：属于「两端版本/未重启」，重试与刷新都没用，只有重启能解决。 */
+      if (c === 'host-inject') return '插件与宿主半体能力不匹配（宿主半体版本过旧或未重启）→ 请重启 DSH。'
       if (c === 'unsupported-spec') return '该包是内置或本地依赖，请在插件页处理。'
       if (/^http-4/.test(c)) return '宿主半体没有这个接口（运行的是启动时加载的旧代码）→ 请重启 DSH。'
       if (c === 'llm-unavailable') return 'LLM 服务不可用或未注册；请确认模型服务已启用后重试。'
@@ -896,7 +898,12 @@ window.__ModuleLoader__.load({
       var snapshot = useCallback(function (opts) {
         return call(IS_SKILL ? 'skills' : 'updates', opts || {}).then(absorb).then(function (r) {
           if (r && r.ok && Array.isArray(r.value)) { setRows(r.value); if (r.audit) setAudit(r.audit); if ('translate' in r) setTranslate(r.translate || null); return r.value; }
-          setNote({ kind: 'err', text: '读取失败：' + ((r && r.message) || '未知') });
+          var why = (r && r.message) || '未知';
+          /* 原始原因必须留着（可诊断），但注入类错误还要给出下一步，否则用户只看到一句英文。 */
+          if (r && r.code === 'host-inject') why = why + '　' + fixOf('host-inject');
+          /* sticky：读取失败必须活到下一次成功读取。挂载期的「批量历史恢复」也会 setNote，
+             会把它顶掉、整页只剩空表（冒烟测试已复现），所以它不能被普通提示覆盖。 */
+          setNote({ kind: 'err', text: '读取失败：' + why, sticky: true });
           return null;
         });
       }, [absorb]);
@@ -971,14 +978,19 @@ window.__ModuleLoader__.load({
           setBatchSettled(fresh)
           if (fresh) setLockedAt(Date.now())
           if (fresh) absorbBatch(b); else absorbResults('update', b.items)
-          setNote({
-            kind: finished ? (/失败 [1-9]/.test(String(b.message)) ? 'err' : (/未变化 [1-9]/.test(String(b.message)) ? 'note' : 'ok')) : 'err',
-            text: finished
-              ? ('上次批量执行（' + agoText(b.finishedAt) + '）：' + String(b.message) +
-                (fresh ? '；下表已按该结果锁定，点「刷新状态」可重新判定。'
-                  : '；该记录已超出锁定保鲜期，不再约束下表 —— 下表按当前快照判定，仍可能显示「更新」。'))
-              : ('上次批量更新未跑完（' + String(b.message) + '）：' + b.items.length + ' 项里只有中断前完成的那些有结果，'
-                + '它不锁定下表 —— 请点「刷新状态」让宿主重新判定后重试。'),
+          setNote(function (prev) {
+            /* 但不覆盖 sticky 的读取失败提示：这条恢复提示紧随 snapshot() 之后执行，
+               否则用户看到的是一张空表 + 「上次批量执行」，真正的原因彻底消失。 */
+            if (prev && prev.sticky === true) return prev
+            return {
+              kind: finished ? (/失败 [1-9]/.test(String(b.message)) ? 'err' : (/未变化 [1-9]/.test(String(b.message)) ? 'note' : 'ok')) : 'err',
+              text: finished
+                ? ('上次批量执行（' + agoText(b.finishedAt) + '）：' + String(b.message) +
+                  (fresh ? '；下表已按该结果锁定，点「刷新状态」可重新判定。'
+                    : '；该记录已超出锁定保鲜期，不再约束下表 —— 下表按当前快照判定，仍可能显示「更新」。'))
+                : ('上次批量更新未跑完（' + String(b.message) + '）：' + b.items.length + ' 项里只有中断前完成的那些有结果，'
+                  + '它不锁定下表 —— 请点「刷新状态」让宿主重新判定后重试。'),
+            }
           });
         });
       }, [absorb, absorbResults, pollBatch, snapshot]);
@@ -1445,7 +1457,8 @@ window.__ModuleLoader__.load({
 
       /* 当前结果摘要优先于旧的批量提示。旧记录仍放进 resultHint 的 title，
          保留可追溯性，但不再把「上次批量失败」和「本轮失败」并排渲染成两张红卡。 */
-      var noteEl = note && !(note && typeof note.text === 'string' && (/^上次批量执行|^上次批量更新未跑完/.test(note.text)) && (results.length > 0 || (batch && Array.isArray(batch.items) && batch.items.length > 0)))
+      /* sticky 提示（读取失败）不参与「折叠旧批量提示」的规则：它是当前事实，必须一直可见。 */
+      var noteEl = note && !(note.sticky !== true && typeof note.text === 'string' && (/^上次批量执行|^上次批量更新未跑完/.test(note.text)) && (results.length > 0 || (batch && Array.isArray(batch.items) && batch.items.length > 0)))
         ? h('div', { className: 'das-note' + (note.kind === 'err' ? ' is-err' : (note.kind === 'ok' ? ' is-ok' : '')) },
             chip('nk', note.kind === 'err' ? '失败' : (note.kind === 'ok' ? '完成' : '进行中'), note.kind === 'err' ? 'err' : (note.kind === 'ok' ? 'ok' : 'info')),
             h('span', { className: 'das-note-text' }, note.text))
@@ -1553,7 +1566,7 @@ window.__ModuleLoader__.load({
       }) : listed;
 
       var table = rows === null
-        ? h('div', { className: 'das-note' }, h('span', { className: 'das-note-text' }, IS_SKILL ? '正在读取技能状态…' : '正在读取插件状态…'))
+        ? h('div', { className: 'das-note' }, h('span', { className: 'das-note-text' }, (note && note.sticky === true) ? '状态未读取成功，原因见上方提示。' : (IS_SKILL ? '正在读取技能状态…' : '正在读取插件状态…')))
         : h('div', { className: 'das-wrap' },
             resultHint ? h('div', { className: 'das-table-meta' }, resultHint) : null,
             h('table', { className: 'das-table' },

@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.10.5+patch3 — 2026-10-06 · 设置页/技能页「读取失败：cannot get property "includeExternalSkills" without inject」（宿主 + 客户端）
+
+**症状**（用户真机）：设置页与技能页提示「读取失败：cannot get property "includeExternalSkills" without inject」。
+实测复现：`POST /api/dsh-audit-skills/skills` → `{"rev":"2.10.5","ok":false,"message":"cannot get property \"includeExternalSkills\" without inject"}`。
+
+### 根因
+
+1. **读了一个宿主根本不存在的字段**：`collectSkills()` 直读 `ctx.includeExternalSkills`，
+   而这个名字在 DSH 内核 `app.asar` 里 **0 次出现**（整个环境只有本插件自己在用）。
+   DSH 的上下文是注入式 proxy —— 读未注入的字段即抛 `cannot get property "X" without inject`；
+   该行不在 try 内，异常冒泡 → `/skills` 整条路由失败（技能页与设置页同时报错）。
+   设置页 `/management` 那一处包在 try 里，于是**技能行被静默吞掉**（列表少了内容却没有任何提示）。
+2. **为什么以前没炸**：已发布 tag `v2.10.5` 的 index.js 里没有这一行（`git show v2.10.5:index.js` 命中 0 次），
+   它是上一轮未提交改动带入的；而 DSH 只在进程启动时加载宿主半体一次 —— 于是直到下一次重启才被加载并暴露。
+3. **读取失败的提示还会被顶掉**：挂载期的「批量历史恢复」也 `setNote`，把「读取失败」换成「上次批量执行…」，
+   而后者在有本轮结果时会被折叠规则隐藏 → 用户最终看到的是**一张空表 + 「正在读取…」**，真正的原因彻底消失。
+
+### 改动
+
+- **H1**：新增 `ctxProp(ctx, name)` 安全读取入口（读不到即视为宿主未声明）；`includeExternalSkills` 改走它。
+  读不到时回到原有保守判定（rank≥500 的 Codex/ZCode 外部技能仍不会被误接管）。
+- **H2**：新增守卫断言 —— 用与宿主同规则的注入式 proxy 调 `collectSkills/llmOf/settingsOf/getPluginManager` 必须不抛；
+  并静态断言 `ctx.<字段>` 只允许出现 Cordis 内置与已受 try 保护的点（白名单），将来任何新的裸读会立刻让回归变红。
+- **H3**：新增 `classifyHostFailure()`，在统一响应出口把 `cannot get property "X" without inject`
+  归类为 `code: 'host-inject'` + 中文 `reason`（**不改原文**，可诊断性保留）；
+  客户端 `fixOf('host-inject')` 给出「宿主半体版本过旧或未重启 → 请重启 DSH。」。
+- **H4**：读取失败改为 **sticky 提示**：不参与旧批量提示的折叠规则，挂载期批量恢复也不再覆盖它；
+  表格区改说「状态未读取成功，原因见上方提示。」，不再假装仍在加载。
+  实现上**零新增 hook**（避免打乱组件 hook 顺序 —— 首次尝试新增 `useState` 时正是被冒烟测试抓出来的）。
+
+### 验证
+
+- 红→绿：新增 **15 条断言**（回归 +9、冒烟 +6）；红run 复现的报文与真机逐字一致。
+  回归里的 bridge 夹具原先把「未注入属性」写成 4 个服务名的特判表 —— 正因如此漏掉了这次真机故障；
+  现在改为**任何未声明属性都抛**，17 条真实 HTTP 路由在 Cordis 语义下重跑一遍全绿。
+- 闸门：preflight `ALL PASS`；crash-rehearsal `47/0`；render-smoke `126/0`；`--live` `135/0`（真实线上 21 行快照）；regression `347/0`。
+- 真机因果链：`git show v2.10.5:index.js` 命中 0 次、HEAD 命中 1 次 → 证实是「重启后才生效的新代码」引入。
+
+### 生效方式
+
+宿主半体（index.js）在 DSH 启动时加载一次：**改完必须重启 DSH** 才会生效（本次报错就发生在 index.js 里）。
+客户端半体（client.js）随页面刷新热更新。部署后两者已与本机已装副本逐字节一致。
+
 ## 2.10.5+patch2 — 2026-10-06 · 更新失败（git 直装）与翻译留痕（宿主 + 客户端）
 
 **症状**（真机留痕）：`update-batch.json` 里 8 项中有 2 项 `ambiguous-install`（本插件自己、dsh-plugin-marketplace）；

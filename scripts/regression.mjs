@@ -93,10 +93,12 @@ const fakeCtxBase = {
 // 裸读 ctx.llm 的老代码会当场变成 'cannot get property "llm" without inject'。
 const fakeCtx = new Proxy(fakeCtxBase, {
   get(target, key) {
-    if (key === 'llm' || key === 'settings' || key === 'skills' || key === 'pluginManager') {
-      throw new Error('cannot get property "' + String(key) + '" without inject')
-    }
-    return target[key]
+    /* Cordis 语义：读**任何**未声明的属性都抛，不只是 llm/settings。
+       旧版这里只白名单式地特判 4 个服务名，于是漏掉了真机那次
+       `ctx.includeExternalSkills` 裸读（属性名不在特判表里 → 返回 undefined → 测试全绿、真机全红）。 */
+    if (typeof key === 'symbol' || key === 'prototype' || key === 'then' || String(key).startsWith('_')) return Reflect.get(target, key)
+    if (Reflect.has(target, key)) return Reflect.get(target, key)
+    throw new Error('cannot get property "' + String(key) + '" without inject')
   },
 })
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
@@ -119,6 +121,16 @@ const st = await post('updates')
 check('POST /updates 返回 ok 与数组', st.ok === true && Array.isArray(st.value), JSON.stringify(st).slice(0, 120))
 check('端到端：每个 bridge 响应带 rev 且与本插件版本一致', typeof st.rev === 'string' && st.rev === m.OWN_REV, JSON.stringify({ rev: st.rev, own: m.OWN_REV }))
 check('POST /updates 命中沙箱的两个包', st.value.length === 2, JSON.stringify(st.value.map((r) => r.pkg)))
+/* 端到端复现真机 bug：宿主上下文里没有 includeExternalSkills 这个字段（Cordis 读它就抛）。
+   技能目录指向沙箱空目录，避免扫真实技能库并联网。 */
+const savedHomeSk = process.env.DSH_HOME
+const savedAgentsSk = process.env.DSH_AGENTS_HOME
+process.env.DSH_HOME = path.join(sandbox, 'no-dsh-home')
+process.env.DSH_AGENTS_HOME = path.join(sandbox, 'no-agents-home')
+const skE2E = await post('skills')
+process.env.DSH_HOME = savedHomeSk
+process.env.DSH_AGENTS_HOME = savedAgentsSk
+check('端到端：宿主 ctx 无 includeExternalSkills 时 /skills 仍返回 ok（不再整条路由失败）', skE2E.ok === true && Array.isArray(skE2E.value), JSON.stringify(skE2E).slice(0, 200))
 const up = await post('updates')
 check('POST /updates 返回 ok 与数组', up.ok === true && Array.isArray(up.value))
 check('POST /updates 每行都带 issues 数组（端到端送达界面）', st.value.every((r) => Array.isArray(r.issues)), JSON.stringify(st.value.map((r) => typeof r.issues)))
@@ -933,6 +945,37 @@ const withBundled = m.collectSkills({ includeExternalSkills: true, get: (n) => (
 const bundledRow = withBundled.find((r) => r.pkg === 'office-docx')
 check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundledRow.source.includes('随 DSH 提供') && bundledRow.bundled === true)
 check('技能行提供作用说明与来源字段', !!(byName2.get('demo-good') || {}).purpose && Object.hasOwn(byName2.get('demo-good') || {}, 'sourceUrl'))
+
+// ── A1d 宿主 ctx 注入守卫 ────────────────────────────────────────────────
+// 实测：POST /api/dsh-audit-skills/skills 返回
+//   {"ok":false,"message":"cannot get property \"includeExternalSkills\" without inject"}
+// 原因：Cordis 上下文是注入式 proxy —— 读未注入的字段即抛；该行不在 try 内，
+// 异常冒泡成整条路由失败（技能页与设置页同时显示「读取失败」）。
+// 这里按宿主同一规则造一个会抛的 ctx，任何裸读都会立刻让测试变红。
+const injectProxy = (provided) => new Proxy(provided, {
+  get(target, prop) {
+    if (typeof prop === 'symbol' || prop === 'prototype' || prop === 'then' || String(prop).startsWith('_')) return Reflect.get(target, prop)
+    if (Reflect.has(target, prop)) return Reflect.get(target, prop)
+    throw new Error('cannot get property "' + String(prop) + '" without inject')
+  },
+})
+const hostCtx = injectProxy({ get: () => undefined })
+const noThrow = (fn) => { try { fn(); return true } catch (error) { return 'threw: ' + String((error && error.message) || error) } }
+check('宿主 ctx 守卫：collectSkills 读到未注入字段不再抛错', noThrow(() => m.collectSkills(hostCtx)) === true)
+check('宿主 ctx 守卫：读不到 includeExternalSkills 时保守排除 rank500 外部技能', (function () { try { return m.collectSkills(hostCtx).every((r) => !['codex-only', 'zcode-only'].includes(r.pkg)) } catch { return false } })())
+check('宿主 ctx 守卫：llmOf / settingsOf / getPluginManager 均不抛错', noThrow(() => m.llmOf(hostCtx)) === true && noThrow(() => m.settingsOf(hostCtx)) === true && noThrow(() => m.getPluginManager(hostCtx)) === true)
+const hostSrc = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
+const ctxProps = Array.from(new Set(Array.from(hostSrc.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g), (x) => x[1]))).sort()
+check('宿主 ctx 守卫：不再裸读未知上下文字段（白名单 = Cordis 内置 + 已受 try 保护的点）', ctxProps.every((p) => ['effect', 'get', 'inject', 'llm', 'logger', 'settings'].includes(p)), ctxProps.join(','))
+check('宿主 ctx 守卫：includeExternalSkills 只经安全读取入口访问', hostSrc.includes("ctxProp(ctx, 'includeExternalSkills')") && !/ctx\.includeExternalSkills\b/.test(hostSrc))
+/* 归一：路由 catch 会把注入错误写成裸英文 message，客户端只能照抄 —— 归类后才有可执行的下一步。 */
+const hostFail = typeof m.classifyHostFailure === 'function' ? m.classifyHostFailure({ ok: false, message: 'cannot get property "includeExternalSkills" without inject' }) : null
+check('宿主错误归一：未注入字段被归类为 host-inject 且带中文原因', !!hostFail && hostFail.code === 'host-inject' && hostFail.reason.includes('includeExternalSkills'), JSON.stringify(hostFail))
+const hostFail2 = typeof m.classifyHostFailure === 'function' ? m.classifyHostFailure({ ok: false, code: 'ambiguous-install', message: 'cannot get property "z" without inject' }) : null
+check('宿主错误归一：已有失败码的响应不被改写', !!hostFail2 && hostFail2.code === 'ambiguous-install', JSON.stringify(hostFail2))
+const hostFail3 = typeof m.classifyHostFailure === 'function' ? m.classifyHostFailure({ ok: false, message: 'plain' }) : null
+check('宿主错误归一：普通失败原样返回（不误伤）', !!hostFail3 && hostFail3.code === undefined && hostFail3.message === 'plain', JSON.stringify(hostFail3))
+
 const bundleRows = m.collectStatus([sandbox])
 const bundleRow = bundleRows.find((r) => r.pkg === 'pkg-with-exports')
 check('插件 package.json repository/homepage 映射到来源链接并脱敏',
