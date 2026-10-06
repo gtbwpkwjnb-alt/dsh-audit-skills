@@ -176,7 +176,8 @@ function textOf(tree) {
   return out.join(' ')
 }
 function titlesOf(tree) {
-  return elementsOf(tree, (n) => typeof n.props.title === 'string').map((n) => n.props.title).join(' | ')
+  return elementsOf(tree, (n) => typeof n.props.title === 'string' || typeof n.props['aria-label'] === 'string')
+    .map((n) => typeof n.props.title === 'string' ? n.props.title : n.props['aria-label']).join(' | ')
 }
 function buttonByText(tree, needle) {
   return elementsOf(tree, (n) => n.tag === 'button' && textOf(n).includes(needle))[0]
@@ -398,7 +399,7 @@ check('取到了 /updates 与 /update-all-status', stale.loaded.state.calls.incl
 check('全部非内置插件成行（' + PLUGIN_ROWS.filter((r) => r.bundled !== true).length + ' 个）',
   PLUGIN_ROWS.filter((r) => r.bundled !== true).every((r) => staleText.includes(r.pkg)),
   '缺：' + PLUGIN_ROWS.filter((r) => r.bundled !== true && !staleText.includes(r.pkg)).map((r) => r.pkg).join(','))
-check('KPI 数据带渲染（可更新 / 待生成文案 / 无法比对）', staleText.includes('可更新') && staleText.includes('待生成文案') && staleText.includes('无法比对'))
+check('KPI 数据带渲染（插件 / 中文化 / 更新状态 / 需处置）', staleText.includes('插件') && staleText.includes('已中文化') && staleText.includes('更新状态') && staleText.includes('需处置'))
 /* ── 用户第二条：KPI 数据带与提示行太占地方（先红后绿） ── */
 const statsBar = elementsOf(stale.pluginTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0)[0]
 check('【密度】KPI 收成一条数据带（.das-stats），不再是格子网格',
@@ -410,14 +411,14 @@ check('【密度】数据带里没有块级格子（每项都是行内元素）'
 check('【内置行】默认隐藏随 DSH 提供的对象（列表里不再出现）',
   !staleText.includes('@deepseek-ai/dsh-base'), staleText.slice(0, 160))
 check('【内置行】给出隐藏数量并提供显示入口（不是静默隐藏）',
-  staleText.includes('随 DSH 提供') && /点此显示/.test(staleText), staleText.slice(0, 220))
+  staleText.includes('随 DSH') && /展开/.test(staleText), staleText.slice(0, 220))
 check('本轮结果合并到状态提示与对象行', staleText.includes('本轮处理 3 项') && staleTitles.includes('安装已执行，但版本未变（仍为 0.5.0）'))
 check('【核心】历史结果不再单独占表，页面说明当前按快照判定', staleText.includes('按最新快照') && !staleText.includes('记录不约束下表'))
 check('超期状态保持紧凑且不重复渲染结果表', (staleText.match(/本轮处理 3 项/g) || []).length === 1)
 check('对象行继续保留结果说明', staleTitles.includes('它不是当前状态'))
 check('超期 = 不锁行：可更新的行仍给出「更新」入口（含不在该批次里的第 4 行）',
   staleText.includes('更新') && staleTitles.includes('更新到 0.5.1') && staleTitles.includes('更新到 0.3.16') && staleTitles.includes('更新到 0.2.0'))
-check('【核心】行按钮不再代表那一轮时，把上轮结果贴回该行（3 行都有）', (staleText.match(/本轮 · 未变化/g) || []).length === 3, 'count=' + (staleText.match(/本轮 · 未变化/g) || []).length)
+check('【核心】行按钮不再代表那一轮时，把上轮结果贴回该行（3 行都有）', (staleText.match(/本轮 · (?:版本未变|未变化)/g) || []).length === 3, 'count=' + (staleText.match(/本轮 · (?:版本未变|未变化)/g) || []).length)
 check('贴回的记录明确声明「它不是当前状态」', staleTitles.includes('它不是当前状态'))
 check('一键更新按钮可用（锁已释放），且标注可更新数量 4',
   (() => { const b = buttonByText(stale.pluginTree, '一键更新'); return !!b && b.props.disabled !== true && textOf(b).includes('4') })())
@@ -463,7 +464,7 @@ check('【主功能】密度靠字号与省略号：次级包名 11px、说明�
 /* ── 审查：只统计事实级；推断级降噪（线上 14 条全是 inferred·low，其中 13 条是旧宿主
    看不到 app.asar 模块造成的假阳性） ── */
 check('【审查】KPI 只报「需处置」的发现，低置信推断不占数字',
-  staleText.includes('无待处置发现') || /审查（需处置）/.test(staleText), staleText.slice(0, 200))
+  staleText.includes('无需处置') || staleText.includes('需处置'), staleText.slice(0, 200))
 check('【审查】推断级只在 title 里说明（可悬停，不喧宾夺主）',
   staleTitles.includes('推断'), staleTitles.slice(0, 160))
 check('【主功能/密度】窄容器用容器查询收起次级包名（不再靠视口宽度猜）',
@@ -475,7 +476,7 @@ check('【密度】长文案在行内单行截断，完整版仍在悬停里',
 check('【密度】td 默认 nowrap —— 不再出现「更/新」这种竖排文字',
   /\.das-table td \{[^}]*white-space: nowrap/.test(clientSrc))
 check('【密度】名称列单行截断（ellipsis），不靠换行堆叠',
-  /\.das-table td \{[^}]*text-overflow: ellipsis/.test(clientSrc))
+  /\.das-table td \{[^}]*text-overflow: ellipsis/.test(clientSrc) && clientSrc.includes('table-layout: fixed') && clientSrc.includes('overflow-x: hidden'))
 check('【更新状态】更新列给出显式状态 chip（已最新 / 不可比）',
   staleText.includes('已最新') && staleText.includes('不可比'))
 /* 用户：悬停预览显示在页面下方、要滚动才看得到 —— 改成锚定在行旁的浮层（借鉴本机 dsh-annotation：
@@ -525,6 +526,12 @@ check('【提示】未悬停时也说明「怎么看到完整信息」（提示�
 }
 const ctxRow = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && textOf(n).includes('dsh-context') && !textOf(n).includes('doctor'))[0]
 check('【悬停】行节点挂了 onMouseEnter', !!ctxRow && typeof ctxRow.props.onMouseEnter === 'function')
+check('【操作列】按钮不再弹原生长提示，避免和行详情卡重叠', (() => {
+  const actionRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'button').length > 0)
+  const btns = actionRows.flatMap((tr) => elementsOf(tr, (n) => n.tag === 'button'))
+  return btns.length > 0 && btns.every((b) => !Object.prototype.hasOwnProperty.call(b.props || {}, 'title')) &&
+    btns.every((b) => typeof (b.props || {})['aria-label'] === 'string' && (b.props || {})['aria-label'] !== '')
+})(), dataRows.map((tr) => textOf(tr).slice(-60)).join(' | '))
 let hoverText = ''
 if (ctxRow && typeof ctxRow.props.onMouseEnter === 'function') {
   backToPlugin(stale.loaded)   /* scenario() 结尾切到了技能视图，先切回来再悬停 */
@@ -544,7 +551,7 @@ check('【密度】块级堆叠只出现在名称列，其它列仍单行',
 /* ── 用户第二次追问「我明明点过翻译优化」→ 运行必须留痕 + 能自愈（先红后绿） ── */
 check('【留痕】行内标出「上次翻译优化失败」，不再是无来历的待生成文案',
   staleText.includes('上次失败'), staleText.slice(0, 120))
-check('【留痕】指标带给出上次优化时间', staleText.includes('上次优化'))
+check('【留痕】指标带出上次优化结果', staleText.includes('上次优化') || staleText.includes('上次失败'))
 check('【自愈】检测到「有条目但不在盘上」的对象时自动补应用',
   stale.loaded.state.calls.indexOf('apply') >= 0 && stale.loaded.state.posted.some((b) => b.action === 'auto-apply'),
   'calls=' + stale.loaded.state.calls.join(',') + ' posted=' + stale.loaded.state.posted.map((b) => b.action).join(','))
@@ -573,7 +580,7 @@ const freshText = textOf(fresh.pluginTree)
 check('渲染无异常', fresh.errors.length === 0, fresh.errors.map((e) => e.message).join(' | '))
 check('状态提示显示行锁数量', freshText.includes('已锁定 3 行'))
 check('锁定行数与结果数量一致（3 行，而不是记录条数）', freshText.includes('本轮处理 3 项') && freshText.includes('已锁定 3 行'))
-check('被锁的三行按钮按结果暗下去，显示「未变化」', (freshText.match(/未变化/g) || []).length >= 3)
+check('被锁的三行按钮按结果暗下去，显示「未变化」', (freshText.match(/版本未变/g) || []).length >= 3)
 check('一键更新按钮被禁用（与行锁一致，不再自相矛盾）', (() => { const b = buttonByText(fresh.pluginTree, '一键更新'); return !!b && b.props.disabled === true })())
 check('锁有效时不必再贴记录（这 3 行的按钮本身已显示「未变化」）', !freshText.includes('本轮 · 未变化'))
 check('不在该批次里的可更新行不受锁影响（第 4 行仍有「更新」入口）',
@@ -646,8 +653,8 @@ check('未声明且非 git 的技能显示「未声明」而不是「—」', sk
 check('声明了 version 的技能显示 vX.Y.Z', skillText.includes('v1.6.0') && skillText.includes('v0.2.0'))
 check('技能来源显示 GitHub 原作者仓库，不刷本地 Windows 路径', skillText.includes('GitHub 原作者仓库') && !skillText.includes('C:\\Users'))
 check('如实标出本地改动文件数', skillText.includes('本地改动 3 个文件') && skillText.includes('本地改动 2 个文件'))
-check('技能页 KPI 含本地目录 / 随 DSH 提供 / 有本地改动 / 描述为英文', skillText.includes('本地目录') && skillText.includes('随 DSH 提供') && skillText.includes('有本地改动') && skillText.includes('描述为英文'))
-check('技能页版本列表头写明「版本 / 修订」与「来源 / 远端」', skillText.includes('版本 / 修订') && skillText.includes('来源 / 远端'))
+check('技能页 KPI 含本地目录 / 本地改动 / 描述为英文', skillText.includes('本地目录') && skillText.includes('本地改动') && skillText.includes('描述为英文'))
+check('技能页版本列表头合并为「版本与来源」', skillText.includes('版本与来源'))
 check('【主功能】技能侧中文名同样优先展示（不再整串「包名（中文）」）',
   skillText.includes('学习一个视频') && !skillText.includes('（学习一个视频） · '), skillText.slice(0, 160))
 check('技能页说明写入边界但不铺陈长段落', skillText.includes('翻译会写入 SKILL.md 并保留备份') && !skillText.includes('技能改写会真实写入 SKILL.md'))

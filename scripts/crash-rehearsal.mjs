@@ -150,7 +150,10 @@ if (host) {
   let hostApplyErr = null
   try { host.apply(hostCtx, { autoApply: false, revertOnDisable: false, profileDir: PROFILE }) } catch (error) { hostApplyErr = error }
   check('宿主 apply() 不抛错', hostApplyErr === null, hostApplyErr && hostApplyErr.message)
-  check('bridge 路由数量正确（17 = 原有 14 + 治理 2 + 翻译留痕 1）', routes.length === 17, 'got ' + routes.length)
+  const routePaths = new Set(routes.map((r) => r && r.path).filter(Boolean))
+  const requiredRoutes = ['/api/dsh-audit-skills/finding-action', '/api/dsh-audit-skills/apply', '/api/dsh-audit-skills/apply-skills', '/api/dsh-audit-skills/update-all']
+  check('bridge 必需路由均已注册', requiredRoutes.every((route) => routePaths.has(route)), 'missing: ' + requiredRoutes.filter((route) => !routePaths.has(route)).join(', '))
+  check('bridge 路由无重复', routePaths.size === routes.length, 'got ' + routes.length + ' routes / ' + routePaths.size + ' unique')
 }
 
 // ── 8 bundle 补丁 ──

@@ -220,11 +220,20 @@ export function readBundleInfo(profileDir, pkg) {
     const dir = path.join(profileDir, 'node_modules', ...pkg.split('/'))
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
     if (!manifest.dsh || !manifest.dsh.bundle || !manifest.dsh.bundle.patch) return undefined
+    const manifestName = typeof manifest.name === 'string' ? manifest.name.trim() : ''
+    const manifestNameValid = manifestName === pkg && isSafePackageName(manifestName)
+    const manifestNameReason = manifestName === ''
+      ? 'package.json 缺少 name'
+      : (manifestName !== pkg ? 'package.json name 与依赖标识不一致' : (!isSafePackageName(manifestName) ? 'package.json name 不符合 npm 包名规则' : ''))
     return {
       dir,
-      name: manifest.name,
+      name: manifestName,
+      manifestName,
+      manifestNameValid,
+      manifestNameReason,
       version: typeof manifest.version === 'string' ? manifest.version : null,
       description: String(manifest.description ?? ''),
+      repository: manifest.repository?.url ?? manifest.repository ?? manifest.homepage ?? '',
     }
   } catch {
     return undefined
@@ -248,7 +257,7 @@ export function readBundleInfo(profileDir, pkg) {
  */
 function buildRow(profileDir, pkg, fields) {
   const st = inspectPackage(profileDir, { pkg })
-  const localInfo = fields.version === undefined || fields.version === null ? readBundleInfo(profileDir, pkg) : undefined
+  const localInfo = readBundleInfo(profileDir, pkg)
   const installedVersion = fields.version ?? localInfo?.version ?? null
   const inCatalog = fields.inCatalog === true
   const readOnlyReason = typeof fields.readOnlyReason === 'string' && fields.readOnlyReason !== ''
@@ -268,18 +277,32 @@ function buildRow(profileDir, pkg, fields) {
   const displayName = st.title || managerTitle || (st.localized ? catalogTitle : null) || pkg
   const localizedDescription = st.description || managerDescription || (st.localized ? catalogDescription : null)
   const managerError = normalizeManagerError(fields.error ?? fields.failure ?? fields.statusError)
+  const declaredRepo = normalizeRepoUrl(fields.repoUrl || fields.repository || fields.homepage || localInfo?.repository || '')
+  const sourceUrl = declaredRepo || null
   return {
     profileDir,
     pkg,
     installed: fields.installed !== false,
     enabled: fields.enabled === true,
     version: installedVersion,
+    manifestName: localInfo?.manifestName || null,
+    manifestNameValid: localInfo?.manifestNameValid !== false,
+    manifestNameReason: localInfo?.manifestNameReason || '',
     error: managerError.message || managerError.code || null,
     errorCode: fields.errorCode || managerError.code || null,
     errorMessage: fields.errorMessage || managerError.message || null,
     incompatible: Array.isArray(fields.incompatible) && fields.incompatible.length > 0 ? fields.incompatible : managerError.incompatible,
     runtimeVersion: fields.runtimeVersion || managerError.runtimeVersion || null,
     peerDependencies: fields.peerDependencies || managerError.peerDependencies || null,
+    repoUrl: sourceUrl || '',
+    sourceUrl: sourceUrl || '',
+    sourceLabel: sourceUrl
+       ? (sourceUrl.includes('github.com') ? 'GitHub 仓库'
+         : (sourceUrl.includes('gitlab.com') ? 'GitLab 仓库' : '远端 Git 仓库'))
+       : '未确认远端仓库',
+    sourceKind: sourceUrl ? 'manifest' : 'unknown',
+    sourceEvidence: sourceUrl ? 'package.json repository/homepage' : '未找到远端来源证据',
+    sourceConfidence: sourceUrl ? 'fact' : 'unknown',
     localized: st.localized,
     displayName,
     localizedDescription,
@@ -300,6 +323,7 @@ export function collectStatus(profileDirs) {
     const manifest = readProfileManifest(profileDir)
     if (!manifest) continue
     for (const pkg of manifest.dependencies) {
+      if (excludedManagedName(pkg)) continue
       const info = readBundleInfo(profileDir, pkg)
       if (info === undefined) continue
       out.push(buildRow(profileDir, pkg, {
@@ -425,6 +449,41 @@ export function revertLocale(profileDirs, options = {}) {
   return results
 }
 
+/** 将翻译/还原逐项结果压缩为前端可直接解释的摘要，避免顶层 ok 与实际失败不一致。 */
+export function summarizeMutationResults(value, action = 'apply') {
+  const items = Array.isArray(value) ? value : []
+  const counts = { applied: 0, restored: 0, skipped: 0, failed: 0, unchanged: 0 }
+  for (const item of items) {
+    const state = item && item.state
+    if (state === 'applied') { counts.applied += 1; if (item.note === 'unchanged') counts.unchanged += 1 }
+    else if (state === 'restored') counts.restored += 1
+    else if (state === 'failed') counts.failed += 1
+    else if (state === 'skipped-not-installed' || state === 'needs-catalog' || state === 'no-backup') counts.skipped += 1
+  }
+  const acted = action === 'revert' ? counts.restored : counts.applied
+  const total = items.length
+  const ok = counts.failed === 0
+  const partial = counts.failed > 0 && acted > 0
+  // 顶层只给一条合并后的失败摘要；逐项 message 仍保留在 value，供行内详情查看。
+  const failureGroups = new Map()
+  for (const item of items.filter((x) => x && x.state === 'failed')) {
+    const reason = String(item.message || item.reason || '宿主没有返回具体原因').trim()
+    if (!failureGroups.has(reason)) failureGroups.set(reason, [])
+    failureGroups.get(reason).push(String(item.pkg || '未知对象'))
+  }
+  const failureSummary = Array.from(failureGroups.entries()).map(([reason, pkgs]) => {
+    const shown = pkgs.slice(0, 3).join('、') + (pkgs.length > 3 ? ' 等 ' + pkgs.length + ' 项' : '')
+    return pkgs.length + ' 项：' + reason + '（' + shown + '）'
+  }).join('；')
+  const nextAction = counts.failed > 0
+    ? failureSummary + '；展开对应行详情后按建议重试'
+    : (acted === 0 && total > 0 ? '没有需要写入的项目；请先刷新状态确认范围' : null)
+  const message = counts.failed > 0
+    ? (acted > 0 ? '已完成 ' + acted + ' 项，失败 ' + counts.failed + ' 项：' + failureSummary : '全部 ' + counts.failed + ' 项处理失败：' + failureSummary)
+    : (acted === 0 && total > 0 ? '没有需要写入的项目' : null)
+  return { ok, partial, counts, value: items, nextAction, message }
+}
+
 /**
  * 复用第一方插件管理器服务。
  * 它的 `listBundles()` 就是插件页用的那份数据 —— 同一个数据源才能保证两端一致，
@@ -449,7 +508,7 @@ export function collectStatusViaService(ctx, dirs) {
     if (!Array.isArray(list)) return undefined
     const catalogPkgs = new Set(readCatalog().map((e) => e.pkg))
     const catalogByPkg = new Map(readCatalog().map((e) => [e.pkg, e]))
-    return list.map((b) => {
+    return list.filter((b) => b && !excludedManagedName(b.name)).map((b) => {
       const managerError = normalizeManagerError(b.error ?? b.failure ?? b.status?.error ?? b.status)
       return buildRow(profileDir, b.name, {
       installed: b.installed !== false,
@@ -461,6 +520,8 @@ export function collectStatusViaService(ctx, dirs) {
         incompatible: managerError.incompatible,
         runtimeVersion: managerError.runtimeVersion,
         peerDependencies: managerError.peerDependencies,
+        repoUrl: b.repository?.url ?? b.repository ?? b.homepage ?? '',
+        repository: b.repository?.url ?? b.repository ?? b.homepage ?? '',
       inCatalog: catalogPkgs.has(b.name),
       catalogEntry: catalogByPkg.get(b.name),
       meta: b.meta,
@@ -484,7 +545,7 @@ export async function collectStatusViaServiceAsync(ctx, dirs) {
     const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
     const catalogPkgs = new Set(readCatalog().map((e) => e.pkg))
     const catalogByPkg = new Map(readCatalog().map((e) => [e.pkg, e]))
-    return list.map((b) => {
+    return list.filter((b) => b && !excludedManagedName(b.name)).map((b) => {
       const managerError = normalizeManagerError(b.error ?? b.failure ?? b.status?.error ?? b.status)
       return buildRow(profileDir, b.name, {
       installed: b.installed !== false,
@@ -670,19 +731,83 @@ export async function fetchLatestVersion(name) {
   }
 }
 
-/** 进行中的更新任务：token → 阶段状态。仅内存，重启即清空。 */
+/** 更新任务状态：内存用于快速轮询，文件用于跨 DSH 重启恢复。 */
 const updateJobs = new Map()
 // profile 级安装互斥：第一方管理器改写同一份 profile 时只能有一个在途操作。
 let activeInstall = null
 /** 只保留最近若干条已完成任务，避免长时间运行后无限增长。 */
 const UPDATE_JOB_KEEP = 20
+const UPDATE_JOB_STALE_MS = 24 * 60 * 60 * 1000
+function updateJobsFile() {
+  return path.join(path.dirname(overlayPath()), 'update-jobs.json')
+}
+function persistableUpdateJob(job) {
+  if (!job || typeof job !== 'object' || typeof job.pkg !== 'string') return null
+  const out = {}
+  for (const key of ['pkg', 'spec', 'kind', 'profileDir', 'startedAt', 'stage', 'message', 'done', 'ok', 'state', 'from', 'to', 'code', 'changed', 'versionUnchanged', 'pending', 'timedOut', 'application', 'refined']) {
+    if (job[key] !== undefined) out[key] = job[key]
+  }
+  return out
+}
+function persistUpdateJobs() {
+  try {
+    fs.mkdirSync(path.dirname(updateJobsFile()), { recursive: true })
+    const values = Array.from(updateJobs.entries()).map(([token, job]) => ({ token, job: persistableUpdateJob(job) })).filter((row) => row.job !== null)
+    fs.writeFileSync(updateJobsFile(), JSON.stringify(values.slice(-UPDATE_JOB_KEEP), null, 2) + '\n')
+  } catch {
+    /* 状态留痕失败不影响安装本身 */
+  }
+}
+function loadPersistedUpdateJobs() {
+  try {
+    const rows = JSON.parse(fs.readFileSync(updateJobsFile(), 'utf8'))
+    if (!Array.isArray(rows)) return
+    for (const row of rows) {
+      if (!row || typeof row.token !== 'string' || !row.job || typeof row.job !== 'object') continue
+      if (typeof row.job.startedAt === 'number' && Date.now() - row.job.startedAt > UPDATE_JOB_STALE_MS && row.job.done !== true) {
+        row.job = Object.assign({}, row.job, { stage: 'failed', state: 'failed', done: true, ok: false, pending: false, code: 'stale-after-restart', message: '更新任务超过 24 小时未确认，已停止自动等待；请刷新状态后重试。' })
+      }
+      updateJobs.set(row.token, row.job)
+      if (activeInstall === null && row.job.done !== true && row.job.pending === true) {
+        activeInstall = { kind: 'single', token: row.token, profileDir: row.job.profileDir, pending: true }
+      }
+      if (row.job.done === true && activeInstall && activeInstall.token === row.token) activeInstall = null
+    }
+  } catch {
+    /* 首次运行或坏文件均按空状态启动 */
+  }
+}
+function reconcilePersistedJob(token, job) {
+  if (!job || job.done === true || job.pending !== true) return job
+  const now = installedVersion(job.profileDir, job.pkg)
+  if (typeof job.startedAt === 'number' && Date.now() - job.startedAt > UPDATE_JOB_STALE_MS) {
+    const stale = Object.assign({}, job, { stage: 'failed', state: 'failed', done: true, ok: false, pending: false, code: 'stale-after-restart', message: '更新任务超过 24 小时未确认，已停止自动等待；请刷新状态后重试。' })
+    updateJobs.set(token, stale)
+    if (activeInstall && activeInstall.token === token) activeInstall = null
+    persistUpdateJobs()
+    return stale
+  }
+  if (now !== null && now !== job.from) {
+    const done = Object.assign({}, job, {
+      stage: 'done', state: 'updated', done: true, ok: true, pending: false,
+      to: now, changed: true, code: 'recovered-after-restart',
+      message: '更新已在 DSH 重启期间完成，当前版本为 ' + now + '。',
+    })
+    updateJobs.set(token, done)
+    persistUpdateJobs()
+    if (activeInstall && activeInstall.token === token) activeInstall = null
+    return done
+  }
+  return job
+}
 function pruneUpdateJobs() {
   if (updateJobs.size <= UPDATE_JOB_KEEP) return
   const finished = []
   for (const [key, job] of updateJobs) if (job && job.done === true) finished.push(key)
   while (updateJobs.size > UPDATE_JOB_KEEP && finished.length > 0) updateJobs.delete(finished.shift())
+  persistUpdateJobs()
 }
-
+loadPersistedUpdateJobs()
 function claimInstall(lock) {
   if (activeInstall !== null) return false
   activeInstall = lock
@@ -723,6 +848,82 @@ export function resolveUpdateSpec(profileDir, pkg) {
   return { kind: 'registry', spec: pkg + '@latest', range, reason: null }
 }
 
+/** 解析 profile 中的 git 依赖，始终返回脱敏的可访问地址和 ref。 */
+export function parseGitDependencySpec(range) {
+  if (typeof range !== 'string' || range.trim() === '') return undefined
+  let raw = range.trim()
+  if (raw.startsWith('github:')) raw = 'https://github.com/' + raw.slice('github:'.length)
+  const hash = raw.indexOf('#')
+  const ref = hash >= 0 ? raw.slice(hash + 1) : ''
+  if (hash >= 0) raw = raw.slice(0, hash)
+  const repoUrl = normalizeRepoUrl(raw)
+  if (repoUrl === '') return undefined
+  return { repoUrl, ref: ref || 'HEAD' }
+}
+
+const gitDependencyCache = new Map()
+
+function lockfileCommit(profileDir, pkg, range, repoUrl) {
+  try {
+    const text = fs.readFileSync(path.join(profileDir, 'pnpm-lock.yaml'), 'utf8')
+    const idx = text.indexOf('specifier: ' + range)
+    if (idx >= 0) {
+      const near = text.slice(idx, idx + 1600).match(/[0-9a-f]{40}/i)
+      if (near) return near[0].toLowerCase()
+    }
+    const pkgIdx = text.indexOf(String(pkg) + ':')
+    if (pkgIdx >= 0) {
+      const near = text.slice(pkgIdx, pkgIdx + 1600).match(/[0-9a-f]{40}/i)
+      if (near) return near[0].toLowerCase()
+    }
+  } catch {
+    /* lockfile 不是所有 profile 都有；此时只报告来源已确认 */
+  }
+  return null
+}
+function remoteRefCandidates(ref) {
+  if (!ref || ref === 'HEAD') return ['HEAD']
+  return ['refs/heads/' + ref, 'refs/tags/' + ref, ref]
+}
+
+/** 用 lockfile commit 与远端 ref 比对 git 直装插件；不能比对时明确说明原因。 */
+export async function gitDependencyUpdateStatus(profileDir, pkg, range, force = false) {
+  const parsed = parseGitDependencySpec(range)
+  if (parsed === undefined) return { kind: 'git', hasUpdate: null, reason: 'Git 依赖规格无法解析' }
+  const key = String(profileDir) + '|' + String(pkg) + '|' + range
+  const hit = gitDependencyCache.get(key)
+  const ttl = hit?.remoteCommit ? REMOTE_TTL_OK_MS : REMOTE_TTL_FAIL_MS
+  if (force !== true && hit && Date.now() - hit.at < ttl) return hit
+  let remoteCommit = null
+  let errorReason = null
+  for (const ref of remoteRefCandidates(parsed.ref)) {
+    const r = await gitRun(['ls-remote', parsed.repoUrl, ref], profileDir, GIT_TIMEOUT_MS)
+    const line = r.stdout.split(/\r?\n/).map((x) => x.trim()).find((x) => /^[0-9a-f]{40}\s/.test(x))
+    if (r.ok === true && line) {
+      remoteCommit = line.split(/\s+/)[0].toLowerCase()
+      break
+    }
+    const firstErr = (r.stderr || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean)
+    errorReason = r.timedOut ? '远端查询超时' : ('远端不可达：' + (firstErr || '未返回对应 ref'))
+  }
+  const currentCommit = lockfileCommit(profileDir, pkg, range, parsed.repoUrl)
+  const entry = {
+    kind: 'git',
+    updateKind: 'git',
+    repoUrl: parsed.repoUrl,
+    ref: parsed.ref,
+    currentCommit,
+    remoteCommit,
+    remoteSha: remoteCommit,
+    latest: remoteCommit ? shortSha(remoteCommit) : null,
+    hasUpdate: remoteCommit && currentCommit ? remoteCommit !== currentCommit : null,
+    reason: remoteCommit === null ? (errorReason || '远端没有返回对应 ref') : (currentCommit === null ? '已确认来源，但 lockfile 没有当前提交，暂时无法比对' : null),
+    at: Date.now(),
+  }
+  gitDependencyCache.set(key, entry)
+  return entry
+}
+
 /** 启动一次更新：立即返回 token，真实进度用 updateJobStatus 轮询（避免长请求卡死界面）。 */
 /**
  * 更新后的统一收尾：补回被 pnpm 洗掉的优化结果 + 取变化提示。
@@ -753,15 +954,12 @@ export async function finishAfterUpdate(profileDir, pkg, from, to) {
 }
 
 export function startUpdate(ctx, profileDir, pkg) {
-  /* 批量互斥：批量更新在宿主侧串行跑 pnpm；单包更新若并行进入，就会有两条 pnpm
-     同时改同一个 profile（实测风险：客户端一次轮询抖动就会把按钮放开）。
-     只有 startUpdateAll 有幂等，这里必须自己挡。 */
   const running = updateAllStatus()
   if (running && running.running === true) {
     return { ok: false, code: 'batch-running', message: '批量更新正在进行（' + (running.index + 1) + '/' + running.total + '）：等它结束后再更新这一项，避免两条 pnpm 并发安装' }
   }
   if (activeInstall !== null) {
-    return { ok: false, code: 'update-busy', message: '已有更新正在执行，请等待当前更新完成后再试' }
+    return { ok: false, code: activeInstall.pending ? 'update-pending' : 'update-busy', message: activeInstall.pending ? '已有安装请求仍在等待宿主确认，请先刷新状态，不要重复点击更新' : '已有更新正在执行，请等待当前更新完成后再试' }
   }
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, code: 'unsupported-spec', message: plan.reason }
@@ -769,39 +967,59 @@ export function startUpdate(ctx, profileDir, pkg) {
   if (pm === undefined) return { ok: false, code: 'manager-unavailable', message: '插件管理器服务未就绪（重启 DSH 后可用）' }
   if (typeof pm.installBundle !== 'function') return { ok: false, code: 'manager-unsupported', message: '插件管理器未提供 installBundle' }
   const token = pkg + ':' + Date.now().toString(36)
-  const lock = { kind: 'single', token, profileDir }
+  const lock = { kind: 'single', token, profileDir, pending: false }
   if (!claimInstall(lock)) return { ok: false, code: 'update-busy', message: '已有更新正在执行，请等待当前更新完成后再试' }
   const base = { pkg, spec: plan.spec, kind: plan.kind, startedAt: Date.now() }
-  updateJobs.set(token, Object.assign({}, base, { stage: 'installing', message: '正在执行安装（pnpm，可能持续数十秒）…', done: false, ok: null }))
+  updateJobs.set(token, Object.assign({}, base, { profileDir, stage: 'installing', message: '正在执行安装（pnpm，可能持续数十秒）…', done: false, ok: null }))
+  persistUpdateJobs()
+  const settle = async (initial) => {
+    let result = initial
+    while (result && result.state === 'pending-check' && result.confirmation && typeof result.confirmation.then === 'function') {
+      lock.pending = true
+      const job = updateJobs.get(token) ?? base
+      updateJobs.set(token, Object.assign({}, job, { stage: 'awaiting-confirmation', message: result.message || '安装请求已提交，等待宿主确认。', done: false, ok: null, pending: true, code: 'pending-check', timedOut: true }))
+      persistUpdateJobs()
+      result = await result.confirmation
+    }
+    let finished = { refined: false, delta: null }
+    if (result && result.ok === true) {
+      try { finished = await finishAfterUpdate(profileDir, pkg, result.from, result.to) } catch (error) {
+        result = Object.assign({}, result, { ok: false, state: 'failed', code: 'post-update-failed', message: '更新已执行，但收尾处理失败：' + String(error?.message ?? error) })
+      }
+    }
+    const suffix = (finished.refined === true ? ' 优化已保持。' : '') + (finished.delta !== null ? ' ' + describeDeltaText(finished.delta) : '')
+    const job = updateJobs.get(token) ?? base
+    updateJobs.set(token, Object.assign({}, job, {
+      stage: result.state === 'unchanged' ? 'unchanged' : (result.ok === true ? 'done' : 'failed'),
+      message: result.state === 'unchanged' ? String(result.message || '安装已执行，但版本未变化') : (result.ok === true ? '安装执行完成。' + suffix : String(result.message || '更新失败')),
+      done: true,
+      ok: result.ok === true && result.state !== 'unchanged',
+      state: result.state || (result.ok === true ? 'updated' : 'failed'),
+      from: result.from ?? null,
+      to: result.to ?? null,
+      code: result.code || null,
+      application: result.application || null,
+      changed: result.changed === true,
+      versionUnchanged: result.versionUnchanged === true,
+      refined: finished.refined,
+      delta: finished.delta,
+      pending: false,
+    }))
+    pruneUpdateJobs()
+    persistUpdateJobs()
+  }
   installAndWait(ctx, profileDir, pkg)
     .then(async (result) => {
-      const job = updateJobs.get(token) ?? base
-      const finished = await finishAfterUpdate(profileDir, pkg, result.from, result.to)
-      const suffix = (finished.refined === true ? ' 优化已保持。' : '') + (finished.delta !== null ? ' ' + describeDeltaText(finished.delta) : '')
-      pruneUpdateJobs()
-      updateJobs.set(token, Object.assign({}, job, {
-        stage: result.state === 'unchanged' ? 'unchanged' : (result.ok === true ? 'done' : 'failed'),
-        message: result.state === 'unchanged'
-          ? String(result.message || '安装已执行，但版本未变化')
-          : (result.ok === true ? '安装执行完成。' + suffix : String(result.message || '更新失败')),
-        done: true,
-        ok: result.ok === true && result.state !== 'unchanged',
-        state: result.state || (result.ok === true ? 'updated' : 'failed'),
-        from: result.from ?? null,
-        to: result.to ?? null,
-        code: result.code || null,
-        application: result.application || null,
-        changed: result.changed === true,
-        versionUnchanged: result.versionUnchanged === true,
-        refined: finished.refined,
-        delta: finished.delta,
-      }))
+      await settle(result)
+      // confirmation 已最终落定后才释放 profile 锁；待确认期间禁止第二个安装进入。
+      lock.pending = false
       releaseInstall(lock)
     })
     .catch((error) => {
+      lock.pending = false
       const job = updateJobs.get(token) ?? base
-      pruneUpdateJobs()
-      updateJobs.set(token, Object.assign({}, job, { stage: 'failed', message: String((error && error.message) || error), done: true, ok: false }))
+      updateJobs.set(token, Object.assign({}, job, { stage: 'failed', state: 'failed', message: String((error && error.message) || error), done: true, ok: false, pending: false, code: 'update-failed' }))
+      persistUpdateJobs()
       releaseInstall(lock)
     })
   return { ok: true, token, plan: { kind: plan.kind, spec: plan.spec, range: plan.range } }
@@ -1071,6 +1289,11 @@ function readUserPatchIds(profileDir) {
  * 审查全部已装插件，返回 { generatedAt, findings, byPkg, counts }。
  * findings 为全局列表；byPkg 便于表格行内展示。
  */
+export function isActionableFinding(finding) {
+  if (!finding || typeof finding !== 'object') return false
+  return finding.confidence === 'fact' || finding.severity === 'high' || finding.severity === 'medium'
+}
+
 export function auditPackages(ctx, profileDir) {
   if (auditCache !== null && Date.now() - auditCache.at < AUDIT_TTL_MS) return auditCache.result
   const findings = []
@@ -1078,9 +1301,33 @@ export function auditPackages(ctx, profileDir) {
   try {
     const list = collectStatusViaService(ctx, [profileDir]) ?? collectStatus([profileDir])
     const pkgs = list.map((r) => r.pkg)
+    // 插件管理器可能仍返回一个非法 name；不能因为后续 path 校验失败就静默跳过。
+    // 这是更新、翻译和审查全部失效的共同根因，必须作为事实级审查项直接显示。
+    for (const pkg of pkgs) {
+      if (isSafePackageName(pkg)) continue
+      add({ kind: 'conflict', key: 'name-invalid-' + String(pkg), pkg: String(pkg), peers: [], severity: 'high', confidence: 'fact',
+        title: '插件 name 非法',
+        evidence: '插件管理器返回 name=' + JSON.stringify(pkg) + '；该值不符合 npm 包名规则，宿主无法安全定位 node_modules 路径。',
+        impact: '非法 name 会让更新、文案生成和审查定位失效；此前的“全绿”不能证明该插件可用。',
+        remedy: '把 package.json 的 name 改为合法的小写 npm 包名（作用域包使用 @scope/name），重新安装后再刷新 DSH。中文名称只放在展示层。',
+        action: { kind: 'manual', label: '修复 package.json name', target: String(pkg), reason: '先备份 package.json，再修复 name 并重新安装' } })
+    }
     const patchByPkg = new Map()
     const ownInsertIds = new Set()
     for (const pkg of pkgs) {
+      const manifest = readInstalledManifest(profileDir, pkg)
+      if (manifest !== undefined) {
+        const declaredName = typeof manifest.name === 'string' ? manifest.name.trim() : ''
+        if (declaredName !== pkg || !isSafePackageName(declaredName)) {
+          const reason = declaredName === '' ? 'package.json 缺少 name' : (declaredName !== pkg ? 'package.json name 与依赖标识不一致' : 'package.json name 不符合 npm 包名规则')
+          add({ kind: 'conflict', key: 'manifest-name-invalid-' + pkg, pkg, peers: [], severity: 'high', confidence: 'fact',
+            title: '插件 package.json 的 name 非法',
+            evidence: '依赖标识=' + pkg + '；声明 name=' + JSON.stringify(declaredName) + '；原因：' + reason,
+            impact: '宿主可能无法把安装目录、插件管理器记录和更新目标稳定对应，导致更新/翻译结果看似成功但实际不生效。',
+            remedy: '把 package.json 的 name 修复为与依赖标识完全一致的合法 npm 包名，重新安装后刷新状态。',
+            action: { kind: 'manual', label: '修复 package.json name', target: path.join(profileDir, 'node_modules', ...pkg.split('/'), 'package.json'), reason: '备份后修复 name，再重新安装该插件' } })
+        }
+      }
       const t = readPatchTargets(profileDir, pkg)
       if (t !== undefined) {
         patchByPkg.set(pkg, t)
@@ -1102,7 +1349,7 @@ export function auditPackages(ctx, profileDir) {
           add({ kind: 'conflict', key: 'inject-' + pkg + '-' + mod, pkg, peers: [], severity: 'low', confidence: 'inferred',
             title: '客户端依赖 ' + mod + ' 无法确认是否可满足',
             evidence: 'dsh.client.inject 声明了 ' + mod + '，既不在 profile 中，也无法读取 DSH 本体清单',
-            remedy: '若该模块缺失，客户端半体会激活失败并导致界面无法启动；可在插件页确认其是否正常加载。' })
+            remedy: '若该模块缺失，客户端半体会激活失败并导致界面无法启动；可在插件页确认其是否正常加载。', action: { kind: 'manual', label: '查看插件清单', target: pkg, reason: '确认 inject 依赖是否应由插件声明或由 DSH 提供' } })
           continue
         }
         if (!appPkgs.has(mod)) {
@@ -1123,7 +1370,7 @@ export function auditPackages(ctx, profileDir) {
         add({ kind: 'conflict', key: 'override-' + pkg + '-' + id, pkg, peers: [], severity: 'medium', confidence: 'fact',
           title: '覆盖了非自身的 loader 行 ' + id,
           evidence: t.file + ' → id: ' + id + '（未声明 name，属覆盖已有行）',
-          remedy: '该行由平台或其他插件提供，覆盖会改变它们的行为。请确认这是你的本意。' })
+          remedy: '该行由平台或其他插件提供，覆盖会改变它们的行为。请确认这是你的本意。', action: { kind: 'manual', label: '查看补丁文件', target: t.file, reason: '确认是否应移除该 override' } })
       }
     }
     // R3 两个及以上插件覆盖同一行
@@ -1139,7 +1386,7 @@ export function auditPackages(ctx, profileDir) {
       add({ kind: 'conflict', key: 'dup-' + id, pkg: who[0], peers: who.slice(1), severity: 'high', confidence: 'fact',
         title: '多个插件覆盖同一行 ' + id,
         evidence: who.join('、') + ' 都覆盖了 ' + id + '，后者会覆盖前者的配置',
-        remedy: '后安装者胜出。若需要两者共存，请把它们对该行的 config 合并到 profile 的 patch 层。' })
+        remedy: '后安装者胜出。若需要两者共存，请把它们对该行的 config 合并到 profile 的 patch 层。', action: { kind: 'manual', label: '查看冲突插件', target: who.join('、'), reason: '合并或移除重复 override' } })
     }
     // R4 用户 patch 层与插件自身 patch 撞名（推断）
     for (const [pkg, t] of patchByPkg) {
@@ -1203,6 +1450,8 @@ export function auditPackages(ctx, profileDir) {
         inferred: findings.filter((f) => f.confidence === 'inferred').length,
       },
       noCompat,
+      actionable: findings.filter(isActionableFinding).length,
+      observations: findings.filter((f) => !isActionableFinding(f)).length,
     }
     auditCache = { at: Date.now(), result }
     return result
@@ -1319,28 +1568,29 @@ export function skillRepoInfo(dir) {
   }
 }
 
-/** 将 git remote 规范化为可直接打开的 GitHub 仓库地址。非 GitHub 远端不伪造来源。 */
+/** 将 git remote 规范化为可打开、已脱敏的仓库地址；支持 GitHub、GitLab 和自建 Git。 */
 export function normalizeRepoUrl(raw) {
   if (typeof raw !== 'string' || raw.trim() === '') return ''
-  let value = raw.trim().replace(/^git\+/, '')
-  if (value.startsWith('git@github.com:')) value = 'https://github.com/' + value.slice('git@github.com:'.length)
-  else if (value.startsWith('ssh://git@github.com/')) value = 'https://github.com/' + value.slice('ssh://git@github.com/'.length)
-  else if (value.startsWith('git://github.com/')) value = 'https://github.com/' + value.slice('git://github.com/'.length)
-  value = value.replace(/\.git(?:#.*)?$/, '').replace(/\/$/, '')
+  let value = raw.trim().replace(/^git\+/, '').replace(/^['"]|['"]$/g, '')
+  // scp 风格：git@gitlab.example.com:owner/repo.git
+  const scp = /^(?:[^@/:]+@)?([^/:]+):(.+)$/.exec(value)
+  if (scp && !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) value = 'https://' + scp[1] + '/' + scp[2]
+  else if (value.startsWith('ssh://')) value = value.replace(/^ssh:\/\//i, 'https://')
+  else if (value.startsWith('git://')) value = value.replace(/^git:\/\//i, 'https://')
   try {
     const parsed = new URL(value)
-    if (parsed.hostname.toLowerCase() !== 'github.com') return ''
+    if (!/^https?:$/i.test(parsed.protocol) || !parsed.hostname) return ''
     parsed.username = ''
     parsed.password = ''
     parsed.hash = ''
     parsed.search = ''
-    parsed.pathname = parsed.pathname.replace(/\.git$/, '').replace(/\/$/, '')
-    return 'https://github.com' + parsed.pathname
+    parsed.pathname = parsed.pathname.replace(/\.git$/, '').replace(/\/+/g, '/').replace(/\/$/, '')
+    const host = parsed.hostname + (parsed.port ? ':' + parsed.port : '')
+    return 'https://' + host + parsed.pathname
   } catch {
     return ''
   }
 }
-
 const REMOTE_TTL_OK_MS = 5 * 60 * 1000
 const REMOTE_TTL_FAIL_MS = 30 * 1000
 const remoteShaCache = new Map()
@@ -1427,14 +1677,14 @@ async function updateOneSkill(row, pkg) {
  * @param pkgs - 技能名列表（行里的 pkg）
  * @returns 每个技能一项 {pkg, state: updated|unchanged|failed, message, from, to}
  */
-export async function updateSkillRepos(pkgs) {
+export async function updateSkillRepos(pkgs, scope = undefined) {
   const wanted = []
   for (const raw of Array.isArray(pkgs) ? pkgs : []) {
     const name = skillBaseName(String(raw))
     if (name !== '' && !wanted.includes(name)) wanted.push(name)
   }
   // collectSkills 只用第一方服务的可见性来补「随 DSH 提供」的行；更新路径不需要它。
-  const rows = collectSkills({ get: () => undefined })
+  const rows = collectSkills(scope || { get: () => undefined })
   const results = []
   for (const pkg of wanted) {
     results.push(await updateOneSkill(rows.find((r) => r.pkg === pkg), pkg))
@@ -1473,6 +1723,89 @@ export function parseSkillFrontmatter(text) {
   return { present: true, fields }
 }
 
+/** 技能稳定标识校验：中文名只能存在于展示层，不能污染 name。 */
+export function validateSkillName(name, dirName = '') {
+  const value = String(name ?? '').trim()
+  const dir = String(dirName ?? '').trim()
+  if (value === '') return { valid: false, reason: '缺少 name', normalized: dir }
+  if (/[\\/]/.test(value) || value === '.' || value === '..' || /\s/.test(value)) {
+    return { valid: false, reason: 'name 含路径分隔符或空白', normalized: dir || value }
+  }
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(value)) {
+    return { valid: false, reason: 'name 只能使用小写字母、数字、点、下划线和连字符', normalized: dir || value }
+  }
+  return { valid: true, reason: '', normalized: value }
+}
+
+const EXCLUDED_SKILL_NAMES = new Set([
+  'ponytail',
+  'skillopt',
+  'skills-summarize-audit',
+])
+const EXCLUDED_MANAGED_NAMES = new Set(EXCLUDED_SKILL_NAMES)
+
+function excludedManagedName(value) {
+  const raw = String(value ?? '').trim().toLowerCase()
+  const base = raw.replace(/^@[^/]+\//, '')
+  return EXCLUDED_MANAGED_NAMES.has(raw) || EXCLUDED_MANAGED_NAMES.has(base)
+}
+
+function archivedSkillPath(value) {
+  return /(?:^|[\\/])(?:\.archived|archived|\.disabled|disabled)(?:[\\/]|$)/i.test(String(value ?? ''))
+}
+
+/** 明确排除已归档/历史技能，不能只依赖目录是否叫 archived。 */
+function excludedSkillName(value) {
+  const raw = String(value ?? '').trim().toLowerCase()
+  const base = skillBaseName(raw).toLowerCase()
+  return EXCLUDED_SKILL_NAMES.has(raw) || EXCLUDED_SKILL_NAMES.has(base)
+}
+
+function excludedSkillCandidate(candidate) {
+  return excludedSkillName(candidate?.name) || excludedSkillName(candidate?.declaredName) || excludedSkillName(candidate?.dirName)
+}
+
+function sourceUrlFromValue(value) {
+  if (typeof value !== 'string' || value.trim() === '') return ''
+  // 所有来源都走同一套脱敏与规范化，避免 repository/homepage 的凭据、query 或 fragment 进入 UI。
+  return normalizeRepoUrl(value)
+}
+
+/** 从 frontmatter、邻近 manifest、技能锁文件中寻找可核验的远端来源。 */
+export function resolveSkillSource(candidate) {
+  const fields = candidate && candidate.frontmatterFields && typeof candidate.frontmatterFields === 'object'
+    ? candidate.frontmatterFields : {}
+  const declared = fields.repository || fields.homepage || fields.source || fields.repo || ''
+  const declaredUrl = sourceUrlFromValue(declared)
+  if (declaredUrl !== '') return { repoUrl: declaredUrl, sourceKind: 'frontmatter', sourceEvidence: 'SKILL.md frontmatter', confidence: 'fact' }
+  for (const file of [path.join(candidate?.dir || '', 'package.json'), path.join(candidate?.dir || '', 'skill.json'), path.join(candidate?.dir || '', 'manifest.json')]) {
+    try {
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8'))
+      const value = doc.repository?.url || doc.repository || doc.homepage || doc.source
+      const url = sourceUrlFromValue(value)
+      if (url !== '') return { repoUrl: url, sourceKind: 'manifest', sourceEvidence: path.basename(file), confidence: 'fact' }
+    } catch { /* 没有清单或不是 JSON，继续查锁文件 */ }
+  }
+  const lock = path.join(process.env.DSH_AGENTS_HOME ?? path.join(os.homedir(), '.agents'), '.skill-lock.json')
+  try {
+    const doc = JSON.parse(fs.readFileSync(lock, 'utf8'))
+    const skills = doc && doc.skills && typeof doc.skills === 'object' ? doc.skills : {}
+    const candidates = [candidate?.name, candidate?.dirName].filter(Boolean).map(String)
+    const candidatePath = String(candidate?.path || '').replaceAll('\\', '/').toLowerCase()
+    const agentsRoot = String(process.env.DSH_AGENTS_HOME ?? path.join(os.homedir(), '.agents')).replaceAll('\\', '/').toLowerCase()
+    for (const [key, value] of Object.entries(skills)) {
+      const source = value && (value.sourceUrl || value.repository || value.repo)
+      const url = sourceUrlFromValue(source)
+      if (url === '') continue
+      const lockPath = String(value?.skillPath || '').replaceAll('\\', '/').toLowerCase()
+      const keyHit = candidates.includes(key)
+      const pathHit = lockPath !== '' && candidatePath !== '' && agentsRoot !== '' && candidatePath.endsWith('/' + lockPath)
+      if (keyHit || pathHit) return { repoUrl: url, sourceKind: 'lockfile', sourceEvidence: path.basename(lock) + ':' + key, confidence: 'fact' }
+    }
+  } catch { /* 锁文件不可用 */ }
+  return { repoUrl: '', sourceKind: 'unknown', sourceEvidence: '未找到远端来源证据', confidence: 'unknown' }
+}
+
 /** 扫描技能根目录，返回全部候选（含被遮蔽的）。 */
 export function scanSkillCandidates() {
   const out = []
@@ -1496,8 +1829,13 @@ export function scanSkillCandidates() {
           file = path.join(root, e.name)
         } else continue
         const text = fs.readFileSync(file, 'utf8')
-        const fm = parseSkillFrontmatter(text)
-        const name = typeof fm.fields.name === 'string' && fm.fields.name !== '' ? fm.fields.name : e.name.replace(/\.md$/, '')
+        const parsedFm = parseSkillFrontmatter(text)
+        const fm = parsedFm && typeof parsedFm === 'object' ? parsedFm : { present: false, fields: {} }
+        const dirName = e.name.replace(/\.md$/, '')
+        const declaredName = typeof fm.fields.name === 'string' ? fm.fields.name.trim() : ''
+        const nameCheck = validateSkillName(declaredName, dirName)
+        const name = declaredName !== '' ? declaredName : dirName
+        if (archivedSkillPath(dir) || archivedSkillPath(file) || excludedSkillName(declaredName) || excludedSkillName(dirName)) continue
         let nested = 0
         if (e.isDirectory()) {
           try {
@@ -1508,7 +1846,11 @@ export function scanSkillCandidates() {
         }
         out.push({
           name,
-          dirName: e.name.replace(/\.md$/, ''),
+          declaredName,
+          namePresent: declaredName !== '',
+          nameValid: nameCheck.valid,
+          nameReason: nameCheck.reason,
+          dirName,
           kind: e.isDirectory() ? 'dir' : 'file',
           rank,
           root,
@@ -1517,6 +1859,7 @@ export function scanSkillCandidates() {
           bytes: text.length,
           frontmatter: fm.present,
           description: typeof fm.fields.description === 'string' ? fm.fields.description : '',
+          frontmatterFields: fm.fields,
           version: typeof fm.fields.version === 'string' && fm.fields.version !== ''
             ? fm.fields.version
             : (function () {
@@ -1555,19 +1898,32 @@ function countNestedSkillFiles(dir, depth = 0) {
   return n
 }
 
-/** 取 DSH 认定的可见技能名集合（第一方数据源）。 */
-export function visibleSkillNames(ctx) {
+/** 取 DSH 技能服务的原始记录；名称列表不足以证明来源，后续按路径/提供方判定。 */
+export function visibleSkillRecords(ctx) {
   try {
-    const svc = ctx.get('skills')
+    const svc = ctx && typeof ctx.get === 'function' ? ctx.get('skills') : undefined
     if (svc === undefined) return undefined
     const raw = typeof svc.list === 'function' ? svc.list() : (typeof svc.snapshot === 'function' ? svc.snapshot() : undefined)
     const arr = raw instanceof Map ? Array.from(raw.values()) : (Array.isArray(raw) ? raw : (raw && raw.entries instanceof Map ? Array.from(raw.entries.values()) : (raw && Array.isArray(raw.entries) ? raw.entries : undefined)))
-    if (arr === undefined) return undefined
-    const names = arr.map((x) => (x && x.candidate ? x.candidate.name : (x && x.name))).filter((x) => typeof x === 'string')
-    return new Set(names)
-  } catch {
-    return undefined
-  }
+    return arr === undefined ? undefined : arr.filter((x) => x && typeof x === 'object')
+  } catch { return undefined }
+}
+
+/** 取 DSH 认定的可见技能名集合（兼容旧调用者，但不再把名称当作管理权证明）。 */
+export function visibleSkillNames(ctx) {
+  const records = visibleSkillRecords(ctx)
+  if (records === undefined) return undefined
+  return new Set(records.map((x) => (x.candidate ? x.candidate.name : x.name)).filter((x) => typeof x === 'string'))
+}
+
+function dshManagedVisibleRecord(record, candidate, dshRoot) {
+  if (!record || typeof record !== 'object') return false
+  const obj = record.candidate && typeof record.candidate === 'object' ? record.candidate : record
+  const provider = String(obj.provider || obj.sourceType || obj.managedBy || obj.owner || '').toLowerCase()
+  if (provider === 'dsh' || provider === 'deepseek' || provider === 'dsh-skills') return true
+  const recordPath = String(obj.path || obj.file || obj.skillPath || '').replaceAll('\\', '/').toLowerCase()
+  const root = String(dshRoot || '').replaceAll('\\', '/').toLowerCase().replace(/\/$/, '')
+  return root !== '' && recordPath !== '' && (recordPath === root || recordPath.startsWith(root + '/'))
 }
 
 /** 稳定标识：去掉本插件附加的「（中文名）」后的原名。 */
@@ -1655,7 +2011,7 @@ export function rewriteSkillFrontmatter(text, opts) {
 export function applySkillLocale(_dirs, options = {}) {
   const entries = options.entries ?? readSkillCatalog()
   const results = []
-  const cands = scanSkillCandidates()
+  const cands = scanSkillCandidates().filter((c) => c.rank < 500)
   const byName = new Map()
   for (const c of cands) {
     const key = skillBaseName(c.name)
@@ -1673,7 +2029,8 @@ export function applySkillLocale(_dirs, options = {}) {
       const target = list[0]
       const text = fs.readFileSync(target.path, 'utf8')
       const next = rewriteSkillFrontmatter(text, {
-        name: entry.zh && entry.zh.name ? entry.zh.name : entry.pkg,
+        // 稳定 name 永远保留原始技能标识；中文名只作为展示层。
+        name: entry.pkg,
         description: entry.zh && entry.zh.description ? entry.zh.description : '',
       })
       if (next === undefined) {
@@ -1700,7 +2057,7 @@ export function revertSkillLocale(_dirs, options = {}) {
   const results = []
   for (const entry of entries) {
     try {
-      const list = scanSkillCandidates().filter((c) => skillBaseName(c.name) === entry.pkg)
+      const list = scanSkillCandidates().filter((c) => c.rank < 500 && skillBaseName(c.name) === entry.pkg)
       if (list.length === 0) {
         results.push({ pkg: entry.pkg, state: 'skipped-not-installed' })
         continue
@@ -1770,49 +2127,49 @@ export function settingsOf(ctx) {
   return undefined
 }
 
+const GENERATION_TIMEOUT_MS = 45000
+const generationTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('模型响应超时'), { code: 'generation-timeout' })), ms))
+
 /** 让模型为技能生成中文名与中文说明（格式：主要触发词 → 精炼说明）。 */
 export async function generateSkillRefinement(ctx, name, originalDescription) {
   const llm = llmOf(ctx)
-  if (!llm || typeof llm.stream !== 'function') {
-    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）' }
-  }
+  if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'ctx.llm 未注册或没有 stream() 方法' }
   const selection = await resolveGenerationModel(ctx)
-  if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型' }
-  try {
-    const prompt = [
-      '你在为 DSH 的技能库做中文化精炼。下面是某个技能的英文/中英混合说明。',
-      '',
-      '技能标识：' + name,
-      '原始说明：',
-      '"""',
-      String(originalDescription || '').slice(0, 2000),
-      '"""',
-      '',
-      '要求：',
-      '1. 只输出严格 JSON，不要 markdown 代码块，不要多余文字。',
-      '2. 结构：{"zhName":"...","description":"..."}',
-      '3. zhName：必须是「' + name + '（中文名）」的形态，中文名 2~8 个字，概括这个技能做什么。',
-      '4. description：只写一行，格式为「主要触发词 → 精炼说明」。',
-      '   · 触发词必须**保留原文里的触发关键词**（含英文词），用、分隔，让人一眼知道什么时候会用到它',
-      '   · 精炼说明用中文，说清「做什么 + 边界（不做什么）」，40~90 字',
-      '5. 不要使用半角冒号加空格（: ），避免破坏 YAML；需要时用全角：',
-      '6. 只依据原文，不要编造原文未提及的能力。',
-      '',
-      '只输出 JSON。',
-    ].join('\n')
-    let raw = llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
-    if (raw && typeof raw.then === 'function') raw = await raw
-    const stream = raw && raw.stream !== undefined ? raw.stream : raw
-    const text = await collectStreamText(stream)
-    const parsed = parseGeneratedSkill(typeof text === 'string' ? text : '')
-    if (parsed === undefined) return { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON', raw: String(text).slice(0, 400) }
-    // 强制命名约定：与原包名一致的做法——原名开头，中文名以（）附加
-    parsed.zhName = enforceSkillName(name, parsed.zhName)
-    parsed.description = String(parsed.description).replace(/:\s/g, '：')
-    return { ok: true, entry: { pkg: name, zh: { name: parsed.zhName, description: parsed.description } }, selection }
-  } catch (error) {
-    return { ok: false, code: 'generate-failed', message: String((error && error.message) || error) }
+  if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型', reason: '设置中没有 provider/model，且 llm.listProviders() 未返回可用模型' }
+  const basePrompt = [
+    '你在为 DSH 的技能库做中文化精炼。下面是某个技能的英文/中英混合说明。', '',
+    '技能标识：' + name, '原始说明：', String(originalDescription || '').slice(0, 2000), '',
+    '要求：', '1. 只输出严格 JSON，不要 markdown 代码块，不要多余文字。',
+    '2. 结构：{"zhName":"...","description":"..."}',
+    '3. zhName：必须是「' + name + '（中文名）」的形态，中文名 2~8 个字，概括这个技能做什么。',
+    '4. description：只写一行，格式为「主要触发词 → 精炼说明」。',
+    '   · 触发词必须保留原文里的触发关键词（含英文词），用、分隔，让人一眼知道什么时候会用到它。',
+    '   · 精炼说明用中文，说清做什么与边界，40~90 字。',
+    '5. 不要使用半角冒号加空格（: ），避免破坏 YAML；需要时用全角：',
+    '6. 只依据原文，不要编造原文未提及的能力。', '', '只输出 JSON。',
+  ].join('\n')
+  let last = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const prompt = attempt === 0 ? basePrompt : basePrompt + '\n上次输出无法解析。请只输出一行合法 JSON，禁止任何解释或代码围栏。'
+      let raw = llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      if (raw && typeof raw.then === 'function') raw = await Promise.race([raw, generationTimeout(GENERATION_TIMEOUT_MS)])
+      const stream = raw && raw.stream !== undefined ? raw.stream : raw
+      const text = await Promise.race([Promise.resolve(collectStreamText(stream)), generationTimeout(GENERATION_TIMEOUT_MS)])
+      const parsed = parseGeneratedSkill(typeof text === 'string' ? text : '')
+      if (parsed !== undefined) {
+        parsed.zhName = enforceSkillName(name, parsed.zhName)
+        parsed.description = String(parsed.description).replace(/:\s/g, '：')
+        return { ok: true, entry: { pkg: name, zh: { name: parsed.zhName, description: parsed.description } }, selection, attempts: attempt + 1 }
+      }
+      last = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已自动重试 1 次）', reason: '模型输出缺少 en/zh.title/description，或不是合法 JSON', raw: String(text).slice(0, 400), attempts: attempt + 1 }
+    } catch (error) {
+      const timeout = error?.code === 'generation-timeout'
+      const detail = String(error?.message ?? error)
+      last = { ok: false, code: timeout ? 'generation-timeout' : 'generate-failed', message: timeout ? '模型响应超时（已自动重试 1 次）' : detail, reason: timeout ? '超过 ' + GENERATION_TIMEOUT_MS + 'ms 未收到完整模型输出' : detail, attempts: attempt + 1 }
+    }
   }
+  return last || { ok: false, code: 'generate-failed', message: '生成失败', reason: '模型没有返回可用结果' }
 }
 
 /** 强制「原名（中文名）」形态，不依赖模型自觉。 */
@@ -1844,12 +2201,23 @@ export function parseGeneratedSkill(text) {
 /** 收集技能行（与插件行同构）。 */
 export function collectSkills(ctx) {
   const cands = scanSkillCandidates()
-  const visible = visibleSkillNames(ctx)
+  const visibleRecords = visibleSkillRecords(ctx)
+  const visible = visibleRecords === undefined ? undefined : new Set(visibleRecords.map((x) => (x.candidate ? x.candidate.name : x.name)).filter((x) => typeof x === 'string'))
+  const includeExternal = ctx && ctx.includeExternalSkills === true
+  const dshRoot = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'skills')
   const byName = new Map()
+  const inScope = (c) => {
+    if (archivedSkillPath(c.path) || archivedSkillPath(c.dir) || excludedSkillCandidate(c)) return false
+    // rank 500 是 Codex/ZCode 的共享技能目录；只有 DSH 第一方服务明确列出时才接管。
+    if (c.rank >= 500 && includeExternal !== true) {
+      const rec = (visibleRecords || []).find((x) => { const n = x.candidate ? x.candidate.name : x.name; return typeof n === 'string' && skillBaseName(n) === skillBaseName(c.name) })
+      if (!dshManagedVisibleRecord(rec, c, dshRoot)) return false
+    }
+    return true
+  }
   for (const c of cands) {
-    // 按**稳定标识**分组：应用后 frontmatter 的 name 会变成「原名（中文名）」，
-    // 若仍按原样分组，二次应用与还原都会找不到目标。
-    const key = skillBaseName(c.name)
+    const key = c.nameValid === true ? skillBaseName(c.name) : c.dirName
+    if (!inScope(c)) continue
     if (!byName.has(key)) byName.set(key, [])
     byName.get(key).push(c)
   }
@@ -1860,8 +2228,8 @@ export function collectSkills(ctx) {
     list.sort((a, b) => a.rank - b.rank)
     const top = list[0]
     const shadowed = list.slice(1)
-    // DSH 可见性：以第一方服务为准；服务不可用时按优先级推断
-    const isVisible = visible === undefined ? true : visible.has(name)
+    const isVisible = visible === undefined ? top.rank < 500 : (top.rank < 500 || visible.has(name))
+    const sourceFact = resolveSkillSource(top)
     rows.push({
       pkg: name,
       kind: 'skill',
@@ -1869,31 +2237,41 @@ export function collectSkills(ctx) {
       enabled: isVisible,
       version: top.version,
       // 优化状态 = 该技能的 name 已被本插件改写为「原名（中文名）」
-      localized: entry !== undefined && top.name === (entry.zh && entry.zh.name ? entry.zh.name : ''),
+      localized: entry !== undefined && !!(entry.zh && entry.zh.description),
       needsText: entry === undefined,
       translationEligible: true,
-      displayName: top.name,
+      displayName: entry?.zh?.name || top.name,
       source: 'rank ' + top.rank,
-      sourceLabel: 'GitHub 原作者仓库',
-      sourceUrl: '',
+      sourceLabel: sourceFact.repoUrl !== '' ? (sourceFact.repoUrl.includes('github.com') ? 'GitHub 仓库' : (sourceFact.repoUrl.includes('gitlab.com') ? 'GitLab 仓库' : '远端 Git 仓库')) : '未确认远端仓库',
+      sourceUrl: sourceFact.repoUrl,
+      sourceKind: sourceFact.sourceKind,
+      sourceEvidence: sourceFact.sourceEvidence,
+      sourceConfidence: sourceFact.confidence,
       skillPath: top.path,
       bytes: top.bytes,
       purpose: String(top.description || '').trim(),
       descriptionLang: descriptionLanguage(top.description),
       frontmatter: top.frontmatter,
-      dirMismatch: top.name !== top.dirName,
+      declaredName: top.declaredName,
+      namePresent: top.namePresent,
+      nameValid: top.nameValid,
+      nameReason: top.nameReason,
+      dirMismatch: top.nameValid === true && top.name !== top.dirName,
       nestedSkillFiles: top.nestedSkillFiles,
       // git 事实：技能不是 npm 包，「更新」只对 git 形态有意义
       ...(() => {
         const repo = top.isGit === true ? skillRepoInfo(path.dirname(top.path)) : { isGit: false }
-        const sourceUrl = repo.isGit === true ? normalizeRepoUrl(repo.url) : ''
+        const sourceUrl = repo.isGit === true ? normalizeRepoUrl(repo.url) : sourceFact.repoUrl
         return {
           isGit: repo.isGit === true,
           repoRoot: repo.isGit === true ? repo.repoRoot : null,
           repoOwned: repo.isGit === true ? repo.owned === true : false,
-          repoUrl: repo.isGit === true ? repo.url : '',
+          repoUrl: sourceUrl,
           sourceUrl,
-          sourceLabel: sourceUrl !== '' ? 'GitHub 原作者仓库' : (repo.isGit === true ? '远端仓库不可用' : '本地技能，无远端仓库'),
+          sourceLabel: sourceUrl !== '' ? (sourceUrl.includes('github.com') ? 'GitHub 仓库' : (sourceUrl.includes('gitlab.com') ? 'GitLab 仓库' : '远端 Git 仓库')) : '未确认远端仓库',
+          sourceKind: repo.isGit === true ? 'git-remote' : sourceFact.sourceKind,
+          sourceEvidence: repo.isGit === true ? 'git remote origin' : sourceFact.sourceEvidence,
+          sourceConfidence: repo.isGit === true ? 'fact' : sourceFact.confidence,
           branch: repo.isGit === true ? repo.branch : '',
           upstream: repo.isGit === true ? repo.upstream : '',
           localSha: repo.isGit === true ? repo.head : '',
@@ -1910,6 +2288,13 @@ export function collectSkills(ctx) {
   // 但 DSH 认定可见。若不补，本页会比真实技能数少（实测少 3 个）。
   if (visible !== undefined) {
     for (const name of visible) {
+      const record = (visibleRecords || []).find((x) => {
+        const n = x && x.candidate ? x.candidate.name : x && x.name
+        return typeof n === 'string' && skillBaseName(n) === skillBaseName(name)
+      })
+      // 这里是服务补齐路径，必须有 DSH provider 或 DSH skills 路径证据。
+      // 仅凭服务返回的名称不能把 Codex/ZCode 技能归入 DSH 管理范围。
+      if (excludedSkillName(name) || !dshManagedVisibleRecord(record, null, dshRoot)) continue
       if (byName.has(name)) continue
       rows.push({
         pkg: name,
@@ -1949,19 +2334,27 @@ export function auditSkills(rows) {
   const findings = []
   const add = (f) => findings.push(Object.assign({ id: f.kind + ':' + f.key }, f))
   for (const r of rows) {
+    if (r.nameValid !== true) {
+      add({ kind: 'conflict', key: 'name-invalid-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
+        title: '技能 name 非法',
+        evidence: '声明 name=' + String(r.declaredName || '(缺失)') + '；目录标识=' + String(r.dirName || r.pkg) + '；原因：' + String(r.nameReason || '不符合稳定标识规则'),
+        impact: '非法 name 会破坏技能稳定匹配，导致更新、翻译和还原可能作用于错误对象。',
+        remedy: '恢复为稳定的小写技能标识；中文名称只放在展示层，不要写入 name。',
+        action: { kind: 'manual', label: '打开技能文件', target: r.skillPath, reason: '需要先备份，再修复 frontmatter 的 name' } })
+    }
     if (r.frontmatter !== true) {
       add({ kind: 'conflict', key: 'fm-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
         title: 'SKILL.md 缺少 frontmatter',
         evidence: r.skillPath + ' 未以 --- 包裹的 frontmatter 开头',
         impact: 'DSH 无法读取 name/description，因此可能无法识别或选择该技能。',
-        remedy: 'DSH 依赖 frontmatter 的 name/description 来选择技能；缺失会导致该技能不可被正确识别。' })
+        remedy: 'DSH 依赖 frontmatter 的 name/description 来选择技能；缺失会导致该技能不可被正确识别。', action: { kind: 'manual', label: '打开技能文件', target: r.skillPath, reason: '补齐 frontmatter 的 name 与 description' } })
     }
     if (r.dirMismatch === true) {
       add({ kind: 'conflict', key: 'name-' + r.pkg, pkg: r.pkg, peers: [], severity: 'medium', confidence: 'fact',
         title: 'frontmatter 的 name 与目录名不一致',
         evidence: 'name=' + r.pkg + ' 但目录/文件名不同',
         impact: '用户看到的名称与实际目录标识不一致，引用、更新和审查可能指向错误对象。',
-        remedy: '两者不一致时，引用该技能容易出现歧义。建议改为一致。' })
+        remedy: '两者不一致时，引用该技能容易出现歧义。建议改为一致。', action: { kind: 'manual', label: '打开技能文件', target: r.skillPath, reason: '让 frontmatter name 与目录标识一致' } })
     }
     // 注意：这里必须判「描述真的为空」，不能用 needsText ——
     // skills 的 needsText 语义是「没有文案条目」，与描述是否为空是两回事。
@@ -1970,27 +2363,27 @@ export function auditSkills(rows) {
         title: 'description 为空',
         evidence: r.skillPath,
         impact: '模型缺少选择依据，技能可能在应使用时没有被召回。',
-        remedy: '模型靠 description 决定是否启用该技能；为空等于它几乎不会被选中。' })
+        remedy: '模型靠 description 决定是否启用该技能；为空等于它几乎不会被选中。', action: { kind: 'manual', label: '打开技能文件', target: r.skillPath, reason: '先补写真实作用说明，再运行翻译优化' } })
     } else if (r.bytes > 0 && r.descriptionLang === '英文') {
       add({ kind: 'interaction', key: 'lang-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
         title: '描述为英文（中文用户的可读性较低）',
         evidence: 'description 语言判定：英文',
         impact: '用户难以快速判断用途；description 同时参与模型选技，翻译会改变行为边界。',
-        remedy: '仅影响你阅读时的直观度。注意：description 是**模型选择技能的依据**，改它属于行为变更——「翻译优化」会真实写入 SKILL.md（写前留 .dsh-skill.backup 备份，「还原翻译」可逐字节恢复），请自行确认生成内容。' })
+        remedy: '仅影响你阅读时的直观度。注意：description 是**模型选择技能的依据**，改它属于行为变更——「翻译优化」会真实写入 SKILL.md（写前留 .dsh-skill.backup 备份，「还原翻译」可逐字节恢复），请自行确认生成内容。', action: { kind: 'translate', label: '一键翻译优化' } })
     }
     if (r.nestedSkillFiles > 0) {
       add({ kind: 'interaction', key: 'nested-' + r.pkg, pkg: r.pkg, peers: [], severity: 'low', confidence: 'fact',
         title: '目录下有 ' + r.nestedSkillFiles + ' 个嵌套 SKILL.md 不会被发现',
         evidence: r.skillPath + ' 所在目录的更深层存在 SKILL.md',
         impact: '嵌套文件不会进入当前技能清单，维护者可能误以为它们已启用。',
-        remedy: 'DSH 只发现顶层 <name>/SKILL.md 或 <name>.md。这些嵌套技能实际不生效（若非有意，可上移或删除）。' })
+        remedy: 'DSH 只发现顶层 <name>/SKILL.md 或 <name>.md。这些嵌套技能实际不生效（若非有意，可上移或删除）。', action: { kind: 'manual', label: '打开技能目录', target: r.skillPath, reason: '把需要启用的 SKILL.md 上移到顶层' } })
     }
     if (Array.isArray(r.shadowed) && r.shadowed.length > 0) {
       add({ kind: 'conflict', key: 'shadow-' + r.pkg, pkg: r.pkg, peers: [], severity: 'high', confidence: 'fact',
         title: '存在 ' + r.shadowed.length + ' 份被遮蔽的同名技能',
         evidence: r.shadowed.join('；') + ' —— 优先级低于当前生效的那份',
         impact: '同名副本不会生效，翻译或更新可能改到未被 DSH 使用的那一份。',
-        remedy: '被遮蔽的那份不会生效（DSH 会记录 "ignored because a higher-priority skill already exists"）。建议删除或改名，避免你以为在用的是另一份。' })
+        remedy: '被遮蔽的那份不会生效（DSH 会记录 "ignored because a higher-priority skill already exists"）。建议删除或改名，避免你以为在用的是另一份。', action: { kind: 'manual', label: '打开技能目录', target: r.skillPath, reason: '删除或改名被遮蔽副本' } })
     }
   }
   return findings
@@ -2108,14 +2501,16 @@ export function updateAllStatus() {
   const batch = readBatch()
   if (batch && batch.running === true && typeof batch.startedAt === 'number' && Date.now() - batch.startedAt > BATCH_STALE_MS) {
     batch.running = false
-    batch.message = '上次批量更新已中断（超过 10 分钟无进展）'
+    batch.awaitingConfirmation = false
+    batch.state = 'stale-after-timeout'
+    batch.message = '上次批量更新已中断（超过 10 分钟无进展）；未确认项目没有继续执行，请刷新状态后逐项重试。'
     writeBatch(batch)
     if (activeInstall && activeInstall.kind === 'batch') activeInstall = null
   }
   return batch
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const sleep = (ms, unref = false) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); if (unref && timer && typeof timer.unref === 'function') timer.unref() })
 
 /** 单个包最多等多久（毫秒）。超时不代表失败，只代表我们不再等。 */
 const UPDATE_WAIT_MS = 120000
@@ -2142,76 +2537,98 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
     .then(() => pm.installBundle(plan.spec, {}))
     .then((result) => { managerResult = result; settled = true })
     .catch((error) => { failure = String((error && error.message) || error); settled = true })
-  const deadline = Date.now() + waitMs
-  for (;;) {
-    if (failure !== null) return { ok: false, message: failure, from }
-    // Promise 已 settle 就立刻判断，不先白等一个轮询周期
-    if (settled === true) {
-      // pluginManager.change() 将安装异常封装成 application=failed 后 resolve，
-      // 不会 reject。必须先检查这个结果，否则真实失败会被误报为「版本未变化」。
-      if (managerResult && managerResult.application === 'failed') {
-        const error = managerResult.error || {}
-        const incompatible = Array.isArray(error.incompatible) ? error.incompatible : []
-        const diagnostic = error.diagnostic || error.code
-        const output = managerResult.packageResult && managerResult.packageResult.output
-        const detail = diagnostic || output || '插件管理器报告安装失败'
-        const code = error.code || (incompatible.length > 0 ? 'incompatible-version' : 'update-failed')
-        const compatibility = incompatible.map((item) => {
-          const name = item && item.name ? item.name : pkg
-          const version = item && item.version ? ' v' + item.version : ''
-          const runtime = item && item.runtimeVersion ? '（当前 DSH ' + item.runtimeVersion + '）' : ''
-          return name + version + runtime
-        }).join('、')
-        return {
-          ok: false,
-          state: 'failed',
-          code,
-          message: compatibility === '' ? String(detail) : String(detail) + '：' + compatibility,
-          from,
-          application: managerResult.application,
-          changed: managerResult.changed === true,
-          managerResult,
-        }
-      }
-      if (managerResult && managerResult.application === 'cancelled') {
-        return { ok: false, state: 'failed', message: '安装已取消', from, managerResult }
-      }
-      const now = installedVersion(profileDir, pkg)
-      if (now !== null && now !== from) return { ok: true, state: 'updated', message: '', from, to: now, changed: managerResult?.changed === true }
-      // 让出一小段时间，避免 pnpm 写盘与我们的读取竞争
-      await sleep(300)
-      const again = installedVersion(profileDir, pkg)
-      const unchanged = again === from
-      // pluginManager 可能完成了重新物化，但包的 version 字段保持不变（例如同版本重打包、
-      // lockfile/依赖树变化或管理器只返回 restart-required）。changed 是第一方对磁盘的事实，
-      // 不能再把这种成功误报为「未变化」。
-      if (unchanged && managerResult && managerResult.changed === true) {
-        return {
-          ok: true,
-          state: 'updated',
-          message: '依赖已重新安装，但版本字段仍为 ' + String(again) + '；重启 DSH 后确认运行中的插件已切换。',
-          from,
-          to: again,
-          changed: true,
-          versionUnchanged: true,
-          application: managerResult.application,
-        }
-      }
+
+  const evaluate = async () => {
+    if (failure !== null) return { ok: false, state: 'failed', message: failure, from }
+    if (settled !== true) return null
+    if (managerResult && managerResult.application === 'failed') {
+      const error = managerResult.error || {}
+      const incompatible = Array.isArray(error.incompatible) ? error.incompatible : []
+      const diagnostic = error.diagnostic || error.code
+      const output = managerResult.packageResult && managerResult.packageResult.output
+      const detail = diagnostic || output || '插件管理器报告安装失败'
+      const code = error.code || (incompatible.length > 0 ? 'incompatible-version' : 'update-failed')
+      const compatibility = incompatible.map((item) => {
+        const name = item && item.name ? item.name : pkg
+        const version = item && item.version ? ' v' + item.version : ''
+        const runtime = item && item.runtimeVersion ? '（当前 DSH ' + item.runtimeVersion + '）' : ''
+        return name + version + runtime
+      }).join('、')
       return {
-        ok: !unchanged,
-        state: unchanged ? 'unchanged' : 'updated',
-        message: unchanged ? '安装已执行，但版本未变化（仍为 ' + String(again) + '）' : '',
+        ok: false,
+        state: 'failed',
+        code,
+        message: compatibility === '' ? String(detail) : String(detail) + '：' + compatibility,
         from,
-        to: again,
-        unchanged,
-        changed: managerResult?.changed === true,
-        application: managerResult?.application,
+        application: managerResult.application,
+        changed: managerResult.changed === true,
+        managerResult,
       }
     }
-    if (Date.now() >= deadline) break
-    await sleep(250)
+    if (managerResult && managerResult.application === 'cancelled') {
+      return { ok: false, state: 'failed', message: '安装已取消', from, managerResult }
+    }
+    const now = installedVersion(profileDir, pkg)
+    if (now !== null && now !== from) return { ok: true, state: 'updated', message: '', from, to: now, changed: managerResult?.changed === true }
+    await sleep(300)
+    const again = installedVersion(profileDir, pkg)
+    const unchanged = again === from
+    if (unchanged && managerResult && (managerResult.changed === true || managerResult.application === 'restart-required')) {
+      return {
+        ok: true,
+        state: 'updated',
+        message: managerResult.application === 'restart-required'
+          ? '安装请求已完成，但宿主要求重启 DSH 后才会生效；请重启后刷新状态。'
+          : '依赖已重新安装，但版本字段仍为 ' + String(again) + '；重启 DSH 后确认运行中的插件已切换。',
+        from,
+        to: again,
+        changed: managerResult.changed === true,
+        versionUnchanged: true,
+        application: managerResult.application,
+        code: managerResult.application === 'restart-required' ? 'restart-required' : undefined,
+      }
+    }
+    return {
+      ok: !unchanged,
+      state: unchanged ? 'unchanged' : 'updated',
+      message: unchanged ? '安装已执行，但版本未变化（仍为 ' + String(again) + '）' : '',
+      from,
+      to: again,
+      unchanged,
+      changed: managerResult?.changed === true,
+      application: managerResult?.application,
+    }
   }
-  return { ok: false, message: '等待超时（安装可能仍在后台执行，可稍后刷新查看）', from, timedOut: true }
+
+  const poll = async (deadline, unref = false) => {
+    for (;;) {
+      const result = await evaluate()
+      if (result !== null) return result
+      if (Date.now() >= deadline) return null
+      await sleep(250, unref)
+    }
+  }
+  const result = await poll(Date.now() + waitMs)
+  if (result !== null) return result
+  const confirmation = poll(Date.now() + Math.max(waitMs, BATCH_STALE_MS), true)
+    .then((confirmed) => confirmed || {
+      ok: false,
+      state: 'failed',
+      code: 'confirmation-timeout',
+      message: '安装请求已提交，但超过确认窗口仍无最终结果；请重启 DSH 后刷新状态并检查插件版本。',
+      from,
+      timedOut: true,
+    })
+  return {
+    ok: false,
+    state: 'pending-check',
+    code: 'pending-check',
+    message: '安装请求已提交，但宿主等待超时；安装可能仍在后台执行，请稍后刷新状态确认。',
+    from,
+    timedOut: true,
+    pending: true,
+    confirmation,
+  }
 }
 
 /**
@@ -2221,84 +2638,79 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
 export function startUpdateAll(ctx, profileDir, pkgs) {
   const current = updateAllStatus()
   if (current && current.running === true) return { ok: true, alreadyRunning: true, batch: current }
-  if (activeInstall !== null) return { ok: false, code: 'update-busy', message: '已有单项更新正在执行，请等待当前更新完成后再启动一键更新' }
-  const items = (Array.isArray(pkgs) ? pkgs : []).filter(isSafePackageName).map((pkg) => ({
-    pkg,
-    state: 'pending',
-    message: '',
-    from: installedVersion(profileDir, pkg),
-    to: null,
-  }))
+  if (activeInstall !== null) return { ok: false, code: activeInstall.pending ? 'update-pending' : 'update-busy', message: activeInstall.pending ? '已有安装请求仍在等待宿主确认，请先刷新状态' : '已有单项更新正在执行，请等待当前更新完成后再启动一键更新' }
+  const items = (Array.isArray(pkgs) ? pkgs : []).filter(isSafePackageName).map((pkg) => ({ pkg, state: 'pending', message: '', from: installedVersion(profileDir, pkg), to: null }))
   if (items.length === 0) return { ok: false, code: 'no-target', message: '没有可更新的插件' }
-  const batch = { running: true, index: 0, total: items.length, items, message: '准备中…', startedAt: Date.now(), finishedAt: null }
-  const lock = { kind: 'batch', batch, profileDir }
+  const batch = { running: true, index: 0, total: items.length, items, message: '准备中…', startedAt: Date.now(), finishedAt: null, awaitingConfirmation: false }
+  const lock = { kind: 'batch', batch, profileDir, pending: false }
   if (!claimInstall(lock)) return { ok: false, code: 'update-busy', message: '已有更新正在执行，请等待当前更新完成后再启动一键更新' }
   writeBatch(batch)
   ;(async () => {
     for (let i = 0; i < items.length; i += 1) {
       const item = items[i]
       const live = readBatch() ?? batch
-      live.index = i
-      live.message = '正在更新 ' + (i + 1) + '/' + items.length + '：' + item.pkg
-      item.state = 'running'
-      live.items = items
-      writeBatch(live)
-      const result = await installAndWait(ctx, profileDir, item.pkg)
-      item.to = installedVersion(profileDir, item.pkg)
-      if (result.code) item.code = result.code
-      if (result.application) item.application = result.application
-      if (result.ok === true) {
-        // 与单包路径共用收尾：补回被 pnpm 洗掉的优化结果 + 变化提示
-        const finished = await finishAfterUpdate(profileDir, item.pkg, item.from, item.to)
-        item.refined = finished.refined
-        item.delta = finished.delta
-      }
-      if (result.state === 'unchanged') {
-        item.state = 'unchanged'
-        item.message = result.message || ('安装已执行，但版本未变（仍为 ' + String(item.to) + '）')
-      } else if (result.ok !== true) {
-        item.state = 'failed'
-        item.message = result.message
-      } else if (result.state === 'updated' || (item.to !== null && item.from !== null && item.to !== item.from)) {
-        item.state = 'updated'
-        item.message = result.message || (item.from + ' → ' + item.to)
-        if (result.versionUnchanged === true) item.versionUnchanged = true
-      } else {
-        // 安装确实执行了，但版本没变 —— 必须如实说明，不能假装成功
-        item.state = 'unchanged'
-        item.message = '安装已执行，但版本未变（仍为 ' + String(item.to) + '）'
+      live.index = i; live.message = '正在更新 ' + (i + 1) + '/' + items.length + '：' + item.pkg
+      item.state = 'running'; live.items = items; writeBatch(live)
+      let result
+      try {
+        result = await installAndWait(ctx, profileDir, item.pkg)
+        if (result.state === 'pending-check' && result.confirmation && typeof result.confirmation.then === 'function') {
+          lock.pending = true; batch.awaitingConfirmation = true
+          item.state = 'pending-check'; item.code = 'pending-check'
+          item.message = result.message || '安装请求已提交，但暂时无法确认结果；正在等待宿主确认。'
+          writeBatch(Object.assign(readBatch() ?? batch, { items, awaitingConfirmation: true, message: '等待宿主确认：' + item.pkg }))
+          result = await result.confirmation
+          lock.pending = false; batch.awaitingConfirmation = false
+        }
+        item.to = installedVersion(profileDir, item.pkg)
+        if (result.code) item.code = result.code
+        if (result.application) item.application = result.application
+        if (result.ok === true) {
+          try {
+            const finished = await finishAfterUpdate(profileDir, item.pkg, item.from, item.to)
+            item.refined = finished.refined; item.delta = finished.delta
+          } catch (error) {
+            // 收尾失败只影响当前项，不能让整批丢失位置和结果。
+            result = Object.assign({}, result, { ok: false, state: 'failed', code: 'post-update-failed', message: '更新已执行，但收尾处理失败：' + String(error?.message ?? error) })
+          }
+        }
+        if (result.state === 'pending-check') { item.state = 'pending-check'; item.message = result.message || '安装请求已提交，但暂时无法确认结果；请稍后刷新状态。' }
+        else if (result.state === 'unchanged') { item.state = 'unchanged'; item.message = result.message || ('安装已执行，但版本未变（仍为 ' + String(item.to) + '）') }
+        else if (result.ok !== true) { item.state = 'failed'; item.message = result.message || '更新失败' }
+        else if (result.state === 'updated' || (item.to !== null && item.from !== null && item.to !== item.from)) { item.state = 'updated'; item.message = result.message || (item.from + ' → ' + item.to); if (result.versionUnchanged === true) item.versionUnchanged = true }
+        else { item.state = 'unchanged'; item.message = '安装已执行，但版本未变（仍为 ' + String(item.to) + '）' }
+      } catch (error) {
+        item.state = 'failed'; item.code = 'update-item-failed'; item.message = String(error?.message ?? error)
+        lock.pending = false; batch.awaitingConfirmation = false
       }
       const after = readBatch() ?? batch
-      after.items = items
-      writeBatch(after)
+      after.items = items; after.awaitingConfirmation = false; writeBatch(after)
     }
     const done = readBatch() ?? batch
-    done.running = false
-    done.index = items.length
-    done.finishedAt = Date.now()
+    done.running = false; done.index = items.length; done.finishedAt = Date.now(); done.awaitingConfirmation = false
     const updated = items.filter((x) => x.state === 'updated').length
     const unchanged = items.filter((x) => x.state === 'unchanged').length
+    const pendingCheck = items.filter((x) => x.state === 'pending-check').length
     const failed = items.filter((x) => x.state === 'failed').length
-    done.message = '完成：成功 ' + updated + ' 个，未变化 ' + unchanged + ' 个，失败 ' + failed + ' 个'
-    writeBatch(done)
-    releaseInstall(lock)
-  })().catch(() => {
+    done.message = '完成：成功 ' + updated + ' 个，未变化 ' + unchanged + ' 个，待确认 ' + pendingCheck + ' 个，失败 ' + failed + ' 个'
+    writeBatch(done); releaseInstall(lock)
+  })().catch((error) => {
     const fallback = readBatch() ?? batch
-    fallback.running = false
-    fallback.finishedAt = Date.now()
-    fallback.message = '批量更新异常中止'
-    writeBatch(fallback)
-    releaseInstall(lock)
+    fallback.running = false; fallback.finishedAt = Date.now(); fallback.awaitingConfirmation = false
+    fallback.state = 'failed'
+    fallback.message = '批量更新异常中止：' + String(error?.message ?? error) + '；已完成项目的结果已保留，请按行重试未完成项目'
+    writeBatch(fallback); releaseInstall(lock)
   })
   return { ok: true, batch }
 }
 
 /** 查询单包更新进度。 */
 export function updateJobStatus(token) {
-  const job = typeof token === 'string' ? updateJobs.get(token) : undefined
-  if (job === undefined) return { ok: false, code: 'unknown-token', message: '任务不存在或已过期' }
-  return { ok: true, job }
+  const job = typeof token === 'string' ? reconcilePersistedJob(token, updateJobs.get(token)) : undefined
+  if (job === undefined) return { ok: false, code: 'unknown-token', message: '任务不存在或已过期；请刷新状态后重新发起更新' }
+  return { ok: true, job, nextAction: job.pending === true ? 'refresh-status' : (job.ok === false ? 'retry-update' : null) }
 }
+
 
 /**
  * 包名白名单。
@@ -2468,30 +2880,29 @@ export function collectStreamText(records) {
 /** 让模型生成一条精炼文案；任何不确定都转成可读的失败原因。 */
 export async function generateRefinement(ctx, pkg, original) {
   const llm = llmOf(ctx)
-  if (!llm || typeof llm.stream !== 'function') {
-    return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）' }
-  }
+  if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'ctx.llm 未注册或没有 stream() 方法' }
   const selection = await resolveGenerationModel(ctx)
-  if (selection === undefined) {
-    return { ok: false, code: 'no-model', message: '找不到可用的默认模型；请先在设置中选定默认模型' }
-  }
-  try {
-    const prompt = buildPrompt(pkg, original)
-    const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
-    let raw = llm.stream({ provider: selection.provider, model: selection.model, messages })
-    if (raw && typeof raw.then === 'function') raw = await raw
-    const stream = raw && raw.stream !== undefined ? raw.stream : raw
-    const text = await collectStreamText(stream)
-    const parsed = parseGenerated(typeof text === 'string' ? text : '')
-    if (parsed === undefined) {
-      return { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON', raw: String(text).slice(0, 400) }
+  if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型；请先在设置中选定默认模型', reason: '设置中没有 provider/model，且 llm.listProviders() 未返回可用模型' }
+  const basePrompt = buildPrompt(pkg, original)
+  let last = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const prompt = attempt === 0 ? basePrompt : basePrompt + '\n上次输出无法解析。请只输出符合约定结构的合法 JSON，不要 markdown 或解释。'
+      let raw = llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      if (raw && typeof raw.then === 'function') raw = await Promise.race([raw, generationTimeout(GENERATION_TIMEOUT_MS)])
+      const stream = raw && raw.stream !== undefined ? raw.stream : raw
+      const text = await Promise.race([Promise.resolve(collectStreamText(stream)), generationTimeout(GENERATION_TIMEOUT_MS)])
+      const parsed = parseGenerated(typeof text === 'string' ? text : '')
+      if (parsed !== undefined) {
+        parsed.zh.title = enforceTitle(pkg, parsed.zh.title)
+        return { ok: true, entry: parsed, selection, attempts: attempt + 1 }
+      }
+      last = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已自动重试 1 次）', reason: '模型输出缺少 en/zh.title/description，或不是合法 JSON', raw: String(text).slice(0, 400), attempts: attempt + 1 }
+    } catch (error) {
+      last = { ok: false, code: error?.code === 'generation-timeout' ? 'generation-timeout' : 'generate-failed', message: error?.code === 'generation-timeout' ? '模型响应超时（已自动重试 1 次）' : String(error?.message ?? error), reason: error?.code === 'generation-timeout' ? '超过 ' + GENERATION_TIMEOUT_MS + 'ms 未收到完整模型输出' : String(error?.message ?? error), attempts: attempt + 1 }
     }
-    // 强制命名约定（不依赖模型自觉）
-    parsed.zh.title = enforceTitle(pkg, parsed.zh.title)
-    return { ok: true, entry: parsed, selection }
-  } catch (error) {
-    return { ok: false, code: 'generate-failed', message: String((error && error.message) || error) }
   }
+  return last || { ok: false, code: 'generate-failed', message: '生成失败', reason: '模型没有返回可用结果' }
 }
 
 /** 把一条生成结果写入覆盖层（覆盖层优先，等于永久生效）。 */
@@ -2512,7 +2923,7 @@ export function upsertOverlay(pkg, entry) {
     fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n')
     return { ok: true, path: file, total: next.length }
   } catch (error) {
-    return { ok: false, code: 'overlay-write-failed', message: String((error && error.message) || error) }
+    return { ok: false, code: 'overlay-write-failed', message: String((error && error.message) || error), reason: '无法写入插件翻译覆盖层，请检查文件权限或磁盘空间' }
   }
 }
 
@@ -2576,7 +2987,7 @@ export function describeIssues(row) {
   const errorText = String(row.errorMessage || row.error || '')
   const incompatibleError = row.errorCode === 'incompatible-version'
     || incompatible.length > 0
-    || (row.peerDependencies && typeof row.peerDependencies === 'object')
+    || (row.peerDependencies && typeof row.peerDependencies === 'object' && Object.keys(row.peerDependencies).length > 0)
   if (incompatibleError) {
     const names = incompatible.map((item) => {
       if (!item || typeof item !== 'object') return ''
@@ -2673,9 +3084,10 @@ export function registerBridge(ctx, dirs) {
             try {
               // 传 pkgs 时只处理这些包 —— 让「翻译优化」能跳过已优化的插件
               const body = await readJsonBody(req)
-              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter((x) => isSafePackageName(x) && !excludedManagedName(x)) : null
               const options = pkgs === null ? {} : { entries: readCatalog().filter((e) => pkgs.includes(e.pkg)) }
-              writeJson(res, 200, { ok: true, value: applyLocale(dirs, options) })
+              const value = applyLocale(dirs, options)
+              writeJson(res, 200, summarizeMutationResults(value, 'apply'))
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -2696,8 +3108,9 @@ export function registerBridge(ctx, dirs) {
               try {
                 const raw = auditPackages(ctx, ownerDirs[0])
                 const ignored = new Set(readIgnored())
-                const visible = raw.findings.filter((f) => !ignored.has(f.id))
-                for (const f of visible) {
+                const observed = raw.findings.filter((f) => !ignored.has(f.id))
+                const visible = observed.filter(isActionableFinding)
+                for (const f of observed) {
                   for (const owner of [f.pkg].concat(Array.isArray(f.peers) ? f.peers : [])) {
                     if (!byPkg.has(owner)) byPkg.set(owner, [])
                     if (!byPkg.get(owner).includes(f)) byPkg.get(owner).push(f)
@@ -2713,23 +3126,45 @@ export function registerBridge(ctx, dirs) {
                     inferred: visible.filter((f) => f.confidence === 'inferred').length,
                   },
                   noCompat: raw.noCompat,
+                  actionable: visible.length,
+                  observations: observed.filter((f) => !isActionableFinding(f)).length,
                 }
               } catch {
                 /* 审查失败绝不影响状态刷新 */
               }
               const out = []
+              const profileDir = ownerDirs[0]
               for (const row of rows) {
+                const plan = resolveUpdateSpec(profileDir, row.pkg)
+                if (plan.kind === 'git' && typeof plan.range === 'string') {
+                  const gitStatus = await gitDependencyUpdateStatus(profileDir, row.pkg, plan.range, force)
+                  out.push(Object.assign({}, row, {
+                    latest: gitStatus.latest,
+                    hasUpdate: gitStatus.hasUpdate,
+                    reason: gitStatus.reason,
+                    updateKind: 'git',
+                    currentCommit: gitStatus.currentCommit,
+                    remoteCommit: gitStatus.remoteCommit,
+                    remoteSha: gitStatus.remoteSha,
+                    updateRef: gitStatus.ref,
+                    sourceUrl: row.sourceUrl || gitStatus.repoUrl,
+                    repoUrl: row.repoUrl || gitStatus.repoUrl,
+                    sourceLabel: row.sourceLabel || '远端 Git 仓库',
+                    sourceEvidence: row.sourceEvidence || 'package.json dependencies + pnpm-lock.yaml + git ls-remote',
+                  }))
+                  continue
+                }
                 if (row.version === null || row.version === undefined) {
-                  out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: 'no-version' }))
+                  out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: 'no-version', updateKind: 'registry' }))
                   continue
                 }
                 const r = await latestVersionCached(row.pkg, force)
                 if (r.latest === null) {
-                  out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: r.reason ?? 'unavailable' }))
+                  out.push(Object.assign({}, row, { latest: null, hasUpdate: null, reason: r.reason ?? 'unavailable', updateKind: 'registry' }))
                   continue
                 }
                 // 必须用版本序比较：用 !== 会把「已装版本更高」的降级也判成有更新
-                out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: isNewerVersion(r.latest, row.version) ? true : (isNewerVersion(row.version, r.latest) ? false : null), reason: null }))
+                out.push(Object.assign({}, row, { latest: r.latest, hasUpdate: isNewerVersion(r.latest, row.version) ? true : (isNewerVersion(row.version, r.latest) ? false : null), reason: null, updateKind: 'registry' }))
               }
               writeJson(res, 200, {
                 ok: true,
@@ -2772,9 +3207,10 @@ export function registerBridge(ctx, dirs) {
               // force（「刷新状态」）绕过远端比对缓存；只有 git 形态的技能需要联网
               const rows = await enrichSkillUpdates(collectSkills(ctx), body !== undefined && body.force === true)
               const ignored = new Set(readIgnored())
-              const visible = auditSkills(rows).filter((f) => !ignored.has(f.id))
+              const observed = auditSkills(rows).filter((f) => !ignored.has(f.id))
+              const visible = observed.filter(isActionableFinding)
               const byPkg = new Map()
-              for (const f of visible) {
+              for (const f of observed) {
                 for (const owner of [f.pkg].concat(Array.isArray(f.peers) ? f.peers : [])) {
                   if (!byPkg.has(owner)) byPkg.set(owner, [])
                   if (!byPkg.get(owner).includes(f)) byPkg.get(owner).push(f)
@@ -2792,6 +3228,8 @@ export function registerBridge(ctx, dirs) {
                     fact: visible.filter((f) => f.confidence === 'fact').length,
                     inferred: visible.filter((f) => f.confidence === 'inferred').length,
                   },
+                  actionable: visible.length,
+                  observations: observed.filter((f) => !isActionableFinding(f)).length,
                   noCompat: [],
                 },
                 value: rows.map((r) => Object.assign({}, r, { issues: [], findings: byPkg.get(r.pkg) ?? [] })),
@@ -2807,13 +3245,13 @@ export function registerBridge(ctx, dirs) {
           handler: async (req, res) => {
             try {
               const body = await readJsonBody(req)
-              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter((x) => isSafePackageName(x) && !excludedManagedName(x)) : null
               if (pkgs === null || pkgs.length === 0) {
                 writeJson(res, 200, { ok: false, code: 'bad-request', message: '需要非空的 pkgs 列表（技能名）' })
                 return
               }
               // 只做 git 快进（pull --ff-only）：等真实结果再回，客户端据此把按钮按结果暗下去
-              writeJson(res, 200, { ok: true, value: await updateSkillRepos(pkgs) })
+              writeJson(res, 200, { ok: true, value: await updateSkillRepos(pkgs, ctx) })
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -2825,9 +3263,10 @@ export function registerBridge(ctx, dirs) {
           handler: async (req, res) => {
             try {
               const body = await readJsonBody(req)
-              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter((x) => isSafePackageName(x) && !excludedManagedName(x)) : null
               const options = pkgs === null ? {} : { entries: readSkillCatalog().filter((e) => pkgs.includes(e.pkg)) }
-              writeJson(res, 200, { ok: true, value: applySkillLocale(dirs, options) })
+              const value = applySkillLocale(dirs, options)
+              writeJson(res, 200, summarizeMutationResults(value, 'apply'))
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -2839,9 +3278,10 @@ export function registerBridge(ctx, dirs) {
           handler: async (req, res) => {
             try {
               const body = await readJsonBody(req)
-              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter(isSafePackageName) : null
+              const pkgs = body !== undefined && Array.isArray(body.pkgs) ? body.pkgs.filter((x) => isSafePackageName(x) && !excludedManagedName(x)) : null
               const options = pkgs === null ? {} : { entries: readSkillCatalog().filter((e) => pkgs.includes(e.pkg)) }
-              writeJson(res, 200, { ok: true, value: revertSkillLocale(dirs, options) })
+              const value = revertSkillLocale(dirs, options)
+              writeJson(res, 200, summarizeMutationResults(value, 'revert'))
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }
@@ -2855,7 +3295,11 @@ export function registerBridge(ctx, dirs) {
               const body = await readJsonBody(req)
               const pkg = body && typeof body.pkg === 'string' ? body.pkg : ''
               if (pkg === '' || !isSafePackageName(pkg)) {
-                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '技能标识非法' })
+                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '技能标识非法', reason: '技能名只能使用小写字母、数字、点、下划线和连字符' })
+                return
+              }
+              if (excludedManagedName(pkg)) {
+                writeJson(res, 200, { ok: false, code: 'out-of-scope', message: '该技能已归档或不属于 DSH 管理范围', reason: '已排除 ponytail、skillopt、skills-summarize-audit 等历史/外部技能' })
                 return
               }
               const cand = scanSkillCandidates().filter((c) => skillBaseName(c.name) === pkg).sort((a, b) => a.rank - b.rank)[0]
@@ -2866,10 +3310,55 @@ export function registerBridge(ctx, dirs) {
               const generated = await generateSkillRefinement(ctx, pkg, cand.description)
               if (generated.ok !== true) { writeJson(res, 200, generated); return }
               const saved = upsertSkillOverlay(pkg, generated.entry)
-              writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved))
+              writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved, saved.ok === false ? { reason: saved.reason || saved.message } : {}))
             } catch (error) {
-              writeJson(res, 200, { ok: false, code: 'generate-failed', message: String(error?.message ?? error) })
+              writeJson(res, 200, { ok: false, code: error?.code || 'generate-failed', message: String(error?.message ?? error), reason: String(error?.message ?? error) })
             }
+          },
+        },
+        {
+          kind: 'exact',
+          path: BRIDGE_PREFIX + '/finding-action',
+          handler: async (req, res) => {
+            try {
+              const body = await readJsonBody(req)
+              const id = body && typeof body.id === 'string' ? body.id : ''
+              const action = body && typeof body.action === 'string' ? body.action : ''
+              if (id === '' || action === '') { writeJson(res, 200, { ok: false, code: 'bad-request', message: '缺少 finding id 或 action' }); return }
+              const ignored = new Set(readIgnored())
+              const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
+              const packageFindings = auditPackages(ctx, profileDir).findings.filter((f) => !ignored.has(f.id))
+              const skillRows = await enrichSkillUpdates(collectSkills(ctx), false)
+              const allFindings = packageFindings.concat(auditSkills(skillRows).filter((f) => !ignored.has(f.id)))
+              const finding = allFindings.find((f) => f.id === id)
+              if (!finding) { writeJson(res, 200, { ok: false, code: 'finding-not-found', message: '审查项已变化，请先刷新状态' }); return }
+              if (action === 'ignore') { const result = ignoreFinding(id); clearAuditCache(); writeJson(res, 200, result); return }
+              if (action === 'update') {
+                if (finding.pkg && skillRows.some((r) => r.pkg === finding.pkg)) writeJson(res, 200, { ok: true, action, value: await updateSkillRepos([finding.pkg], ctx) })
+                else writeJson(res, 200, Object.assign({ ok: true, action }, startUpdate(ctx, profileDir, finding.pkg)))
+                return
+              }
+              if (action === 'translate') {
+                const row = skillRows.find((r) => r.pkg === finding.pkg)
+                if (row) {
+                  const cand = scanSkillCandidates().filter((c) => skillBaseName(c.name) === finding.pkg).sort((a, b) => a.rank - b.rank)[0]
+                  if (!cand) { writeJson(res, 200, { ok: false, code: 'not-found', message: '技能文件不存在' }); return }
+                  const generated = await generateSkillRefinement(ctx, finding.pkg, cand.description)
+                  if (generated.ok !== true) { writeJson(res, 200, generated); return }
+                  const saved = upsertSkillOverlay(finding.pkg, generated.entry)
+                  if (saved.ok !== true) { writeJson(res, 200, saved); return }
+                  writeJson(res, 200, { ok: true, action, generated: generated.entry, applied: applySkillLocale(dirs, { entries: [generated.entry] }) }); return
+                }
+                const info = readBundleInfo(profileDir, finding.pkg)
+                if (!info) { writeJson(res, 200, { ok: false, code: 'not-installed', message: '插件不在 DSH 管理范围' }); return }
+                const generated = await generateRefinement(ctx, finding.pkg, info.description)
+                if (generated.ok !== true) { writeJson(res, 200, generated); return }
+                const saved = upsertOverlay(finding.pkg, generated.entry)
+                writeJson(res, 200, Object.assign({ ok: saved.ok === true, action, generated: generated.entry }, saved)); return
+              }
+              if (action === 'manual' || action === 'open-repo') { writeJson(res, 200, { ok: true, action, manual: true, target: finding.action?.target || finding.pkg, message: finding.remedy || '请按建议人工处理' }); return }
+              writeJson(res, 200, { ok: false, code: 'unsupported-action', message: '该审查项暂不支持此动作' })
+            } catch (error) { writeJson(res, 200, { ok: false, code: 'finding-action-failed', message: String(error?.message ?? error) }) }
           },
         },
         {
@@ -2898,7 +3387,11 @@ export function registerBridge(ctx, dirs) {
                 return
               }
               if (!isSafePackageName(pkg)) {
-                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '包名非法，已拒绝（防路径穿越）' })
+                writeJson(res, 200, { ok: false, code: 'invalid-pkg', message: '包名非法，已拒绝（防路径穿越）', reason: '包名只能使用合法 npm 标识' })
+                return
+              }
+              if (excludedManagedName(pkg)) {
+                writeJson(res, 200, { ok: false, code: 'out-of-scope', message: '该插件已归档或不属于 DSH 管理范围', reason: '已排除历史归档项和外部技能，避免误更新' })
                 return
               }
               const profileDir = Array.isArray(dirs) ? dirs[0] : dirs
@@ -2913,9 +3406,9 @@ export function registerBridge(ctx, dirs) {
                 return
               }
               const saved = upsertOverlay(pkg, generated.entry)
-              writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved))
+              writeJson(res, 200, Object.assign({ ok: saved.ok === true, pkg: pkg, entry: generated.entry, selection: generated.selection }, saved, saved.ok === false ? { reason: saved.reason || saved.message } : {}))
             } catch (error) {
-              writeJson(res, 200, { ok: false, code: 'generate-failed', message: String(error?.message ?? error) })
+              writeJson(res, 200, { ok: false, code: error?.code || 'generate-failed', message: String(error?.message ?? error), reason: String(error?.message ?? error) })
             }
           },
         },
@@ -2974,7 +3467,8 @@ export function registerBridge(ctx, dirs) {
           path: BRIDGE_PREFIX + '/revert',
           handler: async (req, res) => {
             try {
-              writeJson(res, 200, { ok: true, value: revertLocale(dirs) })
+              const value = revertLocale(dirs)
+              writeJson(res, 200, summarizeMutationResults(value, 'revert'))
             } catch (error) {
               writeJson(res, 200, { ok: false, message: String(error?.message ?? error) })
             }

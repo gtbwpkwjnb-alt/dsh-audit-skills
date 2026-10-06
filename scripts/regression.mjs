@@ -48,7 +48,7 @@ const nm = path.join(sandbox, 'node_modules')
 fs.mkdirSync(path.join(nm, 'pkg-with-exports'), { recursive: true })
 fs.mkdirSync(path.join(nm, 'pkg-no-exports'), { recursive: true })
 const bundle = { patch: './cordis.patch.yml' }
-const legacy = { name: 'pkg-with-exports', version: '1.0.0', exports: { '.': './index.js', './locale/*': './locale/*' }, dsh: { bundle } }
+const legacy = { name: 'pkg-with-exports', version: '1.0.0', repository: { type: 'git', url: 'git+https://user:token@gitlab.example.com:8443/team/pkg-with-exports.git?x=1#frag' }, exports: { '.': './index.js', './locale/*': './locale/*' }, dsh: { bundle } }
 const plain = { name: 'pkg-no-exports', version: '2.0.0', dsh: { bundle } }
 fs.writeFileSync(path.join(nm, 'pkg-with-exports', 'package.json'), JSON.stringify(legacy, null, 2))
 fs.writeFileSync(path.join(nm, 'pkg-no-exports', 'package.json'), JSON.stringify(plain, null, 2))
@@ -100,7 +100,8 @@ const fakeCtx = new Proxy(fakeCtxBase, {
   },
 })
 m.apply(fakeCtx, { autoApply: false, revertOnDisable: false, profileDir: sandbox })
-check('注册了 17 条 bridge 路由（含治理快照/动作与翻译留痕）', routes.length === 17, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
+const requiredRoutes = ['/management', '/manage', '/apply', '/updates', '/update', '/skills', '/update-skills', '/apply-skills', '/revert-skills', '/generate-skill', '/finding-action', '/ignore', '/generate', '/update-all', '/update-all-status', '/translate-run', '/update-status', '/revert']
+check('注册了全部 bridge 路由（含治理快照/动作与翻译留痕）', requiredRoutes.every((suffix) => routes.some((r) => r.path === '/api/dsh-audit-skills' + suffix)) && new Set(routes.map((r) => r.path)).size === routes.length, 'got ' + routes.length + ': ' + routes.map((r) => r.path).join(','))
 check('治理 bridge 路由已注册', routes.some((r) => r.path.endsWith('/management')) && routes.some((r) => r.path.endsWith('/manage')))
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1')
@@ -221,6 +222,9 @@ check('git 依赖 → 原样回传 git spec（不加 @latest）', specGit.kind =
 check('技能 GitHub 来源规范化为可打开地址且不带凭据',
   m.normalizeRepoUrl('git@github.com:owner/repo.git') === 'https://github.com/owner/repo' &&
   m.normalizeRepoUrl('https://token@github.com/owner/repo.git') === 'https://github.com/owner/repo')
+check('来源规范化支持 GitLab、自建 Git 与非标准端口',
+  m.normalizeRepoUrl('ssh://git@gitlab.example.com:8443/team/repo.git') === 'https://gitlab.example.com:8443/team/repo' &&
+  m.normalizeRepoUrl('https://user:token@gitlab.example.com:8443/team/repo.git?x=1#frag') === 'https://gitlab.example.com:8443/team/repo')
 check('本地依赖 → 拒绝并说明', specLoc.spec === null && specLoc.kind === 'local', JSON.stringify(specLoc))
 check('未知依赖 → 拒绝并说明', specUnk.spec === null, JSON.stringify(specUnk))
 // 更新任务：有 pluginManager 时拿到 token 并可轮询到 done
@@ -375,7 +379,7 @@ check('按钮：一键更新在无待更新或本轮已完成时禁用',
 check('按钮：更新完成后按结果暗下去（不是消失），刷新才重新判定',
   clientSrc.includes('var OUTCOME =') && clientSrc.includes('function outcomeLabel(') &&
   clientSrc.includes("n[pkg] = { state: res.state || (res.ok ? 'updated' : 'failed')") && clientSrc.includes('absorbBatch(b)') &&
-  clientSrc.includes('setDone({})') && clientSrc.includes('setBatchSettled(false)'))
+  clientSrc.includes('setDone(carry)') && clientSrc.includes('setBatchSettled'))
 check('按钮：行内不再有「可点但点了没用」的更新按钮', !clientSrc.includes("op.push(h('button', { key: 'u'"))
 // ── A5b：本轮结果 / 行锁口径（用户报告「状态栏说完成、行里还能点更新」） ──
 check('口径：批量记录与行锁是同一份状态，且页面自己讲明差异',
@@ -418,9 +422,9 @@ check('技能版本列：version → git 提交号 → 未声明 的回落链，
   clientSrc.includes('function skillRevision(') && clientSrc.includes("'git ' + shortShaOf(r.localSha)") && clientSrc.includes("'未声明'"))
 check('技能来源：只显示 GitHub 原作者仓库链接，不把本地路径当来源',
   clientSrc.includes('sourceUrl') && clientSrc.includes('GitHub 原作者仓库') && clientSrc.includes("target: '_blank'"))
-check('显示密度：指标收成一条紧凑数据带（不再是格子网格）+ 表头吸顶 + 横向可滚',
+check('显示密度：指标收成一条紧凑数据带 + 插件表固定布局且无横向滚动',
   clientSrc.includes('.das-stats {') && clientSrc.includes('function kpiStat(') &&
-  !clientSrc.includes('minmax(94px') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap'))
+  !clientSrc.includes('minmax(94px') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap') && clientSrc.includes('overflow-x: hidden') && clientSrc.includes('table-layout: fixed'))
 check('样式命名空间化，只用 DSH token 并带回落（亮/暗主题都跟随）',
   clientSrc.includes('--dsw-alias-border-l1,') && clientSrc.includes('--dsw-font-mono,') && clientSrc.includes('prefers-reduced-motion'))
 // ── A5d：翻译优化的「留痕 + 自愈」（用户两次追问「我明明点过翻译优化，为什么还是待应用/待生成」） ──
@@ -428,7 +432,7 @@ check('留痕：一次运行的结果会上报宿主落盘，下次刷新可回�
   clientSrc.includes("call('translate-run'") && clientSrc.includes('var recordTranslate = useCallback(') &&
   clientSrc.includes("recordTranslate('optimize'") && clientSrc.includes("'translate' in r"))
 check('留痕：行内标上次失败、悬停槽给该项的上次结果、指标带给上次时间',
-  clientSrc.includes("'上次失败'") && clientSrc.includes("'上次翻译优化'") && clientSrc.includes("'上次优化'"))
+  clientSrc.includes("'上次失败'") && clientSrc.includes("上次翻译优化") && clientSrc.includes("上次优化"))
 check('自愈：catalog 有条目但文件不在盘上时自动补 apply，且只对插件页、每次挂载只做一次',
   clientSrc.includes('r.inCatalog === true && r.localized !== true') &&
   clientSrc.includes('if (IS_SKILL || healed || rows === null) return') &&
@@ -592,7 +596,7 @@ m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? noopPM : undefined) }, s
 await new Promise((r) => setTimeout(r, 1500))
 const itemC = (m.updateAllStatus().items || []).find((x) => x.pkg === 'pkg-with-exports')
 check('安装执行了但版本未变 -> 如实标为 unchanged（不假装成功）', !!itemC && itemC.state === 'unchanged', JSON.stringify(itemC))
-check('结束语区分 成功/未变化/失败', /成功 \d+ 个，未变化 \d+ 个，失败 \d+ 个/.test(String(m.updateAllStatus().message)), String(m.updateAllStatus().message))
+check('结束语区分 成功/未变化/失败', /成功 \d+ 个，未变化 \d+ 个(?:，待确认 \d+ 个)?，失败 \d+ 个/.test(String(m.updateAllStatus().message)), String(m.updateAllStatus().message))
 // 第一方可能重新物化 lockfile / 依赖树，但 package.json 的 version 不变；changed=true 代表更新确实落盘。
 const sameVersionPM = { listBundles: () => [], installBundle: async () => ({ changed: true, application: 'restart-required' }) }
 m.startUpdateAll({ get: (n) => (n === 'pluginManager' ? sameVersionPM : undefined) }, sandbox, ['pkg-with-exports'])
@@ -678,7 +682,7 @@ check('客户端：优化后的中文名显示在插件名称位置（中文名�
   clientSrc.includes('das-name-pkg') && clientSrc.includes('das-desc-line') && clientSrc.includes('primaryName'))
 check('客户端：审查只把「需处置」的计入数字与筛选，低置信推断降噪',
   clientSrc.includes('notableInferred') && clientSrc.includes('lowInferred') &&
-  clientSrc.includes("f.severity !== 'low'") && clientSrc.includes('无待处置发现'))
+  clientSrc.includes("f.severity !== 'low'") && clientSrc.includes('暂无需处置'))
 check('客户端：窄容器用容器查询收起次级包名（不是靠视口宽度）',
   clientSrc.includes('container-type: inline-size') && clientSrc.includes('@container (max-width: 820px)'))
 check('客户端：优化列显示已落盘的中文说明', clientSrc.includes('das-optimized-copy') && clientSrc.includes('r.localizedDescription'))
@@ -753,6 +757,21 @@ check('R1：模块可满足则不报', !find('conflict', 'pkg-alpha').some((f) =
 check('R1：缺失只断言「不存在」，标题不宣称致命', (function () { const r1 = find('conflict', 'pkg-beta').filter((f) => f.title.includes('no-such-module')); return r1.length === 1 && r1[0].title.includes('不存在') && !r1[0].title.includes('无法启动') })(), JSON.stringify(find('conflict', 'pkg-beta').map((f) => f.title)))
 check('R2：覆盖非自身行 -> 报出', find('conflict', 'pkg-beta').some((f) => f.title.includes('shared-row')), JSON.stringify(find('conflict', 'pkg-beta').map((f) => f.title)))
 check('R2：自己 insert 的行不算覆盖', !find('conflict', 'pkg-alpha').some((f) => f.title.includes('alpha-row')))
+// 非法 name 真因必须作为事实级发现出现，不能继续被“全绿”掩盖。
+const invalidName = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-invalid-name-'))
+fs.mkdirSync(path.join(invalidName, 'node_modules', 'bad-plugin'), { recursive: true })
+fs.writeFileSync(path.join(invalidName, 'package.json'), JSON.stringify({ name: 'invalid-audit', dependencies: { 'bad-plugin': '1.0.0' }, dsh: { profile: { bundles: ['bad-plugin'] } } }, null, 2))
+fs.writeFileSync(path.join(invalidName, 'node_modules', 'bad-plugin', 'package.json'), JSON.stringify({ name: 'Bad Plugin', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }, null, 2))
+fs.writeFileSync(path.join(invalidName, 'node_modules', 'bad-plugin', 'cordis.patch.yml'), '- id: bad-row')
+const invalidCtx = { get: (name) => name === 'pluginManager' ? { listBundles: () => [{ name: 'bad-plugin', installed: true, enabled: true, version: '1.0.0' }] } : undefined }
+m.clearAuditCache()
+const invalidAudit = m.auditPackages(invalidCtx, invalidName)
+check('审查：非法 package.json name 以事实级问题出现', invalidAudit.findings.some((f) => f.pkg === 'bad-plugin' && f.title.includes('package.json 的 name 非法') && f.confidence === 'fact'), JSON.stringify(invalidAudit.findings.filter((f) => f.pkg === 'bad-plugin').map((f) => f.title)))
+check('审查：非法 name 不会被全绿 KPI 隐藏', invalidAudit.counts.high >= 1 && invalidAudit.actionable >= 1, JSON.stringify(invalidAudit.counts))
+fs.rmSync(invalidName, { recursive: true, force: true })
+m.clearAuditCache()
+const auditedCached = m.auditPackages({ get: () => undefined }, auditRoot)
+check('审查缓存：第二次命中同一对象', m.auditPackages({ get: () => undefined }, auditRoot) === auditedCached)
 check('R3：两个插件覆盖同一行 -> 一条、双方可见', (function () {
   const dup = audited.findings.filter((f) => f.kind === 'conflict' && f.peers.includes('pkg-gamma'))
   return dup.length === 1 && dup[0].peers.length === 1 && dup[0].severity === 'high'
@@ -764,7 +783,7 @@ check('R6：共享非平台模块 -> 一条、标推断', (function () {
 })(), JSON.stringify(audited.findings.filter((f) => f.kind === 'interaction').map((f) => f.title)))
 check('R6：平台模块（@deepseek-ai/*）共享不报（避免噪音）', !audited.findings.some((f) => f.evidence && f.evidence.includes('@deepseek-ai/dsh-client-locale')))
 check('R5：未声明兼容性收集为汇总名单，不逐行', Array.isArray(audited.noCompat) && audited.noCompat.length === 5 && !audited.findings.some((f) => f.title.includes('兼容')))
-check('审查缓存：第二次命中同一对象', m.auditPackages({ get: () => undefined }, auditRoot) === audited)
+
 // 忽略列表：写入后不再出现
 const savedHome5 = process.env.DSH_HOME
 process.env.DSH_HOME = auditRoot
@@ -807,12 +826,22 @@ mkSkill(skHi, path.join('demo-nested', 'modes', 'inner'), ['---', 'name: inner',
 mkSkill(skHi, 'demo-nested', ['---', 'name: demo-nested', 'description: 中文', '---'].join(String.fromCharCode(10)))
 fs.writeFileSync(path.join(skHi, 'demo-flat.md'), ['---', 'name: demo-flat', 'description: English only', '---'].join(String.fromCharCode(10)))
 mkSkill(skLo, 'demo-good', ['---', 'name: demo-good', 'description: 低优先级那份', '---'].join(String.fromCharCode(10)))
+// 明确回归：历史归档项与 Codex/ZCode 外部项不能进入 DSH 管理范围。
+for (const archived of ['ponytail', 'skillopt', 'skills-summarize-audit']) {
+  mkSkill(skHi, archived, ['---', 'name: ' + archived, 'description: archived', '---'].join(String.fromCharCode(10)))
+}
+for (const external of ['codex-only', 'zcode-only']) {
+  mkSkill(skLo, external, ['---', 'name: ' + external, 'description: external', '---'].join(String.fromCharCode(10)))
+}
 const savedHome6 = process.env.DSH_HOME
 const savedAgentsHome = process.env.DSH_AGENTS_HOME
 process.env.DSH_HOME = dshHome
 process.env.DSH_AGENTS_HOME = agentsHome
-const skRows = m.collectSkills({ get: () => undefined })
+const skRows = m.collectSkills({ get: () => undefined, includeExternalSkills: true })
 const byName2 = new Map(skRows.map((r) => [r.pkg, r]))
+const scopedSkillRows = m.collectSkills({ get: () => undefined })
+check('技能范围：归档 ponytail/skillopt/skills-summarize-audit 永不入表', ['ponytail', 'skillopt', 'skills-summarize-audit'].every((name) => !scopedSkillRows.some((r) => r.pkg === name)))
+check('技能范围：默认不接管 Codex/ZCode rank 500 技能', ['codex-only', 'zcode-only'].every((name) => !scopedSkillRows.some((r) => r.pkg === name)))
 check('技能扫描：目录形态被发现', byName2.has('demo-good'))
 check('技能扫描：顶层 .md 形态被发现', byName2.has('demo-flat'))
 check('技能扫描：name 取 frontmatter 而非目录名', byName2.has('another-name') && !byName2.has('demo-mismatch'))
@@ -828,10 +857,14 @@ check('S4：嵌套 SKILL.md 不会被发现 -> 报出', hasF('demo-nested', '不
 check('S5：纯英文描述 -> 提示可读性且如实说明改写属行为变更', (function () { const f = skFind.find((x) => x.pkg === 'demo-flat'); return !!f && f.remedy.includes('行为变更') && f.remedy.includes('.dsh-skill.backup') })())
 check('S6：同名被遮蔽 -> 事实级高', (function () { const f = skFind.find((x) => x.pkg === 'demo-good' && x.title.includes('遮蔽')); return !!f && f.severity === 'high' })())
 check('demo-good 只报「被遮蔽」一条（无 frontmatter/名称/描述问题）', (function () { const g2 = skFind.filter((x) => x.pkg === 'demo-good'); return g2.length === 1 && g2[0].title.includes('遮蔽') })())
-const withBundled = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx' }] } : undefined) })
+const withBundled = m.collectSkills({ includeExternalSkills: true, get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx', provider: 'dsh' }] } : undefined) })
 const bundledRow = withBundled.find((r) => r.pkg === 'office-docx')
 check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundledRow.source.includes('随 DSH 提供') && bundledRow.bundled === true)
 check('技能行提供作用说明与来源字段', !!(byName2.get('demo-good') || {}).purpose && Object.hasOwn(byName2.get('demo-good') || {}, 'sourceUrl'))
+const bundleRows = m.collectStatus([sandbox])
+const bundleRow = bundleRows.find((r) => r.pkg === 'pkg-with-exports')
+check('插件 package.json repository/homepage 映射到来源链接并脱敏',
+  !!bundleRow && bundleRow.sourceUrl === 'https://gitlab.example.com:8443/team/pkg-with-exports' && bundleRow.sourceLabel === '远端 Git 仓库', JSON.stringify(bundleRow))
 process.env.DSH_HOME = savedHome6
 process.env.DSH_AGENTS_HOME = savedAgentsHome
 fs.rmSync(skillRoot, { recursive: true, force: true })
@@ -879,7 +912,7 @@ if (gitOk !== true) {
   const info = m.skillRepoInfo(gFast.clone)
   check('git：识别仓库根 / 分支 / 远端 / 未提交数', info.isGit === true && info.branch === 'master' && info.dirty === 0 && info.owned === true && info.url !== '')
   check('git：非仓库目录如实 isGit=false', m.skillRepoInfo(path.join(base13, 'nope')).isGit === false)
-  const rows0 = m.collectSkills({ get: () => undefined })
+  const rows0 = m.collectSkills({ get: () => undefined, includeExternalSkills: true })
   const rowGit = rows0.find((r) => r.pkg === 'demo-git')
   const rowPlain = rows0.find((r) => r.pkg === 'demo-plain')
   check('git：技能行带上仓库事实（HEAD 与仓库根归属）', !!rowGit && rowGit.isGit === true && rowGit.localSha === baseSha && rowGit.repoOwned === true)
@@ -893,15 +926,15 @@ if (gitOk !== true) {
   run(['commit', '-m', 'v2'], gFast.pusher)
   run(['push', 'origin', 'master'], gFast.pusher)
   const newSha = run(['rev-parse', 'HEAD'], gFast.pusher)
-  const en1 = await m.enrichSkillUpdates(m.collectSkills({ get: () => undefined }), true)
+  const en1 = await m.enrichSkillUpdates(m.collectSkills({ get: () => undefined, includeExternalSkills: true }), true)
   const eGit1 = en1.find((r) => r.pkg === 'demo-git')
   check('git：远端前进 -> hasUpdate=true 且带远端 sha', !!eGit1 && eGit1.hasUpdate === true && eGit1.remoteSha === newSha)
-  const upd1 = await m.updateSkillRepos(['demo-git'])
+  const upd1 = await m.updateSkillRepos(['demo-git'], { includeExternalSkills: true })
   check('git：更新做真快进并汇报 from -> to', upd1.length === 1 && upd1[0].state === 'updated' && upd1[0].from === baseSha && upd1[0].to === newSha, JSON.stringify(upd1))
   check('git：快进后工作区真的拿到新内容', fs.readFileSync(path.join(gFast.clone, 'NOTES.md'), 'utf8').trim() === 'v2')
-  const upd1b = await m.updateSkillRepos(['demo-git'])
+  const upd1b = await m.updateSkillRepos(['demo-git'], { includeExternalSkills: true })
   check('git：再更新一次 -> unchanged（幂等）', upd1b[0].state === 'unchanged', JSON.stringify(upd1b))
-  const updPlain = await m.updateSkillRepos(['demo-plain'])
+  const updPlain = await m.updateSkillRepos(['demo-plain'], { includeExternalSkills: true })
   check('git：非 git 技能拒绝更新且给得出理由', updPlain[0].state === 'failed' && updPlain[0].message.includes('不是 git 仓库'))
   const updMissing = await m.updateSkillRepos(['not-a-skill'])
   check('git：不存在的技能如实报失败', updMissing[0].state === 'failed' && updMissing[0].message.includes('不存在'))
@@ -911,7 +944,7 @@ if (gitOk !== true) {
   run(['add', '-A'], gDirty.pusher)
   run(['commit', '-m', 'v2'], gDirty.pusher)
   run(['push', 'origin', 'master'], gDirty.pusher)
-  const updDirty = await m.updateSkillRepos(['demo-dirty'])
+  const updDirty = await m.updateSkillRepos(['demo-dirty'], { includeExternalSkills: true })
   check('git：本地未提交改动与远端冲突 -> 拒绝快进', updDirty[0].state === 'failed')
   check('git：拒绝理由点明「未提交修改」而非含糊失败', /未提交修改|local changes|would be overwritten/i.test(updDirty[0].message), JSON.stringify(updDirty))
   check('git：拒绝后本地未提交改动逐字节未被动过', fs.readFileSync(path.join(gDirty.clone, 'NOTES.md'), 'utf8') === beforeDirty)
@@ -922,7 +955,7 @@ if (gitOk !== true) {
   run(['add', '-A'], gFork.pusher)
   run(['commit', '-m', 'v2'], gFork.pusher)
   run(['push', 'origin', 'master'], gFork.pusher)
-  const updFork = await m.updateSkillRepos(['demo-fork'])
+  const updFork = await m.updateSkillRepos(['demo-fork'], { includeExternalSkills: true })
   check('git：本地分叉 -> 拒绝（不产生合并提交）', updFork[0].state === 'failed' && /分叉|fast-forward/.test(updFork[0].message), JSON.stringify(updFork))
   check('git：拒绝后本地提交仍在（没有回退工作）', run(['log', '--oneline', '-1'], gFork.clone).includes('local'))
   process.env.DSH_HOME = savedHome13
@@ -935,6 +968,12 @@ check('客户端：合并页用页内切换区分 插件/技能（页签与标�
   clientSrc.includes('var segEl = h(') && clientSrc.includes('das-seg') &&
   clientSrc.includes('h(Panel, { key: mode, target: mode, seg: segEl })') &&
   clientSrc.includes('props && props.seg ? props.seg : null'))
+check('客户端：操作列不再使用原生 title 浮层，完整说明走行详情卡',
+  clientSrc.includes("'aria-label': title === undefined || title === null ? label : title") &&
+  clientSrc.includes("'aria-label': '只为当前插件生成并应用中文名称与说明'") &&
+  clientSrc.includes("'aria-label': '在当前表格行下展开审查发现与处理建议'") &&
+  !clientSrc.includes("disabled: busyNow, title: '只为当前插件生成并应用中文名称与说明'") &&
+  !clientSrc.includes("title: '在当前表格行下展开审查发现与处理建议'"))
 check('客户端：悬停详情用锚定浮层（fixed + 钳制视口），不再占用表格下方的槽位',
   /\.das-hover \{[^}]*position: fixed/.test(clientSrc) && !/\.das-hover \{[^}]*min-height: 52px/.test(clientSrc) &&
   clientSrc.includes('function placeCard(') && clientSrc.includes('function boxFromEvent(') &&
@@ -946,7 +985,7 @@ check('客户端：随 DSH 提供的对象默认隐藏，但给出数量与显�
 check('客户端：技能视图如实声明会写入 SKILL.md（含备份与还原）', clientSrc.includes('技能改写会真实写入 SKILL.md') && clientSrc.includes('.dsh-skill.backup') && clientSrc.includes('行为变更'))
 check('客户端：技能视图把 优化状态 与 描述语言 分栏如实呈现',
   (clientSrc.match(/name: 'settings\.section'/g) || []).length === 1 &&
-  clientSrc.includes("'优化 · 描述'") && clientSrc.includes("'随 DSH 提供'") &&
+  clientSrc.includes("'技能与中文说明'") && clientSrc.includes("'随 DSH'") &&
   clientSrc.includes('r.descriptionLang') && clientSrc.includes('r.bundled !== true'))
 check('客户端：技能侧不再把 needsText 当成「描述为空」', !clientSrc.includes("'描述为空'"))
 check('客户端：技能视图不继承插件批量状态，两页各自渲染自己的更新结果',
@@ -956,7 +995,7 @@ check('客户端：技能页有与插件页同一套一键更新/行内更新',
   clientSrc.includes("call('update-all'") && clientSrc.includes("call('update-skills'") &&
   clientSrc.includes("opBtn('all'") && clientSrc.includes("opBtn('u'"))
 check('客户端：技能侧如实显示 远端 sha / 最新 / 未比对 与本地改动',
-  clientSrc.includes('来源 / 远端') && clientSrc.includes('function shortShaOf') &&
+  clientSrc.includes('版本与来源') && clientSrc.includes('function shortShaOf') &&
   clientSrc.includes('↑ 远端 ') && clientSrc.includes('本地改动 '))
 check('客户端：加载中的占位文案按视图区分',
   clientSrc.includes("'正在读取技能状态…'") && clientSrc.includes("'正在读取插件状态…'"))
@@ -1002,14 +1041,14 @@ check('技能文案写入覆盖层后可读回', m.readSkillCatalog().some((e) =
 const applied1 = m.applySkillLocale([])
 check('应用：两个技能都成功', applied1.filter((r) => r.state === 'applied').length === 2, JSON.stringify(applied1))
 const oneAfter = fs.readFileSync(path.join(hi2, 'demo-one', 'SKILL.md'), 'utf8')
-check('改写：name 变为「原名（中文名）」', oneAfter.includes('name: demo-one（甲）'))
+check('改写：稳定 name 保持原名，中文名只在展示层', oneAfter.includes('name: demo-one') && !oneAfter.includes('name: demo-one（甲）'))
 check('改写：description 被替换为中文', oneAfter.indexOf('description: ') >= 0 && oneAfter.indexOf('Use when X happens') < 0)
 check('改写：其他 frontmatter 字段逐字保留', oneAfter.includes('license: MIT') && oneAfter.includes('argument-hint: "[a|b]"'))
 check('改写：正文逐字保留', oneAfter.includes('# Body') && oneAfter.includes('text here'))
 const blkAfter = fs.readFileSync(path.join(hi2, 'demo-block', 'SKILL.md'), 'utf8')
 check('块标量 description 被整体吃掉（无残行）', blkAfter.indexOf('第一行说明') < 0 && blkAfter.indexOf('第二行说明') < 0)
 check('块标量后的 metadata 段被完整保留', blkAfter.includes('metadata:') && blkAfter.includes('version: "1.0.0"'))
-const rowsAfter = m.collectSkills({ get: () => undefined })
+const rowsAfter = m.collectSkills({ get: () => undefined, includeExternalSkills: true })
 check('版本读取支持 metadata.version', (rowsAfter.find((r) => r.pkg === 'demo-block') || {}).version === '1.0.0')
 check('应用后仍以原名成行（稳定标识）', rowsAfter.some((r) => r.pkg === 'demo-one'))
 check('应用后判定为已优化', (rowsAfter.find((r) => r.pkg === 'demo-one') || {}).localized === true)

@@ -111,20 +111,49 @@ window.__ModuleLoader__.load({
       if (c === 'manager-unavailable') return '插件管理器服务未就绪，重启 DSH 后可重试。'
       if (c === 'unsupported-spec') return '该包是内置或本地依赖，请在插件页处理。'
       if (/^http-4/.test(c)) return '宿主半体没有这个接口（运行的是启动时加载的旧代码）→ 请重启 DSH。'
-      if (c === 'llm-unavailable') return 'LLM 服务不可用或未注册，重启 DSH 后重试。'
+      if (c === 'llm-unavailable') return 'LLM 服务不可用或未注册；请确认模型服务已启用后重试。'
+      if (c === 'out-of-scope') return '该对象已归档或不属于 DSH 管理范围，已阻止误操作。'
+      if (c === 'skill-overlay-write-failed' || c === 'overlay-write-failed') return '模型结果已生成，但写入翻译覆盖层失败；检查文件权限和磁盘空间后重试。'
       if (c === 'no-model') return '找不到默认模型，请先在设置里选定默认模型再重试。'
-      if (c === 'bad-output') return '模型输出不是约定 JSON，可重试；反复失败请手动补录。'
-      if (c === 'generate-failed') return '生成请求失败（常见原因：宿主半体太旧，代码直接读了 ctx.llm）→ 重启 DSH 后重试。'
+      if (c === 'bad-output') return '模型输出不是约定 JSON；系统已自动重试 1 次，可再次点击，反复失败请手动补录。'
+      if (c === 'generate-failed') return '生成请求失败；当前行会显示宿主返回的具体原因，可按原因重试或检查模型服务。'
       if (c === 'not-found') return '该对象已不存在（可能被移除或改名），刷新状态即可对齐。'
       if (c === 'not-installed') return '该包未安装或不是 DSH bundle，无法生成文案。'
       if (c === 'invalid-pkg' || c === 'missing-pkg') return '参数非法，已被宿主拒绝。'
-      if (c === 'timeout') return '超时：可能仍在后台执行，稍后点「刷新状态」查看结果。'
+      if (c === 'timeout' || c === 'pending-check') return '待确认：安装请求已提交但宿主等待超时，先点「刷新状态」确认，不要重复点击更新。'
+      if (c === 'confirmation-timeout') return '超过确认窗口仍没有最终回执；先重启 DSH，再点「刷新状态」核对版本，确认未变化后再重试。'
+      if (c === 'recovered-after-restart') return '更新在 DSH 重启期间完成，已恢复为当前版本；刷新状态即可。'
+      if (c === 'stale-after-restart') return '任务超过 24 小时未确认，已停止自动等待；刷新状态后重新发起更新。'
+      if (c === 'restart-required') return '依赖已重新安装但宿主要求重启 DSH；重启后点「刷新状态」确认运行中的插件。'
+      if (c === 'update-pending') return '已有安装请求在等待宿主确认；先点「刷新状态」，不要重复启动更新。'
+      if (c === 'post-update-failed') return '安装可能已完成，但更新后的补回或变化摘要失败；先刷新状态，确认版本后再处理文案。'
       if (c === 'incompatible-version') return '目标版本与当前 DSH 运行时不兼容，管理器已自动恢复原版本；请查看当前行详情，等待兼容版本或升级 DSH。'
       if (c === 'update-failed') return '安装失败，原因见当前行；可先刷新状态，再重试。'
       if (c === 'unchanged') return '安装请求已执行，但已安装版本没有变化；请检查依赖来源、锁文件或插件管理器日志。'
       if (c === 'batch-running') return '批量更新正在进行，等它结束后再更新这一项（避免两条 pnpm 并发安装）。'
       if (c === 'network') return '连不上宿主半体，确认 DSH 仍在运行后刷新页面。'
       return '可重试；若反复失败请「刷新状态」重新判定。'
+    }
+
+    /* 同一失败原因只在状态栏汇总一次；逐行详情仍保留完整原因。 */
+    function compactFailures(list) {
+      var items = Array.isArray(list) ? list : [];
+      if (!items.length) return '';
+      var groups = {};
+      for (var i = 0; i < items.length; i += 1) {
+        var raw = String(items[i] || '未知');
+        var m = /^(.*?)（(.*)）$/.exec(raw);
+        var pkg = m ? m[1] : raw;
+        var reason = m ? m[2] : '未知原因';
+        var key = reason || '未知原因';
+        if (!groups[key]) groups[key] = { reason: key, pkgs: [] };
+        if (groups[key].pkgs.indexOf(pkg) < 0) groups[key].pkgs.push(pkg);
+      }
+      return Object.keys(groups).map(function (key) {
+        var g = groups[key];
+        var names = g.pkgs.slice(0, 3).join('、') + (g.pkgs.length > 3 ? ' 等 ' + g.pkgs.length + ' 项' : '');
+        return g.pkgs.length + ' 项：' + g.reason + '（' + names + '）';
+      }).join('；');
     }
 
     class Boundary extends Component {
@@ -230,9 +259,9 @@ window.__ModuleLoader__.load({
       '.das-rise { animation: das-rise .34s cubic-bezier(.16,1,.3,1) both; }',
       '@keyframes das-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }',
       /* 表格 */
-      '.das-wrap { overflow-x: auto; border: 1px solid var(--das-line); border-radius: var(--das-r);',
+      '.das-wrap { overflow-x: hidden; border: 1px solid var(--das-line); border-radius: var(--das-r);',
       '  background: var(--dsw-alias-bg-base, transparent); }',
-      '.das-table { width: 100%; border-collapse: separate; border-spacing: 0;',
+      '.das-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0;',
       '  font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: 18px; }',
       '.das-table th { position: sticky; top: 0; z-index: 1; text-align: left; padding: 6px 10px;',
       '  font-size: var(--dsw-font-xxxs-11-font-size, 11px); font-weight: 600; letter-spacing: .02em;',
@@ -240,7 +269,11 @@ window.__ModuleLoader__.load({
       '  border-bottom: 1px solid var(--das-line); white-space: nowrap; }',
       /* 行内一律单行：nowrap + 省略号。竖排的「更/新」就是列太窄还允许换行造成的。
          需要多行的地方（详情、悬停槽）显式 opt-out。 */
-      '.das-table td { padding: 6px 10px; border-bottom: 1px solid var(--das-line2); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+      '.das-table td { padding: 6px 8px; border-bottom: 1px solid var(--das-line2); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+      '.das-table th:nth-child(1), .das-table td:nth-child(1) { width: 36%; }',
+      '.das-table th:nth-child(2), .das-table td:nth-child(2) { width: 25%; }',
+      '.das-table th:nth-child(3), .das-table td:nth-child(3) { width: 24%; }',
+      '.das-table th:nth-child(4), .das-table td:nth-child(4) { width: 15%; }',
       '.das-table tbody tr { transition: background .18s ease, box-shadow .18s ease; }',
       '.das-table tbody tr:hover { background: var(--dsw-alias-interactive-bg-hover, var(--das-l1));',
       '  box-shadow: inset 2px 0 0 0 var(--das-info); }',
@@ -259,11 +292,24 @@ window.__ModuleLoader__.load({
       '.das-desc { color: var(--das-text2); max-width: 52ch; }',
       '.das-optimized-copy { margin-top: 4px; max-width: 52ch; color: var(--das-text2); line-height: 17px; overflow-wrap: anywhere; }',
       '.das-problem { margin-top: 4px; max-width: 52ch; color: var(--das-err); line-height: 17px; overflow-wrap: anywhere; }',
-      '.das-act { white-space: nowrap; }',
-      '.das-act > * + * { margin-left: 6px; }',
+      '.das-act { white-space: normal; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }',
+      '.das-act > * + * { margin-left: 0; }',
+      '.das-status-cell { white-space: normal !important; }',
+      '.das-status-cell > * { display: inline-flex; margin: 0 4px 3px 0; vertical-align: middle; }',
+      '.das-version-cell { white-space: normal !important; }',
+      '.das-version-current, .das-version-meta { display: inline; }',
+      '.das-version-meta > * { display: inline-flex; margin: 0 4px 3px 0; vertical-align: middle; }',
       /* 行内多个元素（chip / 版本号 / 记录）并排，单行内互相留白 */
       '.das-table td > * + * { margin-left: 6px; }',
       '.das-wrapd { white-space: normal; }',
+      '.das-guidance { display: grid; gap: 6px; }',
+      '.das-guidance-item { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; padding: 6px 9px; border: 1px solid var(--das-line2); border-left: 3px solid var(--das-info); border-radius: var(--das-r); background: var(--das-l1); font-size: 12px; line-height: 17px; }',
+      '.das-guidance-item.is-err { border-left-color: var(--das-err); }',
+      '.das-guidance-item.is-warn { border-left-color: var(--das-warn); }',
+      '.das-guidance-item.is-ok { border-left-color: var(--das-ok); }',
+      '.das-guidance-copy { color: var(--das-text2); }',
+      '.das-guidance-action { color: inherit; font-weight: 600; }',
+      '.das-evidence-cell { min-width: 0; }',
       '.das-table-meta { padding: 7px 10px; border-bottom: 1px solid var(--das-line2); background: var(--das-l1); }',
       '.das-table-meta .das-note { border: 0; padding: 0; background: transparent; }',
       '.das-purpose { max-width: 42ch; margin-top: 3px; color: var(--das-text2); line-height: 17px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }',
@@ -350,24 +396,25 @@ window.__ModuleLoader__.load({
     /* ── 功能性按钮的统一规则（插件页与技能页共用同一套，两页只有「对象」不同） ──
      * 「不可用」一律表现为**暗下去**（disabled + 降透明度），不允许出现「看起来能点、点了没事发生」。
      * 判定只有两种：① 有操作在跑；② 此刻无待办（更新：无可更新；优化：无待优化；还原：无已优化条目）。 */
-    var OUTCOME = { ok: '已更新', updated: '已更新', unchanged: '未变化', fail: '更新失败', failed: '更新失败', done: '已完成' };
+    var OUTCOME = { ok: '已更新', updated: '已更新', unchanged: '版本未变', 'pending-check': '待确认', fail: '更新失败', failed: '更新失败', done: '已完成' };
 
     /* 「本轮结果」里逐项状态的措辞与色调（比 OUTCOME 更全，覆盖生成/应用/还原）。 */
     var STATE_TEXT = {
-      ok: '成功', done: '已完成', updated: '已更新', unchanged: '未变化',
+      ok: '成功', done: '已完成', updated: '已更新', unchanged: '版本未变', 'pending-check': '待确认',
       failed: '失败', fail: '失败', applied: '已应用', generated: '已生成',
       restored: '已还原', 'no-backup': '无备份', 'skipped-not-installed': '未安装',
       pending: '排队中', running: '执行中',
     };
     var STATE_TONE = {
       ok: 'ok', done: 'ok', updated: 'ok', applied: 'ok', generated: 'ok', restored: 'ok',
-      unchanged: 'dim', pending: 'dim', running: 'dim',
+      unchanged: 'warn', 'pending-check': 'warn', pending: 'dim', running: 'dim',
       failed: 'err', fail: 'err', 'no-backup': 'warn', 'skipped-not-installed': 'warn',
     };
     var ACTION_TEXT = { update: '更新', generate: '生成文案', apply: '应用', revert: '还原', 'auto-apply': '自动补回' };
 
     function stateText(state) { return STATE_TEXT[state] || String(state === undefined || state === null ? '未知' : state); }
     function isBad(state) { return state === 'failed' || state === 'fail'; }
+    function isPending(state) { return state === 'pending-check' || state === 'pending'; }
 
     function ManagementPanel(props) {
       var state = useState(null); var data = state[0]; var setData = state[1];
@@ -471,7 +518,7 @@ window.__ModuleLoader__.load({
      * @param label - 按钮文字
      * @param off - 是否暗下去
      * @param onClick - 可用时的动作
-     * @param title - 悬停说明（暗下去时用来说明为什么不可用）
+     * @param title - 供 aria-label 使用的完整说明；不再生成原生 title 浮层，避免遮挡行详情
      * @param mini - 行内小按钮
      * @param tone - 'primary' 主按钮 / 其他为默认
      */
@@ -482,7 +529,7 @@ window.__ModuleLoader__.load({
         type: 'button',
         className: cls,
         disabled: !!off,
-        title: title === undefined || title === null ? undefined : title,
+        'aria-label': title === undefined || title === null ? label : title,
         style: off ? S.off : undefined,
         onClick: off ? undefined : onClick,
       }, label);
@@ -901,22 +948,82 @@ window.__ModuleLoader__.load({
 
       var refresh = useCallback(function () {
         setBusy('refresh');
-        // 刷新 = 重新判定：清掉「本轮已完成」标记，让按钮按新数据重新决定可用性
-        var lockCount = Object.keys(done).length
-        setDone({});
-        setBatchSettled(false);
-        setLockedAt(0);
-        setNote({ kind: 'note', text: '正在刷新（状态 + 版本 + 更新检查）…' });
-        return snapshot({ force: true }).then(function (v) {
-          setBusy('');
-          if (v) {
-            var s = summarize(v, IS_SKILL);
-            setNote({ kind: s.upd || s.pending ? 'note' : 'ok',
-              text: '刷新完成：已装 ' + s.total + '，已优化 ' + s.refined + '，待应用 ' + s.toApply + '，待生成文案 ' + s.pending + '，可更新 ' + s.upd + (s.unk ? '，无法比对 ' + s.unk : '') +
-                (lockCount > 0 ? '；已释放上一轮的 ' + lockCount + ' 个行锁，下表按最新快照重新判定。' : '') });
-          }
+        // 对待确认任务先查宿主任务本身，再刷新版本快照；否则「刷新状态」只刷新表格，
+        // 旧 token 仍在后台，用户下一次点击会再次发起安装。
+        var pending = Object.keys(done).map(function (pkg) { return { pkg: pkg, record: done[pkg] }; }).filter(function (x) {
+          return x.record && x.record.token && (x.record.state === 'pending-check' || x.record.state === 'awaiting-confirmation');
         });
-      }, [done, snapshot]);
+        var lockCount = Object.keys(done).length;
+        var statusChecks = pending.length === 0 ? Promise.resolve([]) : Promise.all(pending.map(function (x) {
+          return call('update-status', { token: x.record.token }).then(absorb).then(function (r) { return { pkg: x.pkg, response: r }; });
+        }));
+        return statusChecks.then(function (checks) {
+          var carry = {};
+          checks.forEach(function (entry) {
+            var r = entry.response;
+            var job = r && r.ok ? r.job : null;
+            if (job && job.done !== true) carry[entry.pkg] = { state: 'pending-check', message: job.message || '仍在等待宿主确认', token: entry.response && entry.response.job ? entry.response.job.token : pending.filter(function (x) { return x.pkg === entry.pkg; })[0].record.token };
+            if (job && job.done === true) absorbResults('update', [{ pkg: entry.pkg, state: job.state || (job.ok ? 'updated' : 'failed'), code: job.code, message: job.message, from: job.from, to: job.to, versionUnchanged: job.versionUnchanged === true }]);
+          });
+          setDone(carry);
+          setBatchSettled(Object.keys(carry).length > 0);
+          setLockedAt(Object.keys(carry).length > 0 ? Date.now() : 0);
+          setNote({ kind: 'note', text: pending.length > 0 ? '已核对 ' + pending.length + ' 个待确认安装，正在刷新状态…' : '正在刷新（状态 + 版本 + 更新检查）…' });
+          return snapshot({ force: true }).then(function (v) {
+            setBusy('');
+            if (v) {
+              var s = summarize(v, IS_SKILL);
+              setNote({ kind: s.upd || s.pending || Object.keys(carry).length > 0 ? 'note' : 'ok',
+                text: '刷新完成：' + s.total + ' 个对象；已优化 ' + s.refined + '，可更新 ' + s.upd + (s.toApply + s.pending ? '，翻译待处理 ' + (s.toApply + s.pending) : '') + (s.unk ? '，版本待确认 ' + s.unk : '') +
+                  (Object.keys(carry).length > 0 ? '；仍有 ' + Object.keys(carry).length + ' 个安装待确认，请稍后再次刷新。' : (lockCount > 0 ? '；已释放上一轮的 ' + lockCount + ' 个行锁，下表按最新快照重新判定。' : '')) });
+            }
+          });
+        }).catch(function (error) {
+          setBusy('');
+          setNote({ kind: 'err', text: '刷新状态失败：' + String((error && error.message) || error) + ' → 请稍后重试。' });
+        });
+      }, [absorb, absorbResults, done, snapshot]);
+
+      // 单项文案优化：行内「待生成文案」直接触发，生成成功后只应用当前插件。
+      var optimizeOne = useCallback(function (row) {
+        if (!row || !row.pkg || row.translationEligible === false || row.bundled === true) return;
+        var pkg = row.pkg;
+        setBusy('optimize:' + pkg);
+        setNote({ kind: 'note', text: '正在为 ' + pkg + ' 生成文案…（调用模型，消耗 token）' });
+        var endpoint = IS_SKILL ? 'generate-skill' : 'generate';
+        var applyEndpoint = IS_SKILL ? 'apply-skills' : 'apply';
+        return call(endpoint, { pkg: pkg }).then(absorb).then(function (g) {
+          if (!g || !g.ok) {
+            var reason = (g && (g.reason || g.message)) || '宿主没有返回失败原因';
+            var code = g && g.code ? ' [' + g.code + ']' : '';
+            absorbResults('generate', [{ pkg: pkg, state: 'failed', code: g && g.code, message: reason }]);
+            setBusy('');
+            setNote({ kind: 'err', text: pkg + ' 文案生成失败' + code + '：' + reason + '。' + fixOf(g && g.code) });
+            return g;
+          }
+          absorbResults('generate', [{ pkg: pkg, state: 'generated', message: '已生成，准备应用' }]);
+          return call(applyEndpoint, { pkgs: [pkg] }).then(absorb).then(function (ap) {
+            var items = ap && Array.isArray(ap.value) ? ap.value : [];
+            absorbResults('apply', items);
+            return snapshot({ force: true }).then(function () {
+              setBusy('');
+              var applied = items.filter(function (x) { return x.state === 'applied'; }).length;
+              if (!ap || !ap.ok || applied === 0) {
+                var msg = (ap && (ap.nextAction || ap.message)) || (items[0] && items[0].message) || '应用阶段没有写入结果';
+                setNote({ kind: 'err', text: pkg + ' 文案已生成，但应用失败：' + msg + '。请展开本行查看详情。' });
+                return ap;
+              }
+              setNote({ kind: 'ok', text: pkg + ' 文案优化完成：已生成并应用 1 项。' });
+              return ap;
+            });
+          });
+        }).catch(function (error) {
+          var reason = String((error && error.message) || error);
+          setBusy('');
+          setNote({ kind: 'err', text: pkg + ' 文案优化失败：' + reason + '。请重试；若重复失败请检查模型配置。' });
+          return { ok: false, code: 'network', message: reason, reason: reason };
+        });
+      }, [IS_SKILL, absorb, absorbResults, snapshot]);
 
       // 翻译优化：生成缺失文案（内置能力）→ 应用全部精炼 → 重新取快照
       var optimize = useCallback(function () {
@@ -945,12 +1052,12 @@ window.__ModuleLoader__.load({
                   absorbResults('apply', items);
                   return snapshot({ force: true }).then(function (v) {
                     setBusy('');
-                    if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用失败：' + ((ap && ap.message) || '未知') }); return; }
+                    if (!ap || !ap.ok) { setNote({ kind: 'err', text: (ap && ap.partial ? '部分应用完成：' : '应用失败：') + ((ap && (ap.message || ap.nextAction)) || '请展开对应行查看失败原因并重试') }); return; }
                     var ss = v ? summarize(v, true) : null;
                     setNote({ kind: gFail.length ? 'err' : 'ok',
                       text: '翻译优化（技能）：生成 ' + gOk + '/' + pend.length + ' · 应用 ' + applied + ' 项 · 跳过 ' + (cur.length - toApplyS.length) + ' 个（已优化或随 DSH 提供）' +
                         (ss ? '；当前已优化 ' + ss.refined + '/' + ss.total : '') +
-                        (gFail.length ? ' · 生成失败 ' + gFail.length + ' 个 —— 原因见对应行的悬停详情' : '') });
+                        (gFail.length ? ' · 生成失败：' + compactFailures(gFail) + '；详情见对应行' : '') });
                   });
                 });
               }
@@ -962,7 +1069,7 @@ window.__ModuleLoader__.load({
                   gOk += 1;
                   absorbResults('generate', [{ pkg: pkg, state: 'generated', message: (g.entry && g.entry.zh && g.entry.zh.description) || '已写入覆盖层' }]);
                 } else {
-                  var why = (g && g.message) || '未知';
+                  var why = (g && (g.reason || g.message)) || '宿主没有返回失败原因';
                   gFail.push(pkg + '（' + why + '）');
                   absorbResults('generate', [{ pkg: pkg, state: 'failed', code: g && g.code, message: why }]);
                 }
@@ -1004,12 +1111,12 @@ window.__ModuleLoader__.load({
                   '新生成 ' + genOk + ' 条，应用 ' + applied + ' 项，失败 ' + genFail.length + ' 个');
                 return snapshot({ force: true }).then(function (v) {
                   setBusy('');
-                  if (!ap || !ap.ok) { setNote({ kind: 'err', text: '应用失败：' + ((ap && ap.message) || '未知') }); return; }
+                  if (!ap || !ap.ok) { setNote({ kind: 'err', text: (ap && ap.partial ? '部分应用完成：' : '应用失败：') + ((ap && (ap.message || ap.nextAction)) || '请展开对应行查看失败原因并重试') }); return; }
                   var s = v ? summarize(v) : null;
                   setNote({ kind: genFail.length ? 'err' : 'ok',
                     text: '翻译优化完成：新生成 ' + genOk + '/' + pending.length + ' 条文案，应用 ' + applied + ' 项，跳过已优化 ' + skipped + ' 个' +
                       (s ? '；当前已优化 ' + s.refined + '/' + s.total : '') +
-                      (genFail.length ? ' · 生成失败 ' + genFail.length + ' 个 —— 原因见对应行的悬停详情' : '') });
+                      (genFail.length ? ' · 生成失败：' + compactFailures(genFail) + '；详情见对应行' : '') });
                 });
               });
             }
@@ -1019,7 +1126,7 @@ window.__ModuleLoader__.load({
             return call('generate', { pkg: pkg }).then(absorb).then(function (g) {
               var item = (g && g.ok)
                 ? { pkg: pkg, state: 'generated', message: (g.entry && g.entry.zh && g.entry.zh.description) || '已写入覆盖层' }
-                : { pkg: pkg, state: 'failed', code: (g && g.code), message: (g && g.message) || '未知' };
+                : { pkg: pkg, state: 'failed', code: (g && g.code), message: (g && (g.reason || g.message)) || '宿主没有返回失败原因' };
               if (g && g.ok) genOk += 1; else genFail.push(pkg + '（' + item.message + '）');
               runItems.push(item);
               absorbResults('generate', [item]);
@@ -1077,10 +1184,10 @@ window.__ModuleLoader__.load({
                   if (job.done) {
                     setJobs(function (prev) { var x = Object.assign({}, prev); delete x[pkg]; return x; });
                     resolve({
-                      ok: job.state === 'updated' || (job.ok === true && job.state !== 'unchanged'),
+                      ok: job.state === 'updated' || (job.ok === true && job.state !== 'unchanged' && job.state !== 'pending-check'),
                       state: job.state || (job.ok === true ? 'updated' : 'failed'),
                       pkg: pkg,
-                      code: job.code || (job.state === 'unchanged' ? 'unchanged' : (job.ok ? null : 'update-failed')),
+                      code: job.code || (job.state === 'unchanged' ? 'unchanged' : (job.state === 'pending-check' ? 'pending-check' : (job.ok ? null : 'update-failed'))),
                       message: job.message,
                       from: job.from,
                       to: job.to,
@@ -1091,7 +1198,7 @@ window.__ModuleLoader__.load({
                   }
                 }
                 if (n < POLL_MAX) setTimeout(tick, POLL_MS);
-                else { setJobs(function (prev) { var x = Object.assign({}, prev); delete x[pkg]; return x; }); resolve({ ok: false, pkg: pkg, code: 'timeout', message: '超时（可能仍在后台执行）' }); }
+                else { setJobs(function (prev) { var x = Object.assign({}, prev); delete x[pkg]; return x; }); resolve({ ok: false, pkg: pkg, state: 'pending-check', code: 'pending-check', message: '安装请求已提交，但宿主等待超时；请稍后刷新状态确认。', pending: true }); }
               });
             };
             tick();
@@ -1165,7 +1272,8 @@ window.__ModuleLoader__.load({
           setLockedAt(Date.now());
           return snapshot({ force: true }).then(function () {
             absorbResults('update', [{ pkg: pkg, state: res.state || (res.ok ? 'updated' : 'failed'), code: res.code, message: res.message, from: res.from, to: res.to, versionUnchanged: res.versionUnchanged === true }]);
-            if (res.state === 'unchanged') setNote({ kind: 'note', text: pkg + ' 安装请求已执行，但版本未变化。' + fixOf(res.code) });
+            if (res.state === 'pending-check') setNote({ kind: 'note', text: pkg + ' 安装请求已提交，暂时无法确认结果。' + fixOf(res.code) });
+            else if (res.state === 'unchanged') setNote({ kind: 'note', text: pkg + ' 安装请求已执行，但版本未变化。' + fixOf(res.code) });
             else if (res.versionUnchanged === true) setNote({ kind: 'ok', text: pkg + ' 已重新安装；版本字段未变化，重启 DSH 后确认运行状态。' });
             else if (res.ok) setNote({ kind: 'ok', text: pkg + ' 已更新，状态已刷新。' });
             else setNote({ kind: 'err', text: pkg + ' 更新失败：' + res.message + ' → ' + fixOf(res.code) });
@@ -1204,6 +1312,21 @@ window.__ModuleLoader__.load({
           setBusy('');
           if (!r || !r.ok) { setNote({ kind: 'err', text: '忽略失败：' + ((r && r.message) || '未知') }); return; }
           setNote({ kind: 'ok', text: '已忽略该条，刷新后不再显示。' });
+          return snapshot({ force: true });
+        });
+      }, [absorb, snapshot]);
+
+      /* 审查卡的动作必须真正落到宿主：更新/翻译会启动真实操作，人工项返回证据和目标。
+         处理后重新取快照，避免按钮仍显示旧状态。 */
+      var findingAction = useCallback(function (finding, action) {
+        var key = 'finding:' + finding.id;
+        setBusy(key);
+        setNote({ kind: 'note', text: '正在处置：' + (finding.title || finding.id) + ' …' });
+        return call('finding-action', { id: finding.id, action: action }).then(absorb).then(function (r) {
+          setBusy('');
+          if (!r || !r.ok) { setNote({ kind: 'err', text: '处置失败：' + ((r && r.message) || '未知') + ' → ' + fixOf(r && r.code) }); return; }
+          var msg = r.message || (action === 'manual' || action === 'open-repo' ? '已给出人工处置目标，请按建议处理。' : '已提交处置，正在刷新结果。');
+          setNote({ kind: action === 'manual' || action === 'open-repo' ? 'note' : 'ok', text: msg });
           return snapshot({ force: true });
         });
       }, [absorb, snapshot]);
@@ -1278,72 +1401,66 @@ window.__ModuleLoader__.load({
               : '宿主半体版本过旧 · 重启 DSH 后重试'))
         : null;
 
-      var noteEl = note
+      /* 当前结果摘要优先于旧的批量提示。旧记录仍放进 resultHint 的 title，
+         保留可追溯性，但不再把「上次批量失败」和「本轮失败」并排渲染成两张红卡。 */
+      var noteEl = note && !(note && typeof note.text === 'string' && (/^上次批量执行|^上次批量更新未跑完/.test(note.text)) && (results.length > 0 || (batch && Array.isArray(batch.items) && batch.items.length > 0)))
         ? h('div', { className: 'das-note' + (note.kind === 'err' ? ' is-err' : (note.kind === 'ok' ? ' is-ok' : '')) },
             chip('nk', note.kind === 'err' ? '失败' : (note.kind === 'ok' ? '完成' : '进行中'), note.kind === 'err' ? 'err' : (note.kind === 'ok' ? 'ok' : 'info')),
             h('span', { className: 'das-note-text' }, note.text))
         : null;
 
-      /* 指标带：一条紧凑文本行（原来的格子网格太占地方），每项 title 说明这个数字是什么。 */
+      /* 智能摘要：只保留用户需要决策的四类信息；原始细项进入 title 与详情，不再堆满首屏。 */
       var kpiCells = [];
-      /* 随 DSH 提供的对象默认隐藏（用户要求：它们在 app.asar 里，既不能优化也没有可比版本，
-         留在表里只占位置）。不是静默隐藏 —— 指标带上给出数量并可一键显示。
-         必须在这里（KPI 之前）算好：放到表格段落会被 var 提升成 undefined，KPI 引用即崩。 */
       var bundledList = (rows || []).filter(function (r) { return r.bundled === true; });
+      var factCount = 0;
+      var notableInferred = 0;
+      var lowInferred = 0;
+      (rows || []).forEach(function (r) {
+        (r.findings || []).forEach(function (f) {
+          if (f.confidence === 'fact') factCount += 1;
+          else if (f.severity === 'low') lowInferred += 1;
+          else notableInferred += 1;
+        });
+      });
+      var actionable = factCount + notableInferred;
+      var failedResults = results.filter(function (item) { return isBad(item.state); }).length;
+      var pendingResults = results.filter(function (item) { return isPending(item.state); }).length;
+      var changedResults = results.filter(function (item) { return item.state === 'updated' || item.state === 'applied' || item.state === 'generated' || item.state === 'restored'; }).length;
+      /* 结果摘要本身已经承载本轮失败/待确认的数量与下一步；否则同一失败会同时出现在
+         顶部 guidance、note 和表格 meta 三处，形成「失败提示三连」。 */
+      /* 宿主恢复批量记录与本地 results 是异步的；用两者的并集去重，避免首帧又冒出第二张失败卡。 */
+      var hasBatchResult = batch && Array.isArray(batch.items) && batch.items.length > 0;
+      var hasCurrentResultSummary = results.length > 0 || hasBatchResult;
+      var batchNote = note && typeof note.text === 'string' && (/^上次批量执行|^上次批量更新未跑完/.test(note.text));
+      var guidance = [];
+      if (revGap) guidance.push({ tone: 'err', title: '运行代码未同步', evidence: '客户端 v' + CLIENT_REV + '，宿主 v' + hostRev, impact: '更新和中文显示可能继续使用旧接口。', action: compareRev(hostRev, CLIENT_REV) < 0 ? '重启 DSH 后再刷新状态' : '刷新页面后再操作' });
+      /* pending / failed 已由 resultHint 统一显示；审查问题和代码版本问题仍独立保留。 */
+      if (!hasCurrentResultSummary && pendingResults > 0) guidance.push({ tone: 'warn', title: '有 ' + pendingResults + ' 项更新待确认', evidence: '宿主已收到安装请求，但等待结果超时。', impact: '重复点击可能并发安装。', action: '先刷新状态，不要重复点击更新' });
+      if (actionable > 0) guidance.push({ tone: 'err', title: '有 ' + actionable + ' 条需要处置的审查发现', evidence: '事实级 ' + factCount + ' 条；中高严重度推断 ' + notableInferred + ' 条。', impact: '可能影响兼容性或安全更新。', action: '展开对应行，按证据和建议停用、升级或等待兼容版本' });
+      if (!hasCurrentResultSummary && failedResults > 0) guidance.push({ tone: 'err', title: '本轮有 ' + failedResults + ' 项未完成', evidence: '结果已记录，未把失败包装成成功。', impact: '当前版本可能没有变化。', action: '先看行内失败原因，按建议刷新或重试' });
+      /* 有动作结果时不再补一条「当前没有问题」绿提示，避免和结果摘要互相打架。 */
+      if (guidance.length === 0 && !hasCurrentResultSummary && !batchNote) guidance.push({ tone: 'ok', title: '当前没有需要处置的安全或冲突问题', evidence: '审查结果中没有事实级或中高严重度发现。', impact: '可以继续使用当前插件。', action: '按需刷新状态，或执行翻译优化' });
+      var guidanceEl = guidance.length > 0 ? h('div', { className: 'das-guidance', role: 'status' }, guidance.slice(0, 3).map(function (g, i) {
+        return h('div', { key: 'g' + i, className: 'das-guidance-item is-' + g.tone },
+          chip('gt' + i, g.title, g.tone),
+          h('span', { className: 'das-guidance-copy' }, g.evidence + ' · ' + g.impact),
+          h('span', { className: 'das-guidance-action' }, '建议：' + g.action));
+      })) : null;
       if (s) {
-        kpiCells.push(kpiStat('k1', s.total, IS_SKILL ? '技能' : '插件', '本次快照里的条目总数'));
-        kpiCells.push(kpiStat('k2', s.refined, '已优化', '文案已落盘（插件：locale 覆盖层；技能：SKILL.md 已改写）', s.refined > 0 ? 'ok' : null));
-        kpiCells.push(kpiStat('k3', s.toApply, '待应用', '已有文案但未落盘；点「翻译优化」应用', s.toApply > 0 ? 'warn' : null));
-        kpiCells.push(kpiStat('k4', s.pending, '待生成文案', '没有文案条目，需要调用模型生成（消耗 token）', s.pending > 0 ? 'warn' : null));
-        kpiCells.push(kpiStat('k5', s.upd, '可更新', IS_SKILL ? '远端比本地新的 git 技能数' : 'npm 上比已装版本新的插件数', s.upd > 0 ? 'warn' : 'dim'));
-        kpiCells.push(kpiStat('k6', s.unk, '无法比对', IS_SKILL ? '是 git 仓库但远端查不到（不可比）' : '最新版本查询失败（不可比）', s.unk > 0 ? 'dim' : null));
-        /* 随 DSH 提供的对象：两个视图都要有这个开关（插件页同样有 @deepseek-ai/* 内置行）。 */
-        kpiCells.push(kpiStat('k8', bundledList.length, '随 DSH 提供' + (bundledList.length > 0 ? (showBundled ? '· 点此隐藏' : '· 点此显示') : ''),
-          bundledList.length > 0
-            ? '这些对象在 app.asar 内、没有可写路径，不参与翻译优化，也没有可比的远端版本，所以默认隐藏；点一下' + (showBundled ? '收起' : '把它们列出来')
-            : '没有随 DSH 提供的对象',
-          bundledList.length > 0 ? 'dim' : null,
-          bundledList.length > 0 ? function () { setShowBundled(!showBundled); } : undefined));
+        var pendingTranslation = s.toApply + s.pending;
+        var updateLabel = s.upd + (pendingResults ? ' 可更新 · ' + pendingResults + ' 待确认' : ' 可更新');
+        kpiCells.push(kpiStat('k1', s.total, IS_SKILL ? '对象' : '插件', '本次快照里的条目总数；旧口径：' + (IS_SKILL ? '技能' : '插件')));
+        kpiCells.push(kpiStat('k2', s.refined, '已中文化', '已优化 ' + s.refined + '；待应用 ' + s.toApply + '；待生成文案 ' + s.pending, s.refined > 0 ? 'ok' : null));
+        kpiCells.push(kpiStat('k5', updateLabel, '更新状态', IS_SKILL ? '远端比本地新的技能；本轮待确认项单独显示' : 'npm 上比已装版本新的插件；本轮待确认项单独显示', (s.upd > 0 || pendingResults > 0) ? 'warn' : 'dim'));
+        kpiCells.push(kpiStat('k11', actionable, actionable > 0 ? '需处置' : '无需处置',
+          '事实级 ' + factCount + ' 条；中高严重度推断 ' + notableInferred + ' 条；低置信观察 ' + lowInferred + ' 条仅供知悉', actionable > 0 ? 'err' : 'ok', actionable > 0 ? function () { setOnlyFlagged(!onlyFlagged); } : undefined));
         if (IS_SKILL) {
           kpiCells.push(kpiStat('k7', s.noRepo, '本地目录', '不是 git 仓库，没有远端可比', s.noRepo > 0 ? 'dim' : null));
           kpiCells.push(kpiStat('k9', s.dirty, '有本地改动', 'git 工作区有未提交修改；快进会被 git 拒绝', s.dirty > 0 ? 'warn' : null));
           kpiCells.push(kpiStat('k10', s.english, '描述为英文', '中文可读性较低；改写 description 属行为变更', s.english > 0 ? 'warn' : null));
         }
-        /* 审查：只把「有证据、可处置」的发现计入数字与筛选。
-           事实级 = 有证据；**推断级但严重度中/高** 也算 —— 否则真问题会被低置信噪音淹没。
-           线上实测 14 条全是 inferred·low，其中 13 条是「客户端依赖 @deepseek-ai/dsh-client-*
-           无法确认是否可满足」，即旧宿主看不到 app.asar 模块造成的假阳性（2.9.x 已按 asar 判定）。
-           把这种条目做成「点此筛选」的按钮，用户点进去只能看到自己无法处置的东西，
-           所以低置信推断只保留在行的展开详情与 title 里，不再占指标带、不再参与筛选。 */
-        var factCount = 0;
-        var notableInferred = 0;
-        var lowInferred = 0;
-        (rows || []).forEach(function (r) {
-          (r.findings || []).forEach(function (f) {
-            if (f.confidence === 'fact') factCount += 1;
-            else if (f.severity === 'low') lowInferred += 1;
-            else notableInferred += 1;
-          });
-        });
-        var actionable = factCount + notableInferred;
-        kpiCells.push(actionable > 0
-          ? kpiStat('k11', actionable, '审查（需处置）' + (onlyFlagged ? '· 仅看命中' : '· 点此筛选'),
-              '事实级 ' + factCount + ' 条' + (notableInferred > 0 ? ' + 推断·中高 ' + notableInferred + ' 条' : '') +
-              '（有证据或影响明确，建议处置）；另有 ' + lowInferred + ' 条低置信推断，只在行的展开详情里',
-              factCount > 0 ? 'err' : 'warn', function () { setOnlyFlagged(!onlyFlagged); })
-          : kpiStat('k11', 0, '审查：无待处置发现' + (lowInferred > 0 ? '（低置信推断 ' + lowInferred + '）' : ''),
-              lowInferred > 0
-                ? '没有需要处置的发现；另有 ' + lowInferred + ' 条低置信推断，未纳入筛选（展开对应行可看）'
-                : '本轮审查没有命中任何规则',
-              'ok'));
-        /* 上次翻译优化：让「我明明点过」有据可查（时间 + 成败），失败时数字变红。 */
-        if (translate && typeof translate.finishedAt === 'number') {
-          kpiCells.push(kpiStat('k12', agoText(translate.finishedAt),
-            '上次优化' + (translate.failed > 0 ? '（失败 ' + translate.failed + '）' : ''),
-            '上次翻译优化：' + agoText(translate.finishedAt) + ' · 动作 ' + (ACTION_TEXT[translate.action] || translate.action || 'optimize') +
-              ' · 生成 ' + (translate.generated || 0) + ' · 应用 ' + (translate.applied || 0) + ' · 失败 ' + (translate.failed || 0) +
-              (translate.message ? ' · ' + translate.message : ''),
-            translate.failed > 0 ? 'err' : 'dim'));
+        if (bundledList.length > 0) {
+          kpiCells.push(kpiStat('k8', bundledList.length, '随 DSH' + (showBundled ? '· 收起' : '· 展开'), '内置对象不参与翻译优化和远端版本比较；点击切换显示', 'dim', function () { setShowBundled(!showBundled); }));
         }
       }
       var kpiEl = kpiCells.length > 0 ? h('div', { className: 'das-stats', role: 'group' }, kpiCells) : null;
@@ -1356,14 +1473,19 @@ window.__ModuleLoader__.load({
       if (batch && batch.running === true) {
         resultHint = h('div', { className: 'das-note', role: 'status', title: lockExplain }, chip('rh', '执行中', 'info'), h('span', { className: 'das-note-text' },
           (IS_SKILL ? '技能更新' : '插件更新') + ' ' + (Number(batch.index || 0) + 1) + '/' + Number(batch.total || 0) + ' · 下表实时合并结果'));
-      } else if (results.length > 0) {
-        var failedResults = results.filter(function (item) { return isBad(item.state); }).length;
-        var changedResults = results.filter(function (item) { return item.state === 'updated' || item.state === 'applied' || item.state === 'generated' || item.state === 'restored'; }).length;
+      } else if (results.length > 0 || (batch && Array.isArray(batch.items) && batch.items.length > 0)) {
+        /* 首帧可能还没有把宿主记录吸收到 results；中断批量仍必须有唯一结果摘要。 */
+        var resultItems = results.length > 0 ? results : ((batch && Array.isArray(batch.items)) ? batch.items : []);
+        var failedResults = resultItems.filter(function (item) { return isBad(item.state); }).length;
+        var pendingResults = resultItems.filter(function (item) { return isPending(item.state); }).length;
+        var changedResults = resultItems.filter(function (item) { return item.state === 'updated' || item.state === 'applied' || item.state === 'generated' || item.state === 'restored'; }).length;
         var interruptedResult = batch && typeof batch.finishedAt !== 'number';
         var resultScope = locked ? '已锁定 ' + lockedCount + ' 行' : '按最新快照';
-        resultHint = h('div', { className: 'das-note' + (interruptedResult ? '' : (failedResults > 0 ? ' is-err' : ' is-ok')), role: 'status', title: lockExplain },
-          chip('rh', interruptedResult ? '已中断（未完成）' : (failedResults > 0 ? '有失败' : '已完成'), interruptedResult ? 'warn' : (failedResults > 0 ? 'err' : 'ok')),
-          h('span', { className: 'das-note-text' }, '本轮处理 ' + results.length + ' 项' + (changedResults ? ' · 已变化 ' + changedResults : '') + (failedResults ? ' · 失败 ' + failedResults : '') + ' · ' + resultScope));
+        var historyHint = interruptedResult ? ' · 批量未跑完，只有中断前完成的部分有结果，未锁定下表' : (batchNote && note && note.text ? '；旧批量记录已折叠（详见本行记录）' : '');
+        var actionHint = failedResults > 0 ? ' · 展开失败行看原因后刷新或重试' : (pendingResults ? ' · 先刷新状态，不要重复点击' : '');
+        resultHint = h('div', { className: 'das-note' + (interruptedResult ? '' : (failedResults > 0 ? ' is-err' : ' is-ok')), role: 'status', title: lockExplain + (batchNote && note && note.text ? '。已折叠的历史批量提示：' + note.text : '') },
+          chip('rh', interruptedResult ? '已中断（未完成）' : (failedResults > 0 ? '有失败' : (pendingResults > 0 ? '待确认' : '已完成')), interruptedResult ? 'warn' : (failedResults > 0 ? 'err' : (pendingResults > 0 ? 'warn' : 'ok'))),
+          h('span', { className: 'das-note-text' }, '本轮处理 ' + resultItems.length + ' 项' + (changedResults ? ' · 已变化 ' + changedResults : '') + (pendingResults ? ' · 待确认 ' + pendingResults : '') + (failedResults ? ' · 失败 ' + failedResults : '') + actionHint + historyHint + ' · ' + resultScope));
       }
 
       /* 行按钮与「本轮结果」记录一致时不必再说；一旦行按钮不再代表那一轮（记录已超期、锁已释放），
@@ -1388,10 +1510,9 @@ window.__ModuleLoader__.load({
             resultHint ? h('div', { className: 'das-table-meta' }, resultHint) : null,
             h('table', { className: 'das-table' },
               h('thead', null, h('tr', null,
-                h('th', null, IS_SKILL ? '技能' : '插件'),
-                h('th', null, IS_SKILL ? '优化 · 描述' : '优化'),
-                h('th', null, IS_SKILL ? '版本 / 修订' : '版本'),
-                h('th', null, IS_SKILL ? '来源 / 远端' : '最新'),
+                h('th', null, IS_SKILL ? '技能与中文说明' : '插件与中文说明'),
+                h('th', null, '健康与优化'),
+                h('th', null, '版本与来源'),
                 h('th', null, '操作'))),
               h('tbody', null, visible.map(function (r) {
                 var upd = r.hasUpdate === true;
@@ -1416,11 +1537,9 @@ window.__ModuleLoader__.load({
                       (record.message || '') + '。它不是当前状态：当前状态由版本列与「更新」按钮决定。')
                   : null;
                 var sourceHint = IS_SKILL ? shortRoot(r.source) : '';
-                var sourceNode = IS_SKILL
-                  ? (r.sourceUrl
-                    ? h('a', { className: 'das-source-link', href: r.sourceUrl, target: '_blank', rel: 'noreferrer', title: r.sourceUrl }, r.sourceLabel || 'GitHub 原作者仓库')
-                    : h('span', { className: 'das-desc', title: sourceHint || undefined }, r.sourceLabel || '来源未知'))
-                  : null;
+                var sourceNode = r.sourceUrl
+                  ? h('a', { className: 'das-source-link', href: r.sourceUrl, target: '_blank', rel: 'noreferrer', title: r.sourceUrl }, r.sourceLabel || 'GitHub 原作者仓库')
+                  : h('span', { className: 'das-desc', title: sourceHint || undefined }, r.sourceLabel || '未确认远端仓库');
                 /* 更新口径：显式状态 chip，而不是只给一个箭头让用户猜。
                    「版本不兼容」（管理器拒绝）优先 —— 那正是「装了但版本没动」的真因。 */
                 var updateState = managerProblem
@@ -1465,7 +1584,7 @@ window.__ModuleLoader__.load({
                     descText
                       ? h('div', { className: 'das-desc-line', title: descText + (descFromSnap ? '（来自客户端内置快照；宿主未提供，重启 DSH 后由宿主提供）' : '') }, descText)
                       : null),
-                  h('td', null,
+                  h('td', { className: 'das-status-cell' },
                     chip('lo', stateText2, stateTone, optimizeTitle),
                     (translateItems[r.pkg] && isBad(translateItems[r.pkg].state) && r.localized !== true)
                       ? chip('tf', '上次失败', 'err',
@@ -1477,27 +1596,52 @@ window.__ModuleLoader__.load({
                           className: 'das-sev ' + (SEV_CLASS[sev] || 'is-low'),
                           title: facts.map(function (f) { return (SEV[f.severity] || f.severity) + ' · ' + f.title; }).join('\n'),
                         }, SEV[sev])
-                      : null),
-                  h('td', { className: 'das-num' },
-                    IS_SKILL ? h('span', { title: rev.title }, rev.text) : h('span', { title: 'package.json 里已安装的版本' }, r.version || '—')),
-                  h('td', null,
-                    chip('us', updateState.text, updateState.tone, updateState.title),
-                    IS_SKILL && sourceNode ? sourceNode : null,
-                    h('span', { className: 'das-num', title: latestText }, latestText),
-                    recordChip),
+                      : null,
+                    issues.length || facts.length
+                      ? chip('ev', '需处置 ' + (issues.length + facts.length), 'warn', '展开本行查看事实、证据、影响与处理建议')
+                      : (findings.length > 0
+                        ? chip('ev', '附带观察 ' + findings.length, 'dim', '低置信观察只供知悉，不要求处置')
+                        : chip('ev', '暂无需处置', 'ok', '当前没有安全或冲突问题')),
+                    h('span', { className: 'das-row-hint' }, issues.length || facts.length ? '展开看建议' : '状态已明确')),
+                  h('td', { className: 'das-num das-version-cell' },
+                    h('span', { className: 'das-version-current', title: IS_SKILL ? rev.title : 'package.json 里已安装的版本' }, IS_SKILL ? rev.text : (r.version || '—')),
+                    h('span', { className: 'das-version-meta' },
+                      chip('us', updateState.text, updateState.tone, updateState.title),
+                      sourceNode ? sourceNode : null,
+                      h('span', { className: 'das-num', title: latestText }, latestText),
+                      recordChip)),
                 ];
                 var op = [];
                 var finished = done[r.pkg];
-                if (job && !job.done) op.push(h('span', { key: 'j', className: 'das-foot' }, job.stage + '…'));
-                // 本会话已处理过这一行：按结果暗下去（未变化/失败也不允许重复点击，重试先「刷新状态」）
+                if (job && !job.done) {
+                  if (job.pending === true || job.stage === 'awaiting-confirmation') {
+                    op.push(opBtn('j', '刷新状态', busyNow, refresh, (job.message || '安装请求正在等待宿主确认') + '；先刷新状态，不要重复点击更新', true));
+                  } else {
+                    op.push(h('span', { key: 'j', className: 'das-foot', title: job.message || '' }, (job.stage || '执行中') + '…'));
+                  }
+                }
+                // 本会话已处理过这一行：待确认提供刷新，失败提供重试，其余结果保留事实但不重复触发。
+                else if (finished && (finished.state === 'pending-check' || finished.state === 'awaiting-confirmation')) {
+                  op.push(opBtn('u', '刷新状态', busyNow, refresh,
+                    (finished.message ? finished.message + ' · ' : '') + '先确认宿主结果，不要重复启动更新', true));
+                }
+                else if (finished && finished.state === 'failed' && upd) {
+                  op.push(opBtn('u', '重试更新', busyNow, function () { doUpdate(r.pkg); },
+                    (finished.message ? finished.message + ' · ' : '') + '确认失败原因后可重新执行', true));
+                }
                 else if (finished) op.push(opBtn('u', outcomeLabel(finished), true, null,
                   (finished.message ? finished.message + ' · ' : '') + '本轮已处理；点「刷新状态」可重新判定'));
                 else if (upd) op.push(opBtn('u', '更新', busyNow, function () { doUpdate(r.pkg); },
                   IS_SKILL ? 'git 快进到远端 ' + shortShaOf(r.remoteSha) : '更新到 ' + (r.latest || '最新版'), true));
+                if (!readOnly && r.translationEligible !== false && r.needsText === true) {
+                  op.push(h('button', { key: 'gen', type: 'button', className: 'das-btn das-mini primary',
+                    disabled: busyNow, 'aria-label': '只为当前插件生成并应用中文名称与说明',
+                    onClick: function () { optimizeOne(r); } }, busy === 'optimize:' + r.pkg ? '生成中…' : '优化文案'));
+                }
                 if (issues.length || findings.length) {
                   op.push(h('button', {
                     key: 'i', type: 'button', className: 'das-btn das-mini',
-                    title: '在当前表格行下展开审查发现与处理建议',
+                    'aria-label': '在当前表格行下展开审查发现与处理建议',
                     onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); },
                   }, (openPkg === r.pkg ? '收起' : '展开 ' + (issues.length + findings.length))));
                 }
@@ -1519,7 +1663,11 @@ window.__ModuleLoader__.load({
                     h('div', { className: 'das-inline-copy' }, '影响/目的：' + (finding.impact || '用于判断该对象是否能被正确识别、选择或安全更新。')),
                     h('div', { className: 'das-inline-copy' }, '证据：' + (finding.evidence || '—')),
                     h('div', { className: 'das-inline-copy' }, '建议：' + (finding.remedy || '—')),
-                    h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy.indexOf('ignore:') === 0, onClick: function () { ignore(finding.id); } }, '忽略')));
+                    h('div', { className: 'das-inline-actions' },
+                      finding.action && (finding.action.kind === 'update' || finding.action.kind === 'translate' || finding.action.kind === 'manual' || finding.action.kind === 'open-repo')
+                        ? h('button', { type: 'button', className: 'das-btn das-mini primary', disabled: busy.indexOf('finding:') === 0, onClick: function () { findingAction(finding, finding.action.kind); } }, finding.action.label || (finding.action.kind === 'translate' ? '一键翻译优化' : (finding.action.kind === 'update' ? '一键更新' : '查看处置建议')))
+                        : null,
+                      h('button', { type: 'button', className: 'das-btn das-mini', disabled: busy.indexOf('ignore:') === 0, onClick: function () { ignore(finding.id); } }, '忽略'))));
                 });
                 issues.forEach(function (issue, issueIndex) {
                   inlineItems.push(h('div', { key: 'issue:' + issueIndex, className: 'das-inline-item is-medium' },
@@ -1530,7 +1678,7 @@ window.__ModuleLoader__.load({
                       ? h('button', { type: 'button', className: 'das-btn das-mini', onClick: refresh }, issue.action.label || '重试')
                       : null));
                 });
-                return [row, h('tr', { key: r.profileDir + '|' + r.pkg + '|detail' }, h('td', { colSpan: 5, className: 'das-inline-detail' }, h('div', { className: 'das-inline-detail-grid' }, inlineItems)))];
+                return [row, h('tr', { key: r.profileDir + '|' + r.pkg + '|detail' }, h('td', { colSpan: 6, className: 'das-inline-detail' }, h('div', { className: 'das-inline-detail-grid' }, inlineItems)))];
               }))));
 
       /* ── 悬停详情槽（用户三条里的「鼠标悬停拓展展示详细信息」）──
@@ -1576,7 +1724,8 @@ window.__ModuleLoader__.load({
         if (IS_SKILL && d.descriptionLang) pairs.push(['描述语言', d.descriptionLang]);
         pairs.push([IS_SKILL ? '修订' : '版本', (IS_SKILL ? skillRevision(d).text : (d.version || '—')) +
           (IS_SKILL ? '' : (d.latest ? ' → 远端 ' + d.latest : '（' + (d.reason || '没有可比的远端版本') + '）'))]);
-        if (IS_SKILL && d.source) pairs.push(['来源', shortRoot(d.source) + (d.sourceUrl ? ' · ' + (d.sourceLabel || d.sourceUrl) : '')]);
+        if (d.sourceUrl) pairs.push(['来源', (d.sourceLabel || '远端仓库') + ' · ' + d.sourceUrl]);
+         else if (IS_SKILL && d.source) pairs.push(['来源', shortRoot(d.source)]);
         if (d.errorMessage || d.error) pairs.push(['管理器异常', String(d.errorMessage || d.error)]);
         if (dRecord) {
           pairs.push(['本轮结果', stateText(dRecord.state) + (dRecord.message ? ' · ' + dRecord.message : '')
@@ -1623,6 +1772,7 @@ window.__ModuleLoader__.load({
             : '把插件的英文标题与说明精炼成中文（保留原包名），写入插件自身的 locale —— DSH 内置的 Plugins 页会直接显示中文。本页同时汇总版本、更新与冲突。')),
         head,
         staleEl,
+        guidanceEl,
         kpiEl,
         noteEl,
         table,
