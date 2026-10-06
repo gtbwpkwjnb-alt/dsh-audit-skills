@@ -180,6 +180,27 @@ check('端到端：空包名被丢弃、未知动作退回 optimize', tr.ok === 
 check('端到端：记录有 finishedAt，可供页面显示「上次优化几时」', typeof tr.value.finishedAt === 'number')
 const trRead = m.readTranslateRun()
 check('端到端：记录真的写在磁盘上（宿主重载也不丢）', !!trRead && trRead.total === 3 && trRead.failed === 1, JSON.stringify(trRead).slice(0, 160))
+/* 技能页留痕必须是**独立文件**：共用一个文件时技能页会覆盖插件页
+   （这正是技能页此前干脆不留痕的原因）。 */
+const trSkill = await post('translate-run', {
+  action: 'optimize', scope: 'skill', message: '技能页翻译留痕',
+  items: [{ pkg: 'demo-skill', state: 'applied', message: '已写入 SKILL.md' }],
+})
+check('端到端：scope=skill 的留痕写自己的文件并回传 scope',
+  trSkill.ok === true && trSkill.value.total === 1 && trSkill.value.scope === 'skill', JSON.stringify(trSkill).slice(0, 200))
+check('端到端：技能留痕不覆盖插件页记录（两份并存）',
+  m.readTranslateRun('plugin').total === 3 && m.readTranslateRun('skill').total === 1,
+  JSON.stringify({ plugin: m.readTranslateRun('plugin').total, skill: m.readTranslateRun('skill').total }))
+const upAfterTr = await post('updates')
+check('端到端：/updates 仍返回插件页留痕', !!upAfterTr.translate && upAfterTr.translate.total === 3, JSON.stringify(upAfterTr.translate).slice(0, 140))
+const savedHomeSk2 = process.env.DSH_HOME
+const savedAgentsSk2 = process.env.DSH_AGENTS_HOME
+process.env.DSH_HOME = sandbox
+process.env.DSH_AGENTS_HOME = path.join(sandbox, 'no-agents-home')
+const skTr = await post('skills')
+process.env.DSH_HOME = savedHomeSk2
+process.env.DSH_AGENTS_HOME = savedAgentsSk2
+check('端到端：/skills 返回技能页自己的留痕（两页不串）', !!skTr.translate && skTr.translate.total === 1, JSON.stringify(skTr.translate).slice(0, 140))
 check('规范化：条目数有上限（不信任客户端输入）', m.normalizeTranslateRun({ action: 'optimize', items: new Array(200).fill({ pkg: 'x', state: 'applied' }) }).total === 60)
 check('规范化：非对象输入不抛错', m.normalizeTranslateRun(null).action === 'optimize' && m.normalizeTranslateRun('nope').total === 0)
 

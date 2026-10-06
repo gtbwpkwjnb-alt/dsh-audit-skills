@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.10.7 — 2026-10-06 · 技能页翻译留痕独立成文件 + 行尾基线
+
+### 修复
+
+- **技能页的翻译优化不留痕**（2.10.6 列为遗留的缺口）：两页原先共用 `translate-run.json` ——
+  技能页要么覆盖插件页的记录、要么干脆不写，于是「技能页上次优化了什么、哪一项为什么失败」无处可查。
+  现在按 scope 分文件：插件页 `translate-run.json`，技能页 `translate-run.skill.json`；
+  记录带 `scope` 字段自证来源；`/updates` 与 `/skills` 各返回自己那一份。
+  客户端按当前视图传 scope，旧客户端不传时按插件页处理（向后兼容）。
+- **行尾基线**：新增 `.gitattributes`（`* text=auto eol=lf`）；crash-rehearsal 里
+  「已装副本 vs 仓库」的比较改为**行尾归一后**逐字节 —— 本机 `core.autocrlf=true`（工作区 CRLF）
+  而 GitHub tarball 是 LF，逐字节比较此前会无意义地失败（实测归一后完全相等）。
+  同时补上 `index.js` 的同款一致性断言（此前只比 `client.js`）。
+
+### 闸门
+
+- preflight `ALL PASS` · crash-rehearsal `48/0` · render-smoke `130/0` · `--live` `139/0` · regression `354/0`
+
 ## 2.10.6 — 2026-10-06 · 汇总发布：列表密度 / 更新失败 / 注入报错 / 技能页与版本列
 
 本版把 2.10.5 之后的四轮补丁合并为一个可发布版本（`2.10.5+patch1` … `patch4`），

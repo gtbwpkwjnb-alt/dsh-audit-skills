@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.6';
+    var CLIENT_REV = '2.10.7';
     /* 本插件自己的包名：客户端就是它自己，所以它自己的中文名不必等宿主提供
        （否则列表里 6 行是中文、唯独自己那一行是包名，看着像坏了）。 */
     var OWN_PKG = 'dsh-audit-skills';
@@ -863,7 +863,7 @@ window.__ModuleLoader__.load({
       var recordTranslate = useCallback(function (action, items, message) {
         var list = (Array.isArray(items) ? items : []).filter(function (it) { return it && typeof it.pkg === 'string' && it.pkg !== ''; });
         if (list.length === 0) return Promise.resolve(null);
-        return call('translate-run', { action: action, items: list, message: message || '' }).then(function (r) {
+        return call('translate-run', { action: action, items: list, message: message || '', scope: IS_SKILL ? 'skill' : 'plugin' }).then(function (r) {
           if (r && r.ok && r.value) setTranslate(r.value);
           return r;
         });

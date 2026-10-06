@@ -1,0 +1,3 @@
+# 统一文本行尾：GitHub 拉取的 tarball 是 LF，而 Windows 工作区默认 CRLF，
+# 会让「已装副本 vs 仓库」的逐字节比较无意义地失败。
+* text=auto eol=lf

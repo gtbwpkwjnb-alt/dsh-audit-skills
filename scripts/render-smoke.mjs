@@ -188,7 +188,7 @@ function buttonByExactText(tree, label) {
 }
 
 // ───────────────────────── 实测抓取的快照形状 ─────────────────────────
-const REV = '2.10.6'
+const REV = '2.10.7'
 
 const pluginRow = (o) => Object.assign({ kind: 'plugin', installed: true, enabled: true, issues: [], findings: [], source: 'profile' }, o)
 
@@ -198,7 +198,7 @@ const PLUGIN_ROWS = [
   pluginRow({ pkg: '@furongjun1999/dsh-memory', version: '0.5.0', latest: '0.5.1', hasUpdate: true, localized: true, needsText: false }),
   pluginRow({ pkg: '@wxg-prc-cpg/browser-skill-dsh-plugin', version: '0.3.1', latest: '0.3.1', hasUpdate: false, localized: false, needsText: true, inCatalog: true }),
   pluginRow({
-    pkg: 'dsh-audit-skills', version: '2.10.6', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
+    pkg: 'dsh-audit-skills', version: '2.10.7', latest: null, hasUpdate: null, reason: 'HTTP 404', localized: true, needsText: false,
     issues: [{ code: 'not-on-npm', reason: 'npm registry 上没有这个包（HTTP 404）', remedy: 'GitHub 直装，跳过 npm 比对', action: { kind: 'hint', label: 'GitHub 直装，跳过 npm 比对' } }],
     findings: [
       { id: 'interaction:sharedinject:x', kind: 'interaction', pkg: 'dsh-audit-skills', peers: [], severity: 'low', confidence: 'fact', title: '与另一个插件共享非平台模块', evidence: '两者都 inject third-party-shared', remedy: '若两者版本不兼容会一起坏，建议锁定版本。' },
@@ -280,8 +280,20 @@ function translateRecord() {
   }
 }
 
-/* 可按用例切换的 generate / apply 返回值（默认 null = 与历史行为一致，零影响） */
-let mockGenerate = null
+/** 技能页的留痕（宿主 /skills 的 translate 字段）：与插件页各自独立，用来验证两页不串。
+    用「技能行同名 + failed」制造一个**只可能来自技能记录**的行内「上次失败」徽章。 */
+function skillTranslateRecord() {
+  return {
+    scope: 'skill',
+    action: 'optimize',
+    finishedAt: Date.now() - 30 * 60 * 1000,
+    total: 1, generated: 0, applied: 0, failed: 1, skipped: 0,
+    message: '技能文案：生成 0 条、应用 0 项，失败 1 个',
+    items: [{ pkg: 'cangjie-skill', state: 'failed', message: '技能侧失败原因：SKILL.md 不可写' }],
+  }
+}
+
+/* 可按用例切换的 generate / apply 返回值（默认 null = 与历史行为一致，零影响） */let mockGenerate = null
 let mockApplyValue = null
 /* /skills 读取失败的可切换返回值（默认 null = 正常返回 SKILL_ROWS）。 */
 let mockSnapshotFailure = null
@@ -303,7 +315,7 @@ function fetchImpl(state) {
       return json(Object.assign({ rev: hostRev }, mockSnapshotFailure))
     }
     if (action === 'updates') return json({ rev: hostRev, ok: true, audit: AUDIT, translate: translateRecord(), value: PLUGIN_ROWS })
-    if (action === 'skills') return json({ rev: hostRev, ok: true, translate: translateRecord(), audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
+    if (action === 'skills') return json({ rev: hostRev, ok: true, translate: skillTranslateRecord(), audit: { generatedAt: Date.now(), counts: { high: 1, medium: 0, low: 0, fact: 1, inferred: 0 }, noCompat: [] }, value: SKILL_ROWS })
     /* generate / apply 的返回值可按用例切换（默认保持原行为：generate 走 404 兜底、apply 报 applied） */
     if (action === 'generate') {
       return mockGenerate === null
@@ -742,6 +754,8 @@ check('技能来源进 version title（仍不刷本地 Windows 路径）', skill
 check('如实标出本地改动文件数（version title 里可读）', /本地改动 3 个文件/.test(skillTitles) && /本地改动 2 个文件/.test(skillTitles))
 check('技能页 KPI 含本地目录 / 本地改动 / 描述为英文', skillText.includes('本地目录') && skillText.includes('本地改动') && skillText.includes('描述为英文'))
 check('技能页版本列表头改为「版本」（来源进 title，不再挤列里）', skillText.includes('版本') && !clientSrc.includes("'版本与来源'"))
+check('技能页显示技能页自己的留痕（行内「上次失败」来自技能记录），不串到插件页',
+  skillTitles.includes('技能侧失败原因') && !staleTitles.includes('技能侧失败原因'))
 check('【主功能】技能侧中文名同样优先展示（不再整串「包名（中文）」）',
   skillText.includes('学习一个视频') && !skillText.includes('（学习一个视频） · '), skillText.slice(0, 160))
 check('技能页说明写入边界但不铺陈长段落', skillText.includes('翻译会写入 SKILL.md 并保留备份') && !skillText.includes('技能改写会真实写入 SKILL.md'))

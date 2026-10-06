@@ -2604,24 +2604,27 @@ const BATCH_STALE_MS = 10 * 60 * 1000
  * 落盘之后，页面可以如实说出「上次翻译优化：X 时 · 生成 N · 应用 M · 失败 K（原因）」，
  * 而不是留一个没有来历的「待生成文案」让用户以为功能没生效。
  */
-function translateRunFile() {
-  return path.join(path.dirname(overlayPath()), 'translate-run.json')
+function translateRunFile(scope) {
+  /* 插件页与技能页**各一份**留痕：共用一个文件时，技能页的记录会把插件页的顶掉
+     （此前技能页干脆不写留痕，于是「技能页上次优化了什么」无处可查）。 */
+  const file = scope === 'skill' ? 'translate-run.skill.json' : 'translate-run.json'
+  return path.join(path.dirname(overlayPath()), file)
 }
 
 /** 读上次翻译优化记录；没有/坏了都返回 null（页面据此显示「无记录」）。 */
-export function readTranslateRun() {
+export function readTranslateRun(scope) {
   try {
-    return JSON.parse(fs.readFileSync(translateRunFile(), 'utf8'))
+    return JSON.parse(fs.readFileSync(translateRunFile(scope), 'utf8'))
   } catch {
     return null
   }
 }
 
 /** 写上次翻译优化记录；写失败只影响「留痕」，不影响翻译本身。 */
-export function writeTranslateRun(value) {
+export function writeTranslateRun(value, scope) {
   try {
-    fs.mkdirSync(path.dirname(translateRunFile()), { recursive: true })
-    fs.writeFileSync(translateRunFile(), JSON.stringify(value, null, 2) + '\n')
+    fs.mkdirSync(path.dirname(translateRunFile(scope)), { recursive: true })
+    fs.writeFileSync(translateRunFile(scope), JSON.stringify(value, null, 2) + '\n')
     return { ok: true, value }
   } catch (error) {
     return { ok: false, message: String((error && error.message) || error) }
@@ -2649,6 +2652,8 @@ export function normalizeTranslateRun(raw) {
     })
     .filter((it) => it.pkg !== '')
   return {
+    /* 留痕自证来源：读的时候一眼能看出这条是插件页还是技能页的。 */
+    scope: body.scope === 'skill' ? 'skill' : 'plugin',
     action,
     items,
     total: items.length,
@@ -3363,7 +3368,7 @@ export function registerBridge(ctx, dirs) {
               writeJson(res, 200, {
                 ok: true,
                 audit: audit,
-                translate: readTranslateRun(),
+                translate: readTranslateRun('plugin'),
                 value: out.map((row) => Object.assign({}, row, { issues: describeIssues(row), findings: byPkg.get(row.pkg) ?? [] })),
               })
             } catch (error) {
@@ -3412,7 +3417,7 @@ export function registerBridge(ctx, dirs) {
               }
               writeJson(res, 200, {
                 ok: true,
-                translate: readTranslateRun(),
+                translate: readTranslateRun('skill'),
                 audit: {
                   generatedAt: Date.now(),
                   counts: {
@@ -3638,7 +3643,10 @@ export function registerBridge(ctx, dirs) {
           handler: async (req, res) => {
             try {
               const body = await readJsonBody(req)
-              writeJson(res, 200, writeTranslateRun(normalizeTranslateRun(body)))
+              /* scope 决定写哪一份留痕：'skill' → translate-run.skill.json，其余 → translate-run.json。
+                 客户端按当前视图传；旧客户端不传时按插件页处理（向后兼容）。 */
+              const scope = body !== undefined && body.scope === 'skill' ? 'skill' : 'plugin'
+              writeJson(res, 200, writeTranslateRun(normalizeTranslateRun(body), scope))
             } catch (error) {
               writeJson(res, 200, { ok: false, code: 'run-failed', message: String(error?.message ?? error) })
             }

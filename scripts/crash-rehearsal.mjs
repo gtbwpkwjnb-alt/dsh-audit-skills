@@ -178,7 +178,13 @@ try {
   const installed = JSON.parse(fs.readFileSync(path.join(installedPath, 'package.json'), 'utf8'))
   check('已装版本与仓库版本一致', installed.version === pkg.version, installed.version + ' vs ' + pkg.version)
   const installedClient = fs.readFileSync(path.join(installedPath, 'client.js'), 'utf8')
-  check('已装 client.js 与仓库逐字节一致', installedClient === clientSrc)
+  /* 行尾不参与比较：本机 core.autocrlf=true（工作区 CRLF），而从 GitHub 拉取的 tarball 是 LF ——
+     逐字节比较会因为行尾无意义地失败（实测归一后完全相等）。 */
+  const stripped = (s) => s.replace(/\r\n/g, '\n')
+  check('已装 client.js 与仓库一致（行尾归一后逐字节）', stripped(installedClient) === stripped(clientSrc))
+  const installedIndex = fs.readFileSync(path.join(installedPath, 'index.js'), 'utf8')
+  check('已装 index.js 与仓库一致（行尾归一后逐字节）',
+    stripped(installedIndex) === stripped(fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')))
   check('已装 client.js 无顶层 import', !/^\s*import\s[^(]/m.test(installedClient))
   let installedParseErr = null
   try { new vm.Script(installedClient, { filename: 'installed-client.js' }) } catch (error) { installedParseErr = error }
