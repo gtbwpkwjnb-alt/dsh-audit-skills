@@ -397,6 +397,18 @@ check('显示密度：行内单行（nowrap + 省略号）+ 悬停详情槽 + �
   clientSrc.includes('onMouseEnter') && clientSrc.includes("'已最新'") && clientSrc.includes("'不可比'"))
 check('口径：中断的批量不得被说成「已完成」',
   clientSrc.includes("'已中断（未完成）'") && clientSrc.includes('没有完成时间') && clientSrc.includes('未跑完'))
+/* ── 用户要求：每行太高、可见对象太少、不要横向拉条（点「横向拉条」会把其它列推出视野） ──
+   契约：固定 26px 行高 + 每列一个 nowrap 的 .das-cell + 表格有宽度上限 + 面板根 min-width:0。 */
+check('[密度] 列表是单行紧凑表格：26px 行高 + 每列一个 nowrap 的 .das-cell + 无横向溢出',
+  /\.das-table td \{[^}]*height: 26px/.test(clientSrc) &&
+  /\.das-cell \{[^}]*flex-wrap: nowrap/.test(clientSrc) &&
+  /\.das-wrap \{ overflow-x: hidden/.test(clientSrc) &&
+  /\.das-table \{[^}]*max-width: 100%/.test(clientSrc) &&
+  /\.das-root\s*\{[^}]*min-width: 0/.test(clientSrc))
+check('[密度] 展开入口并进状态 chip：行内不再有块级 div、也不再有「展开」按钮与常驻提示',
+  clientSrc.includes("h('span', { className: 'das-cell'") && clientSrc.includes('function chipBtn(') &&
+  !clientSrc.includes('das-row-hint') && !/h\('div', \{ className: 'das-desc-line'/.test(clientSrc) &&
+  !clientSrc.includes("'展开 ' + (issues.length + findings.length)"))
 check('口径：只有真拿到逐项结果才置位行锁（避免「一键更新已禁用、行锁却不存在」）',
   (clientSrc.match(/items\.length > 0\) \{ setBatchSettled\(true\); setLockedAt\(Date\.now\(\)\); absorbBatch\(/g) || []).length >= 1 &&
   clientSrc.includes('if (bb && Array.isArray(bb.items) && bb.items.length > 0)'))
@@ -968,10 +980,10 @@ check('客户端：合并页用页内切换区分 插件/技能（页签与标�
   clientSrc.includes('var segEl = h(') && clientSrc.includes('das-seg') &&
   clientSrc.includes('h(Panel, { key: mode, target: mode, seg: segEl })') &&
   clientSrc.includes('props && props.seg ? props.seg : null'))
-check('客户端：操作列不再使用原生 title 浮层，完整说明走行详情卡',
+check('客户端：行内按钮一律走 aria-label，不用原生 title 浮层（含状态列的展开 chip）',
   clientSrc.includes("'aria-label': title === undefined || title === null ? label : title") &&
   clientSrc.includes("'aria-label': '只为当前插件生成并应用中文名称与说明'") &&
-  clientSrc.includes("'aria-label': '在当前表格行下展开审查发现与处理建议'") &&
+  clientSrc.includes("'aria-label': title === undefined || title === null ? text : title") &&
   !clientSrc.includes("disabled: busyNow, title: '只为当前插件生成并应用中文名称与说明'") &&
   !clientSrc.includes("title: '在当前表格行下展开审查发现与处理建议'"))
 check('客户端：悬停详情用锚定浮层（fixed + 钳制视口），不再占用表格下方的槽位',

@@ -390,8 +390,7 @@ console.log('\n1 插件视图 · 批量记录已完成但已超出锁定保鲜�
 const stale = await scenario(92 * 60 * 1000)
 const staleText = textOf(stale.pluginTree)
 const staleTitles = titlesOf(stale.pluginTree)
-/* 行集合与允许的块级白名单：后面多处复用，定义提前（同一个模块作用域，不能重复声明） */
-const NAME_BLOCKS = ['das-name-main', 'das-desc-line']
+/* 行集合：后面多处复用，定义提前（同一个模块作用域，不能重复声明） */
 const dataRows = elementsOf(stale.pluginTree, (n) => n.tag === 'tr' && elementsOf(n, (m) => m.tag === 'td').length > 1)
 check('渲染无异常（apply / 渲染 / effect 都算）', stale.errors.length === 0, stale.errors.map((e) => e.message).join(' | '))
 check('取到了 /updates 与 /update-all-status', stale.loaded.state.calls.includes('updates') && stale.loaded.state.calls.includes('update-all-status'), stale.loaded.state.calls.join(','))
@@ -542,12 +541,16 @@ check('【悬停】悬停后槽位显示该行完整信息（长文案 + 已装/
   hoverText.includes('中文说明：给模型提供上下文面板') && hoverText.includes('0.56.2'),
   'hoverText=' + hoverText.slice(0, 240))
 check('【留痕】悬停槽显示该行的上次翻译优化结果', hoverText.includes('上次翻译优化'), 'hoverText=' + hoverText.slice(0, 240))
-/* 「一行一项」的结构化证明（按用户本轮要求放宽）：块级堆叠只允许出现在名称列
-   （中文名 + 一行中文说明），其它列必须保持单行；名称列最多两行。 */
-const stackedRows = dataRows.filter((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) < 0).length > 0)
-check('【密度】块级堆叠只出现在名称列，其它列仍单行',
-  dataRows.length >= PLUGIN_ROWS.filter((r) => r.bundled !== true).length && stackedRows.length === 0,
-  'stacked=' + stackedRows.length + '/' + dataRows.length)
+/* ── 用户本轮要求：每行太高、可见对象太少 → 一行一项，行内不许再有块级堆叠 ──
+   上一轮允许「中文名 + 中文说明各占一行」，状态列与版本列又各自换行，一行被撑成 2~4 行；
+   现在硬契约：一个数据行里**一个块级 div 都不许有**，说明文字在同一行内省略号截断。 */
+const rowDivs = dataRows.map((tr) => elementsOf(tr, (n) => n.tag === 'div').length)
+check('【密度】行内没有任何块级 div：一行就是一行',
+  dataRows.length >= PLUGIN_ROWS.filter((r) => r.bundled !== true).length && rowDivs.every((n) => n === 0),
+  'divs/row=' + rowDivs.join(','))
+check('【密度】4 个单元格各自只有一个 .das-cell（单行 flex 容器）',
+  dataRows.length > 0 && dataRows.every((tr) => elementsOf(tr, (n) => n.props && String(n.props.className || '').indexOf('das-cell') >= 0).length === 4),
+  dataRows.map((tr) => elementsOf(tr, (n) => n.props && String(n.props.className || '').indexOf('das-cell') >= 0).length).join(','))
 /* ── 用户第二次追问「我明明点过翻译优化」→ 运行必须留痕 + 能自愈（先红后绿） ── */
 check('【留痕】行内标出「上次翻译优化失败」，不再是无来历的待生成文案',
   staleText.includes('上次失败'), staleText.slice(0, 120))
@@ -555,9 +558,30 @@ check('【留痕】指标带出上次优化结果', staleText.includes('上次�
 check('【自愈】检测到「有条目但不在盘上」的对象时自动补应用',
   stale.loaded.state.calls.indexOf('apply') >= 0 && stale.loaded.state.posted.some((b) => b.action === 'auto-apply'),
   'calls=' + stale.loaded.state.calls.join(',') + ' posted=' + stale.loaded.state.posted.map((b) => b.action).join(','))
-check('【密度】名称列最多两行（中文名 + 一行说明）',
-  dataRows.every((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) >= 0).length <= 2),
-  dataRows.map((tr) => elementsOf(tr, (n) => n.tag === 'div' && NAME_BLOCKS.indexOf(String(n.props.className)) >= 0).length).join(','))
+check('【密度】行高固定 26px 且垂直居中（不再由内容堆叠决定行高）',
+  /\.das-table td \{[^}]*height: 26px/.test(clientSrc) && /\.das-table td \{[^}]*vertical-align: middle/.test(clientSrc))
+check('【密度】.das-cell 一律 nowrap，列宽由 table-layout: fixed 决定',
+  /\.das-cell \{[^}]*flex-wrap: nowrap/.test(clientSrc) && clientSrc.includes('table-layout: fixed'))
+check('【密度】操作列不再换行（td.das-act 不再是 flex-wrap: wrap）',
+  /\.das-act \{[^}]*white-space: nowrap/.test(clientSrc) && !/\.das-act \{[^}]*flex-wrap: wrap/.test(clientSrc))
+/* 「展开」原本自己占一格按钮，还要跟「更新」「优化文案」抢宽度 → 并进状态 chip：chip 自己就是展开入口 */
+const chipButtons = dataRows.flatMap((tr) => elementsOf(tr, (n) => n.tag === 'button' && String((n.props || {}).className || '').indexOf('das-chip') >= 0))
+check('【密度】「展开」不再单独占一个按钮：状态 chip 自己就是展开入口',
+  dataRows.length > 0 && chipButtons.length > 0 &&
+  dataRows.every((tr) => elementsOf(tr, (n) => n.tag === 'button' && textOf(n).indexOf('展开') === 0).length === 0),
+  'chipButtons=' + chipButtons.length)
+check('【密度】状态 chip 按钮带 aria-expanded / aria-label，且不弹原生 title',
+  chipButtons.length > 0 && chipButtons.every((b) => typeof (b.props || {})['aria-expanded'] === 'boolean' &&
+    typeof (b.props || {})['aria-label'] === 'string' && !Object.prototype.hasOwnProperty.call(b.props || {}, 'title')))
+check('【密度】chip 文案有省略号保护（.das-chip-t），窄列也不撑破行',
+  /\.das-chip-t \{[^}]*text-overflow: ellipsis/.test(clientSrc) && clientSrc.includes("'das-chip-t'"))
+check('【密度】面板根不再让内容决定最小宽度（min-width: 0，防页面级横向滚动条）',
+  /\.das-root\s*\{[^}]*min-width: 0/.test(clientSrc))
+check('【列宽】四列都有明确宽度（合计 100%），表格有 max-width 上限',
+  [1, 2, 3, 4].every((n) => new RegExp('\\.das-table td:nth-child\\(' + n + '\\) \\{ width: ').test(clientSrc)) &&
+  /\.das-table \{[^}]*max-width: 100%/.test(clientSrc))
+check('【密度】行内不再有「展开看建议」这类常驻提示（都进悬停卡）',
+  !clientSrc.includes('das-row-hint'))
 
 /* 模拟用户点「详情」：Panel 的 openPkg 是它的第 4 个 hook。
    这一步同时验证 FindingCard / IssueCard —— 此前它们从未被渲染过。
@@ -715,7 +739,11 @@ if (process.argv.includes('--live')) {
     check('【LIVE】真客户端渲染线上快照无异常（含隐藏 ' + hidden + ' 个随 DSH 提供的对象）',
       rows.length === listed.length, 'rows=' + rows.length + ' expected=' + listed.length + '（总 ' + live.value.length + '）')
     check('【LIVE】渲染文本里没有 undefined', !/\bundefined\b/.test(liveText))
-    check('【LIVE】不再出现「包名（中文） · 包名」的整串重复形态', !/（[^）]{1,20}） · /.test(liveText), liveText.slice(0, 200))
+    /* 这条契约的对象是「行」，不是整页：整页文本里合法地会出现「（…） · 」（例如状态提示里的
+       时间说明），按整页判会假红。逐行判才是用户看到的那个形态。 */
+    const dupShape = rows.map((tr) => textOf(tr)).filter((t) => /（[^）]{1,20}） · /.test(t))
+    check('【LIVE】行内不再出现「包名（中文） · 包名」的整串重复形态',
+      dupShape.length === 0, dupShape.slice(0, 2).join(' || '))
     /* 逐行：只要这份内置 catalog 覆盖它、且中文确实已落盘，渲染文本里就必须出现它的中文名 */
     let covered = 0
     const missed = []

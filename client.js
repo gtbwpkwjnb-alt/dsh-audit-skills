@@ -195,6 +195,10 @@ window.__ModuleLoader__.load({
       '  line-height: var(--dsw-font-xs-13-line-height, 20px);',
       '  color: var(--dsw-alias-label-primary, inherit);',
       '  display: flex; flex-direction: column; gap: 12px; width: 100%;',
+      /* 用户报「有横向拉条」：面板作为 flex 子项时 min-width 默认 auto = 由内容最小宽度决定，
+         一旦某一行内容不可压（等宽包名/URL/长按钮），整页就会被撑出横向滚动条。
+         显式 min-width:0 + 表格 max-width:100% 把溢出堵在源头，横向滚动条不再出现。 */
+      '  min-width: 0;',
       '}',
       '.das-root *, .das-root *::before, .das-root *::after { box-sizing: border-box; }',
       /* 设置页的可见宽度取决于窗口与分区，视口宽度骗不了它 —— 用容器查询：
@@ -261,19 +265,21 @@ window.__ModuleLoader__.load({
       /* 表格 */
       '.das-wrap { overflow-x: hidden; border: 1px solid var(--das-line); border-radius: var(--das-r);',
       '  background: var(--dsw-alias-bg-base, transparent); }',
-      '.das-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0;',
+      '.das-table { width: 100%; max-width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0;',
       '  font-size: var(--dsw-font-xxs-12-font-size, 12px); line-height: 18px; }',
-      '.das-table th { position: sticky; top: 0; z-index: 1; text-align: left; padding: 6px 10px;',
+      '.das-table th { position: sticky; top: 0; z-index: 1; text-align: left; padding: 3px 8px;',
       '  font-size: var(--dsw-font-xxxs-11-font-size, 11px); font-weight: 600; letter-spacing: .02em;',
       '  color: var(--das-dim); background: var(--dsw-alias-bg-layer-2, var(--das-l2));',
       '  border-bottom: 1px solid var(--das-line); white-space: nowrap; }',
-      /* 行内一律单行：nowrap + 省略号。竖排的「更/新」就是列太窄还允许换行造成的。
-         需要多行的地方（详情、悬停槽）显式 opt-out。 */
-      '.das-table td { padding: 6px 8px; border-bottom: 1px solid var(--das-line2); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.das-table th:nth-child(1), .das-table td:nth-child(1) { width: 36%; }',
+      /* 一行一项：行高由 CSS 定死 26px（11px 文字 + 19~21px 的 chip/按钮仍留呼吸感）。
+         以前行高由「哪一列换了几行」决定 —— 状态列与版本列各自 flex-wrap 之后，
+         一行被撑成 2~4 行，于是「每页能看的插件太少」（用户本轮反馈的根因）。 */
+      '.das-table td { height: 26px; padding: 1px 8px; border-bottom: 1px solid var(--das-line2); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+      /* 四列宽度合计 100%，操作列给足预算，否则按钮换行又变成两行 */
+      '.das-table th:nth-child(1), .das-table td:nth-child(1) { width: 34%; }',
       '.das-table th:nth-child(2), .das-table td:nth-child(2) { width: 25%; }',
       '.das-table th:nth-child(3), .das-table td:nth-child(3) { width: 24%; }',
-      '.das-table th:nth-child(4), .das-table td:nth-child(4) { width: 15%; }',
+      '.das-table th:nth-child(4), .das-table td:nth-child(4) { width: 17%; }',
       '.das-table tbody tr { transition: background .18s ease, box-shadow .18s ease; }',
       '.das-table tbody tr:hover { background: var(--dsw-alias-interactive-bg-hover, var(--das-l1));',
       '  box-shadow: inset 2px 0 0 0 var(--das-info); }',
@@ -284,23 +290,28 @@ window.__ModuleLoader__.load({
       '.das-name-main { display: inline-block; font-family: var(--dsw-font-family, system-ui), "Microsoft YaHei UI", sans-serif; font-weight: 600; max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: baseline; }',
       /* 原包名退为次级：等宽 + 11px，挤在一行内，超长省略 */
       '.das-name-pkg { font-family: var(--das-mono); font-size: var(--dsw-font-xxxs-11-font-size, 11px); color: var(--das-dim); margin-left: 6px; max-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: baseline; }',
-      /* 优化结果直接展示：一行中文说明，超长省略，完整版在 title 与悬停槽 */
-      '.das-desc-line { font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; color: var(--das-text2); max-width: 38ch; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+      /* 优化结果直接展示：与中文名同一行，占满剩余宽度后省略号截断；完整版在 title 与悬停卡 */
+      '.das-desc-line { font-size: var(--dsw-font-xxxs-11-font-size, 11px); line-height: 15px; color: var(--das-text2); max-width: 38ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
       '.das-name-pkg { font-family: var(--das-mono); }',
       '.das-mono { font-family: var(--das-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }',
       '.das-num { font-family: var(--das-mono); font-variant-numeric: tabular-nums; }',
       '.das-desc { color: var(--das-text2); max-width: 52ch; }',
       '.das-optimized-copy { margin-top: 4px; max-width: 52ch; color: var(--das-text2); line-height: 17px; overflow-wrap: anywhere; }',
       '.das-problem { margin-top: 4px; max-width: 52ch; color: var(--das-err); line-height: 17px; overflow-wrap: anywhere; }',
-      '.das-act { white-space: normal; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }',
-      '.das-act > * + * { margin-left: 0; }',
-      '.das-status-cell { white-space: normal !important; }',
-      '.das-status-cell > * { display: inline-flex; margin: 0 4px 3px 0; vertical-align: middle; }',
-      '.das-version-cell { white-space: normal !important; }',
-      '.das-version-current, .das-version-meta { display: inline; }',
-      '.das-version-meta > * { display: inline-flex; margin: 0 4px 3px 0; vertical-align: middle; }',
-      /* 行内多个元素（chip / 版本号 / 记录）并排，单行内互相留白 */
-      '.das-table td > * + * { margin-left: 6px; }',
+      /* 操作列：永不分行（按钮一换行，行高立刻从一行变两行）。按钮可缩到省略号，
+         aria-label 仍是完整说明；不给原生 title，避免遮挡行详情卡。 */
+      '.das-act { white-space: nowrap; }',
+      '.das-act .das-btn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
+      /* ── 单行单元格：每列内容都包在一个 .das-cell 里（不换行的 flex 行）──
+         列内元素分两类：不缩的（chip / 按钮）与可缩的（.das-fit：包名、说明、来源、远端版本）。
+         于是任何宽度下每列都只占一行，行高不会被某一列顶起来，也不会把整格文字切掉。 */
+      '.das-cell { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; }',
+      '.das-cell > * { flex: 0 0 auto; }',
+      '.das-fit { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
+      '.das-status-cell .das-cell, .das-act .das-cell { gap: 4px; }',
+      /* chip 允许自己缩：文字在 .das-chip-t 里，缩到极限是省略号，而不是整格被切掉 */
+      '.das-status-cell .das-chip, .das-version-cell .das-chip { flex: 0 1 auto; min-width: 0; }',
+      '.das-chip-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
       '.das-wrapd { white-space: normal; }',
       '.das-guidance { display: grid; gap: 6px; }',
       '.das-guidance-item { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; padding: 6px 9px; border: 1px solid var(--das-line2); border-left: 3px solid var(--das-info); border-radius: var(--das-r); background: var(--das-l1); font-size: 12px; line-height: 17px; }',
@@ -326,6 +337,11 @@ window.__ModuleLoader__.load({
       '.das-chip.is-warn { color: var(--das-warn); }',
       '.das-chip.is-info { color: var(--das-info); }',
       '.das-chip.is-mono { font-family: var(--das-mono); }',
+      /* 「需处置 N / 附带观察 N」自己就是展开入口：省掉一个独立按钮，
+         操作列不再和它抢宽度（这正是行高与列宽同时吃紧的一个来源）。 */
+      '.das-chip-btn { appearance: none; cursor: pointer; font-family: inherit; text-align: left; }',
+      '.das-chip-btn:hover { background: var(--das-l2); }',
+      '.das-chip-btn[aria-expanded="true"] { background: var(--dsw-alias-fill-l2, rgba(127,127,127,.18)); }',
       '.das-sev { font-family: var(--das-mono); font-size: var(--dsw-font-xxxs-11-font-size, 11px); padding: 0 4px;',
       '  border: 1px solid currentColor; border-radius: 3px; }',
       '.das-sev.is-high { color: var(--das-err); }',
@@ -360,7 +376,6 @@ window.__ModuleLoader__.load({
       '.das-hover-k { color: var(--das-dim); }',
       '.das-hover-v { color: var(--das-text2); overflow-wrap: anywhere; }',
       '.das-hover-hint { color: var(--das-dim); display: flex; align-items: center; min-height: 36px; }',
-      '.das-row-hint { color: var(--das-dimmer); font-size: var(--dsw-font-xxxs-11-font-size, 11px); }',
       '.das-management { display: flex; flex-direction: column; gap: 8px; }',
       '.das-manage-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }',
       '.das-manage-input { flex: 1 1 260px; min-width: 180px; font: inherit; font-size: 12px; line-height: 16px; padding: 5px 8px; border: 1px solid var(--das-line); border-radius: var(--dsw-radius-sm, 6px); background: var(--das-l1); color: inherit; }',
@@ -540,7 +555,23 @@ window.__ModuleLoader__.load({
         key: key,
         className: 'das-chip' + (tone ? ' is-' + tone : '') + (mono === true ? ' is-mono' : ''),
         title: title === undefined || title === null ? undefined : title,
-      }, text);
+      }, h('span', { className: 'das-chip-t' }, text));
+    }
+
+    /**
+     * 可点的 chip。状态列的「需处置 N / 附带观察 N」自己就是展开入口：
+     * 少一个按钮，操作列就少一份宽度争夺，行高也不会被按钮换行顶起来。
+     * 原生 title 一律不生成（会盖住行详情卡），说明走 aria-label。
+     */
+    function chipBtn(key, text, tone, title, onClick, expanded) {
+      return h('button', {
+        key: key,
+        type: 'button',
+        className: 'das-chip das-chip-btn' + (tone ? ' is-' + tone : ''),
+        'aria-label': title === undefined || title === null ? text : title,
+        'aria-expanded': expanded === true,
+        onClick: onClick,
+      }, h('span', { className: 'das-chip-t' }, text));
     }
 
     /** 指标带里的一项：一行文本（数字 + 标签）。有 onClick 就是按钮（例如审查筛选）。 */
@@ -1538,8 +1569,8 @@ window.__ModuleLoader__.load({
                   : null;
                 var sourceHint = IS_SKILL ? shortRoot(r.source) : '';
                 var sourceNode = r.sourceUrl
-                  ? h('a', { className: 'das-source-link', href: r.sourceUrl, target: '_blank', rel: 'noreferrer', title: r.sourceUrl }, r.sourceLabel || 'GitHub 原作者仓库')
-                  : h('span', { className: 'das-desc', title: sourceHint || undefined }, r.sourceLabel || '未确认远端仓库');
+                  ? h('a', { className: 'das-source-link das-fit', href: r.sourceUrl, target: '_blank', rel: 'noreferrer', title: r.sourceUrl }, r.sourceLabel || 'GitHub 原作者仓库')
+                  : h('span', { className: 'das-desc das-fit', title: sourceHint || undefined }, r.sourceLabel || '未确认远端仓库');
                 /* 更新口径：显式状态 chip，而不是只给一个箭头让用户猜。
                    「版本不兼容」（管理器拒绝）优先 —— 那正是「装了但版本没动」的真因。 */
                 var updateState = managerProblem
@@ -1575,40 +1606,53 @@ window.__ModuleLoader__.load({
                     : '该对象由宿主管理，当前没有可写路径，不参与翻译优化。')
                   : (r.localized ? '文案已落盘' : (r.needsText ? '还没有文案条目，需要调用模型生成' : '已有文案但未落盘，点「翻译优化」应用')))
                   + (descText ? ' 说明：' + descText : '');
-                /* 一行一项：行内只留 名称 · 优化状态 · 版本 · 更新状态(+本轮记录) · 操作。
-                   中文说明、作用、描述语言、管理器异常、审查标题、原名统统进悬停槽与 title。 */
+                /* 一行一项：整行就是四列、每列一个 .das-cell（不换行的 flex 行）。
+                   名称列 = 中文名（不缩） + 包名（可缩） + 中文说明（可缩，同一行内省略号）；
+                   状态列 = 状态 chip + 上次失败 + 严重度 + 「需处置 N」（本身可点开）；
+                   版本列 = 版本 + 更新状态 + 来源 + 远端版本 + 本轮记录。
+                   其余信息（作用、管理器异常、审查标题与证据、时间戳）全部只在悬停卡与 title 里。 */
+                var issueCount = issues.length + facts.length;
                 var cells = [
                   h('td', { className: 'das-name' },
-                    h('span', { className: 'das-name-main', title: r.pkg }, primaryName),
-                    showPkg !== '' ? h('span', { className: 'das-name-pkg', title: r.pkg }, showPkg) : null,
-                    descText
-                      ? h('div', { className: 'das-desc-line', title: descText + (descFromSnap ? '（来自客户端内置快照；宿主未提供，重启 DSH 后由宿主提供）' : '') }, descText)
-                      : null),
+                    h('span', { className: 'das-cell' },
+                      h('span', { className: 'das-name-main', title: r.pkg }, primaryName),
+                      showPkg !== '' ? h('span', { className: 'das-name-pkg das-fit', title: r.pkg }, showPkg) : null,
+                      descText
+                        ? h('span', { className: 'das-desc-line das-fit', title: descText + (descFromSnap ? '（来自客户端内置快照；宿主未提供，重启 DSH 后由宿主提供）' : '') }, descText)
+                        : null)),
                   h('td', { className: 'das-status-cell' },
-                    chip('lo', stateText2, stateTone, optimizeTitle),
-                    (translateItems[r.pkg] && isBad(translateItems[r.pkg].state) && r.localized !== true)
-                      ? chip('tf', '上次失败', 'err',
-                          '上次翻译优化（' + agoText(translate.finishedAt) + '）里这一项失败了：' + (translateItems[r.pkg].message || '无原因') +
-                          ' —— 点「翻译优化」可重试；悬停本行看完整记录')
-                      : null,
-                    facts.length > 0
-                      ? h('span', {
-                          className: 'das-sev ' + (SEV_CLASS[sev] || 'is-low'),
-                          title: facts.map(function (f) { return (SEV[f.severity] || f.severity) + ' · ' + f.title; }).join('\n'),
-                        }, SEV[sev])
-                      : null,
-                    issues.length || facts.length
-                      ? chip('ev', '需处置 ' + (issues.length + facts.length), 'warn', '展开本行查看事实、证据、影响与处理建议')
-                      : (findings.length > 0
-                        ? chip('ev', '附带观察 ' + findings.length, 'dim', '低置信观察只供知悉，不要求处置')
-                        : chip('ev', '暂无需处置', 'ok', '当前没有安全或冲突问题')),
-                    h('span', { className: 'das-row-hint' }, issues.length || facts.length ? '展开看建议' : '状态已明确')),
+                    h('span', { className: 'das-cell' },
+                      chip('lo', stateText2, stateTone, optimizeTitle),
+                      (translateItems[r.pkg] && isBad(translateItems[r.pkg].state) && r.localized !== true)
+                        ? chip('tf', '上次失败', 'err',
+                            '上次翻译优化（' + agoText(translate.finishedAt) + '）里这一项失败了：' + (translateItems[r.pkg].message || '无原因') +
+                            ' —— 点「翻译优化」可重试；悬停本行看完整记录')
+                        : null,
+                      facts.length > 0
+                        ? h('span', {
+                            className: 'das-sev ' + (SEV_CLASS[sev] || 'is-low'),
+                            title: facts.map(function (f) { return (SEV[f.severity] || f.severity) + ' · ' + f.title; }).join('\n'),
+                          }, SEV[sev])
+                        : null,
+                      issueCount > 0
+                        ? chipBtn('ev', openPkg === r.pkg ? '收起 ' + issueCount : '需处置 ' + issueCount,
+                            openPkg === r.pkg ? 'ok' : 'warn',
+                            '本行有 ' + issueCount + ' 条需处置的发现（' + issues.length + ' 条状态问题、' + facts.length + ' 条事实级发现）：' +
+                            (openPkg === r.pkg ? '点这里收起' : '点这里在行下展开证据、影响与处理建议'),
+                            function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); }, openPkg === r.pkg)
+                        : (findings.length > 0
+                          ? chipBtn('ev', openPkg === r.pkg ? '收起 ' + findings.length : '附带观察 ' + findings.length,
+                              openPkg === r.pkg ? 'ok' : 'dim',
+                              '本行另有 ' + findings.length + ' 条低置信观察（只供知悉，不要求处置）：' +
+                              (openPkg === r.pkg ? '点这里收起' : '点这里在行下展开'),
+                              function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); }, openPkg === r.pkg)
+                          : chip('ev', '暂无需处置', 'ok', '当前没有安全或冲突问题')))),
                   h('td', { className: 'das-num das-version-cell' },
-                    h('span', { className: 'das-version-current', title: IS_SKILL ? rev.title : 'package.json 里已安装的版本' }, IS_SKILL ? rev.text : (r.version || '—')),
-                    h('span', { className: 'das-version-meta' },
+                    h('span', { className: 'das-cell' },
+                      h('span', { className: 'das-version-current', title: IS_SKILL ? rev.title : 'package.json 里已安装的版本' }, IS_SKILL ? rev.text : (r.version || '—')),
                       chip('us', updateState.text, updateState.tone, updateState.title),
-                      sourceNode ? sourceNode : null,
-                      h('span', { className: 'das-num', title: latestText }, latestText),
+                      sourceNode,
+                      h('span', { className: 'das-num das-fit', title: latestText }, latestText),
                       recordChip)),
                 ];
                 var op = [];
@@ -1638,14 +1682,9 @@ window.__ModuleLoader__.load({
                     disabled: busyNow, 'aria-label': '只为当前插件生成并应用中文名称与说明',
                     onClick: function () { optimizeOne(r); } }, busy === 'optimize:' + r.pkg ? '生成中…' : '优化文案'));
                 }
-                if (issues.length || findings.length) {
-                  op.push(h('button', {
-                    key: 'i', type: 'button', className: 'das-btn das-mini',
-                    'aria-label': '在当前表格行下展开审查发现与处理建议',
-                    onClick: function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); },
-                  }, (openPkg === r.pkg ? '收起' : '展开 ' + (issues.length + findings.length))));
-                }
-                cells.push(h('td', { className: 'das-act' }, op.length ? op : null));
+                /* 「展开 N」不再自己占一个按钮：状态列的「需处置 N / 附带观察 N」就是入口（见 chipBtn）。
+                   操作列越窄，按钮越容易换行，行高就越容易翻倍。 */
+                cells.push(h('td', { className: 'das-act' }, h('span', { className: 'das-cell' }, op.length ? op : null)));
                 var row = h('tr', {
                   key: r.profileDir + '|' + r.pkg,
                   className: r.installed === false ? 'is-dim' : undefined,
@@ -1744,7 +1783,7 @@ window.__ModuleLoader__.load({
           h('div', { key: 'k', className: 'das-hover-head' },
             h('span', { className: 'das-hover-name' }, d.displayName || d.pkg),
             chip('hv', openPkg === d.pkg ? '已钉住' : '悬停预览', openPkg === d.pkg ? 'ok' : 'dim',
-              openPkg === d.pkg ? '点行内「收起」取消钉住' : '点行内「展开」可钉住并显示操作按钮')),
+              openPkg === d.pkg ? '点行内「收起」取消钉住' : '点行内状态列的「需处置 N / 附带观察 N」可钉住并在行下显示操作按钮')),
           h('div', { key: 'g', className: 'das-hover-grid' }, pairs.map(function (p, i) {
             return h('div', { key: 'p' + i },
               h('span', { className: 'das-hover-k' }, p[0] + '：'),
