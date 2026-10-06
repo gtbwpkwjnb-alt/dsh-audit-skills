@@ -38,6 +38,21 @@ DSH Marketplace 提交页（<https://dshmarketplace.dev/submit>）原话：
 | 3 | 建 GitHub Release（目录页与爬虫读它） | `gh release create vX.Y.Z --repo gtbwpkwjnb-alt/dsh-audit-skills --title "<版本 — 一句话>" --notes-file <notes>` |
 | 4 | 重新钉 profile（本机生效 + 防回退） | `node <bundle>/pnpm.cjs -C C:\Users\Administrator\.dsh\profiles\desktop add "github:gtbwpkwjnb-alt/dsh-audit-skills#vX.Y.Z"` |
 
+### 1.1 已执行记录（2026-10-06）
+
+| 版本 | 提交 | tag | Release | profile |
+|---|---|---|---|---|
+| 2.10.6 | `42a954e` | 附注 tag `v2.10.6` | <https://github.com/gtbwpkwjnb-alt/dsh-audit-skills/releases/tag/v2.10.6> | 重钉成功（随后升级到 2.10.7） |
+| 2.10.7 | `6a46a99` | 附注 tag `v2.10.7` | <https://github.com/gtbwpkwjnb-alt/dsh-audit-skills/releases/tag/v2.10.7> | `pnpm add …#v2.10.7` 成功（4s） |
+
+- topics 已含 `dsh-plugin` / `deepseek-harness`（另有 `dsh` / `plugin-manager` / `chinese-localization` / `i18n`）
+  → 四个市场会在 ≤12h 内自动收录，**不需要提交表单**。
+- **npm 仍未发布**：本机 `~/.npmrc` 没有 `_authToken`，需要人工 `npm login` 后 `npm publish --access public`。
+- 重钉实测**没有 EPERM**（被钉的包自身正在运行不影响）：pnpm 输出里的 `Packages: +1 -36` 是它的统计口径，
+  不是删依赖 —— 锁文件行数不变（1349 行）、`node_modules` 109 个目录全在。
+- 重钉后 `client.js` / `index.js` 与仓库**行尾不同**（tarball 是 LF，本机工作区 CRLF）：
+  已在 crash-rehearsal 改为行尾归一后比较，并加 `.gitattributes`（`* text=auto eol=lf`）防漂移。
+
 > ⚠️ 第 4 步注意：这是 `pnpm add`，会重新物化 profile 里的包。**若某个插件正在运行并占住自己的目录**
 > （实测 `dsh-computer-use-win` 的 MCP server 与常驻 UIA helper 会占住），pnpm 会在 rename 时报
 > `ERR_PNPM_EPERM` 并把该包目录清空、同时回滚我们的 spec。处置见 §5。
