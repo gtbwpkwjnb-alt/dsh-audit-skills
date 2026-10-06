@@ -447,7 +447,15 @@ check('【核心】行按钮不再代表那一轮时，把上轮结果贴回该�
 check('贴回的记录明确声明「它不是当前状态」', staleTitles.includes('它不是当前状态'))
 check('一键更新按钮可用（锁已释放），且标注可更新数量 4',
   (() => { const b = buttonByText(stale.pluginTree, '一键更新'); return !!b && b.props.disabled !== true && textOf(b).includes('4') })())
-check('最新列显示 ↑ 远端新版本，未变化只是「本轮结果」的记录', staleText.includes('↑ 0.5.1') && staleText.includes('↑ 0.3.16'))
+check('最新版本号显示在「更新」按钮上（版本列只留版本号）',
+  !!buttonByExactText(stale.pluginTree, '更新 0.5.1') && !!buttonByExactText(stale.pluginTree, '更新 0.3.16'))
+check('【密度】版本列只显示版本号：不再叠来源 / 远端版本',
+  (() => {
+    const cells = elementsOf(stale.pluginTree, (n) => n.tag === 'td' && typeof n.props.className === 'string' && n.props.className.includes('das-version-cell'))
+    return cells.length > 0 && cells.every((c) => !/↑|GitHub|原作者|未确认远端/.test(textOf(c)))
+  })())
+check('【可达性】来源与远端版本仍能在 title 里读到（信息没丢）',
+  staleTitles.includes('来源：') && /可更新到 0\.5\.1/.test(staleTitles))
 check('降级保护：已装 1.1.0 / 远端 0.5.0 不标为可更新', staleText.includes('1.1.0') && staleText.includes('0.5.0'))
 check('行内只留严重度徽章，事实标题进悬停与 title', /低/.test(staleText) && staleTitles.includes('与另一个插件共享非平台模块'))
 check('渲染文本里没有 undefined', !/\bundefined\b/.test(staleText), staleText.slice(0, 160))
@@ -502,8 +510,8 @@ check('【密度】td 默认 nowrap —— 不再出现「更/新」这种竖排
   /\.das-table td \{[^}]*white-space: nowrap/.test(clientSrc))
 check('【密度】名称列单行截断（ellipsis），不靠换行堆叠',
   /\.das-table td \{[^}]*text-overflow: ellipsis/.test(clientSrc) && clientSrc.includes('table-layout: fixed') && clientSrc.includes('overflow-x: hidden'))
-check('【更新状态】更新列给出显式状态 chip（已最新 / 不可比）',
-  staleText.includes('已最新') && staleText.includes('不可比'))
+check('【更新状态】更新状态进 version title（已最新 / 不可比），不占版本列宽度',
+  staleTitles.includes('远端与本地一致') && staleTitles.includes('不可比'))
 /* 用户：悬停预览显示在页面下方、要滚动才看得到 —— 改成锚定在行旁的浮层（借鉴本机 dsh-annotation：
    position:fixed + getBoundingClientRect + 下方放不下就翻上方 + 双轴钳制视口） */
 check('【悬停卡】用固定定位浮层，不再占用表格下方的布局槽位',
@@ -661,8 +669,8 @@ check('锁定行数与结果数量一致（3 行，而不是记录条数）', fr
 check('被锁的三行按钮按结果暗下去，显示「未变化」', (freshText.match(/版本未变/g) || []).length >= 3)
 check('一键更新按钮被禁用（与行锁一致，不再自相矛盾）', (() => { const b = buttonByText(fresh.pluginTree, '一键更新'); return !!b && b.props.disabled === true })())
 check('锁有效时不必再贴记录（这 3 行的按钮本身已显示「未变化」）', !freshText.includes('本轮 · 未变化'))
-check('不在该批次里的可更新行不受锁影响（第 4 行仍有「更新」入口）',
-  titlesOf(fresh.pluginTree).includes('更新到 0.2.0') === true && titlesOf(fresh.pluginTree).includes('更新到 0.5.1') === false)
+check('不在该批次里的可更新行不受锁影响（第 4 行仍有「更新 0.2.0」入口）',
+  !!buttonByExactText(fresh.pluginTree, '更新 0.2.0') && !buttonByExactText(fresh.pluginTree, '更新 0.5.1'))
 
 /* 对抗复查抓到的真缺陷：refresh() 清了行锁但留着批量记录，旧 lockNote 便把它当成「超期」，
    输出「这是 1 分钟前的记录，已超出 10 分钟的锁定保鲜期」。这里**真的点一次「刷新状态」**。 */
@@ -673,7 +681,7 @@ check('点「刷新状态」后渲染无异常', refreshed.errors.length === 0, 
 check('刷新后如实报告释放了几个行锁（这段新文案必须被真的跑到）', refreshedText.includes('已释放上一轮的 3 个行锁'), refreshedText.slice(0, 160))
 check('【核心】刷新释放 ≠ 超期：不得再出现「N 分钟前…已超出 10 分钟」的自相矛盾',
   refreshedText.includes('已释放上一轮的 3 个行锁') && refreshedText.includes('按最新快照') && !refreshedText.includes('已超出 10 分钟的锁定保鲜期'))
-check('刷新后行按钮恢复可用（重新判定）', titlesOf(refreshed.tree).includes('更新到 0.5.1'))
+check('刷新后行按钮恢复可用（重新判定）', !!buttonByExactText(refreshed.tree, '更新 0.5.1'))
 
 // ───────────────────────── 3 插件视图：中断的批量（没有 finishedAt） ─────────────────────────
 console.log('\n3 插件视图 · 批量被中断（running=false 且没有 finishedAt）')
@@ -682,13 +690,13 @@ const brokenText = textOf(broken.pluginTree)
 check('渲染无异常', broken.errors.length === 0, broken.errors.map((e) => e.message).join(' | '))
 check('中断的批量不得被说成「已完成」', brokenText.includes('已中断（未完成）') && !brokenText.includes('批量更新 · 已完成'))
 check('并说明只有中断前完成的部分有结果、且不锁定下表', brokenText.includes('未跑完') && brokenText.includes('只有中断前完成'))
-check('中断不锁行 → 可更新的行仍可点', titlesOf(broken.pluginTree).includes('更新到 0.5.1'))
+check('中断不锁行 → 可更新的行仍可点', !!buttonByExactText(broken.pluginTree, '更新 0.5.1'))
 check('中断不置位锁标记（一键更新仍可用）', (() => { const b = buttonByText(broken.pluginTree, '一键更新'); return !!b && b.props.disabled !== true })())
 
 /* 对抗复查抓到的第二个真缺陷：中断的批量之后再点一次单行更新，chip 说「已中断」、
    lockNote 却说「（刚刚完成）」。现在行锁时间取自锁自己，两边不再打架。 */
 backToPlugin(broken.loaded)
-const brokenUpdated = await clickAndSettle(broken.loaded.rt, broken.element, broken.pluginTree, '更新', true)
+const brokenUpdated = await clickAndSettle(broken.loaded.rt, broken.element, broken.pluginTree, '更新 0.5.1', true)
 const brokenAfter = textOf(brokenUpdated.tree)
 check('中断 + 单行更新：渲染无异常', brokenUpdated.errors.length === 0, brokenUpdated.errors.map((e) => e.message).join(' | '))
 check('【核心】不得出现「已中断」与「刚刚完成」同屏打架',
@@ -723,16 +731,17 @@ check('【主功能】槽位写出「宿主未提供中文名，重启后可见�
 // ───────────────────────── 6 技能视图 ─────────────────────────
 console.log('\n4 技能视图 · 版本/修订回落链与来源压缩')
 const skillText = textOf(stale.skillTree)
+const skillTitles = titlesOf(stale.skillTree)
 check('切换视图后无异常（key={mode} 真重挂载并拉 /skills）', stale.loaded.state.calls.includes('skills'), stale.loaded.state.calls.join(','))
 check('10 个技能全部成行', SKILL_ROWS.every((r) => skillText.includes(r.pkg)), '缺：' + SKILL_ROWS.filter((r) => !skillText.includes(r.pkg)).map((r) => r.pkg).join(','))
 check('视图切换不串数据：技能表里没有插件名', !skillText.includes('dsh-free-search') && !skillText.includes('@furongjun1999/dsh-memory'))
 check('【核心】未声明 version 的技能回落到 git 提交号', skillText.includes('git b1c7007') && skillText.includes('git 36acead2'))
 check('未声明且非 git 的技能显示「未声明」而不是「—」', skillText.includes('未声明'))
 check('声明了 version 的技能显示 vX.Y.Z', skillText.includes('v1.6.0') && skillText.includes('v0.2.0'))
-check('技能来源显示 GitHub 原作者仓库，不刷本地 Windows 路径', skillText.includes('GitHub 原作者仓库') && !skillText.includes('C:\\Users'))
-check('如实标出本地改动文件数', skillText.includes('本地改动 3 个文件') && skillText.includes('本地改动 2 个文件'))
+check('技能来源进 version title（仍不刷本地 Windows 路径）', skillTitles.includes('GitHub 原作者仓库') && !skillText.includes('C:\\Users'))
+check('如实标出本地改动文件数（version title 里可读）', /本地改动 3 个文件/.test(skillTitles) && /本地改动 2 个文件/.test(skillTitles))
 check('技能页 KPI 含本地目录 / 本地改动 / 描述为英文', skillText.includes('本地目录') && skillText.includes('本地改动') && skillText.includes('描述为英文'))
-check('技能页版本列表头合并为「版本与来源」', skillText.includes('版本与来源'))
+check('技能页版本列表头改为「版本」（来源进 title，不再挤列里）', skillText.includes('版本') && !clientSrc.includes("'版本与来源'"))
 check('【主功能】技能侧中文名同样优先展示（不再整串「包名（中文）」）',
   skillText.includes('学习一个视频') && !skillText.includes('（学习一个视频） · '), skillText.slice(0, 160))
 check('技能页说明写入边界但不铺陈长段落', skillText.includes('翻译会写入 SKILL.md 并保留备份') && !skillText.includes('技能改写会真实写入 SKILL.md'))

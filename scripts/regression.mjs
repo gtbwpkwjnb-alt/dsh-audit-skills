@@ -504,8 +504,8 @@ check('宿主：批量进行中时单包更新被拒绝（batch-running，避免
 check('本轮结果：每个失败码都有对应的下一步动作', clientSrc.includes("c === 'generate-failed'") && clientSrc.includes('fixOf(it.code)'))
 check('技能版本列：version → git 提交号 → 未声明 的回落链，不留「—」',
   clientSrc.includes('function skillRevision(') && clientSrc.includes("'git ' + shortShaOf(r.localSha)") && clientSrc.includes("'未声明'"))
-check('技能来源：只显示 GitHub 原作者仓库链接，不把本地路径当来源',
-  clientSrc.includes('sourceUrl') && clientSrc.includes('GitHub 原作者仓库') && clientSrc.includes("target: '_blank'"))
+check('技能来源：来源信息进 title 与悬停卡（版本列不再放来源标签）',
+  clientSrc.includes("'来源：'") && clientSrc.includes('sourceUrl') && !clientSrc.includes("target: '_blank'"))
 check('显示密度：指标收成一条紧凑数据带 + 插件表固定布局且无横向滚动',
   clientSrc.includes('.das-stats {') && clientSrc.includes('function kpiStat(') &&
   !clientSrc.includes('minmax(94px') && clientSrc.includes('position: sticky') && clientSrc.includes('.das-wrap') && clientSrc.includes('overflow-x: hidden') && clientSrc.includes('table-layout: fixed'))
@@ -925,7 +925,11 @@ const skRows = m.collectSkills({ get: () => undefined, includeExternalSkills: tr
 const byName2 = new Map(skRows.map((r) => [r.pkg, r]))
 const scopedSkillRows = m.collectSkills({ get: () => undefined })
 check('技能范围：归档 ponytail/skillopt/skills-summarize-audit 永不入表', ['ponytail', 'skillopt', 'skills-summarize-audit'].every((name) => !scopedSkillRows.some((r) => r.pkg === name)))
-check('技能范围：默认不接管 Codex/ZCode rank 500 技能', ['codex-only', 'zcode-only'].every((name) => !scopedSkillRows.some((r) => r.pkg === name)))
+/* 本机证据：DSH 内核把 `agentsHome = config.agentsHome ?? DSH_AGENTS_HOME ?? ~/.agents` 当技能根，
+   而本机 `~/.dsh/skills` 根本不存在、9 个技能全在 `~/.agents/skills`（正是会话里可用的那批）。
+   把 rank 500 一律排除 = 技能页永远为空（实测 /skills 返回 0 行）。所以默认纳入，rank 只决定同名优先级。 */
+check('技能范围：DSH agentsHome 技能根（rank 500）默认纳入 —— 它就是本机技能库',
+  ['codex-only', 'zcode-only'].every((name) => scopedSkillRows.some((r) => r.pkg === name)), JSON.stringify(scopedSkillRows.map((r) => r.pkg)))
 check('技能扫描：目录形态被发现', byName2.has('demo-good'))
 check('技能扫描：顶层 .md 形态被发现', byName2.has('demo-flat'))
 check('技能扫描：name 取 frontmatter 而非目录名', byName2.has('another-name') && !byName2.has('demo-mismatch'))
@@ -962,12 +966,15 @@ const injectProxy = (provided) => new Proxy(provided, {
 const hostCtx = injectProxy({ get: () => undefined })
 const noThrow = (fn) => { try { fn(); return true } catch (error) { return 'threw: ' + String((error && error.message) || error) } }
 check('宿主 ctx 守卫：collectSkills 读到未注入字段不再抛错', noThrow(() => m.collectSkills(hostCtx)) === true)
-check('宿主 ctx 守卫：读不到 includeExternalSkills 时保守排除 rank500 外部技能', (function () { try { return m.collectSkills(hostCtx).every((r) => !['codex-only', 'zcode-only'].includes(r.pkg)) } catch { return false } })())
+check('宿主 ctx 守卫：读不到注入字段时 rank 500 技能照样入表（不再整页为空）', (function () { try { return m.collectSkills(hostCtx).some((r) => r.pkg === 'codex-only') } catch { return false } })())
 check('宿主 ctx 守卫：llmOf / settingsOf / getPluginManager 均不抛错', noThrow(() => m.llmOf(hostCtx)) === true && noThrow(() => m.settingsOf(hostCtx)) === true && noThrow(() => m.getPluginManager(hostCtx)) === true)
 const hostSrc = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8')
 const ctxProps = Array.from(new Set(Array.from(hostSrc.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g), (x) => x[1]))).sort()
-check('宿主 ctx 守卫：不再裸读未知上下文字段（白名单 = Cordis 内置 + 已受 try 保护的点）', ctxProps.every((p) => ['effect', 'get', 'inject', 'llm', 'logger', 'settings'].includes(p)), ctxProps.join(','))
-check('宿主 ctx 守卫：includeExternalSkills 只经安全读取入口访问', hostSrc.includes("ctxProp(ctx, 'includeExternalSkills')") && !/ctx\.includeExternalSkills\b/.test(hostSrc))
+/* llm / settings 允许出现在源码里（注释与错误文案会提到它们）；它们的**直读**是否安全
+   由上面的注入式 proxy 运行时断言保证（裸读会当场抛错）。白名单外的任何新字段都会让这条变红。 */
+check('宿主 ctx 守卫：没有白名单之外的新上下文裸读（llm/settings 由运行时断言保证）', ctxProps.every((p) => ['effect', 'get', 'inject', 'llm', 'logger', 'settings'].includes(p)), ctxProps.join(','))
+check('宿主 ctx 守卫：臆造的 includeExternalSkills 不再被读取（文档里的案例保留）', !/ctx\.includeExternalSkills/.test(hostSrc) && !/includeExternal\s*=/.test(hostSrc))
+check('宿主 ctx 守卫：llm / settings 的直读统一走 ctxProp 安全入口', hostSrc.includes("ctxProp(ctx, 'llm')") && hostSrc.includes("ctxProp(ctx, 'settings')"))
 /* 归一：路由 catch 会把注入错误写成裸英文 message，客户端只能照抄 —— 归类后才有可执行的下一步。 */
 const hostFail = typeof m.classifyHostFailure === 'function' ? m.classifyHostFailure({ ok: false, message: 'cannot get property "includeExternalSkills" without inject' }) : null
 check('宿主错误归一：未注入字段被归类为 host-inject 且带中文原因', !!hostFail && hostFail.code === 'host-inject' && hostFail.reason.includes('includeExternalSkills'), JSON.stringify(hostFail))
@@ -1109,9 +1116,9 @@ check('客户端：技能视图不继承插件批量状态，两页各自渲染�
 check('客户端：技能页有与插件页同一套一键更新/行内更新',
   clientSrc.includes("call('update-all'") && clientSrc.includes("call('update-skills'") &&
   clientSrc.includes("opBtn('all'") && clientSrc.includes("opBtn('u'"))
-check('客户端：技能侧如实显示 远端 sha / 最新 / 未比对 与本地改动',
-  clientSrc.includes('版本与来源') && clientSrc.includes('function shortShaOf') &&
-  clientSrc.includes('↑ 远端 ') && clientSrc.includes('本地改动 '))
+check('客户端：技能侧如实显示 远端 sha / 最新 / 未比对 与本地改动（都进 version title）',
+  clientSrc.includes("h('th', null, '版本')") && clientSrc.includes('function shortShaOf') &&
+  clientSrc.includes("'远端 ' + shortShaOf") && clientSrc.includes('本地改动 '))
 check('客户端：加载中的占位文案按视图区分',
   clientSrc.includes("'正在读取技能状态…'") && clientSrc.includes("'正在读取插件状态…'"))
 check('客户端：版本不一致时同时报出两个版本与各自修法',

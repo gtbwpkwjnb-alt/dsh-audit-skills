@@ -1574,7 +1574,7 @@ window.__ModuleLoader__.load({
               h('thead', null, h('tr', null,
                 h('th', null, IS_SKILL ? '技能与中文说明' : '插件与中文说明'),
                 h('th', null, '健康与优化'),
-                h('th', null, '版本与来源'),
+                h('th', null, '版本'),
                 h('th', null, '操作'))),
               h('tbody', null, visible.map(function (r) {
                 var upd = r.hasUpdate === true;
@@ -1598,12 +1598,9 @@ window.__ModuleLoader__.load({
                       '这是「本轮结果」里针对本行的记录（' + agoText(record.at) + '，动作：' + (ACTION_TEXT[record.action] || record.action) + '）：' +
                       (record.message || '') + '。它不是当前状态：当前状态由版本列与「更新」按钮决定。')
                   : null;
-                var sourceHint = IS_SKILL ? shortRoot(r.source) : '';
-                var sourceNode = r.sourceUrl
-                  ? h('a', { className: 'das-source-link das-fit', href: r.sourceUrl, target: '_blank', rel: 'noreferrer', title: r.sourceUrl }, r.sourceLabel || 'GitHub 原作者仓库')
-                  : h('span', { className: 'das-desc das-fit', title: sourceHint || undefined }, r.sourceLabel || '未确认远端仓库');
                 /* 更新口径：显式状态 chip，而不是只给一个箭头让用户猜。
-                   「版本不兼容」（管理器拒绝）优先 —— 那正是「装了但版本没动」的真因。 */
+                   「版本不兼容」（管理器拒绝）优先 —— 那正是「装了但版本没动」的真因。
+                   这个 chip 现在不再占列宽：版本列只显示版本号，状态 / 来源 / 远端版本全部进 title。 */
                 var updateState = managerProblem
                   ? { text: '版本不兼容', tone: 'err', title: String(r.errorMessage || r.error || '宿主管理器拒绝了这个版本') }
                   : (upd ? { text: '可更新', tone: 'warn', title: IS_SKILL ? '远端比本地新' : '远端比已装版本新' }
@@ -1611,11 +1608,22 @@ window.__ModuleLoader__.load({
                       : { text: '不可比', tone: 'dim', title: r.reason || '没有可比的远端版本' }));
                 var latestText = IS_SKILL
                   ? (r.isGit === true
-                    ? (r.hasUpdate === true ? '↑ 远端 ' + shortShaOf(r.remoteSha)
+                    ? (r.hasUpdate === true ? '远端 ' + shortShaOf(r.remoteSha)
                       : (r.hasUpdate === false ? '最新 ' + shortShaOf(r.localSha) : '未比对（' + (r.reason || '未知') + '）'))
                       + (r.dirty > 0 ? ' · 本地改动 ' + r.dirty + ' 个文件' : '')
                     : '本地目录')
-                  : (r.latest ? (upd ? '↑ ' + r.latest : r.latest) : (r.reason || '—'));
+                  : (r.latest ? (upd ? '可更新到 ' + r.latest : '已是 ' + r.latest) : (r.reason || '—'));
+                /* 版本列只显示版本号：更新状态 / 来源 / 远端版本 / 本轮记录说明全部收进 title，悬停即读。
+                   用户原话：这一列内容重叠，只显示版本号即可；有更新时新版本号写到「更新」按钮上。 */
+                var versionTitle = [
+                  IS_SKILL ? rev.title : ('已安装版本：' + (r.version || '未知')),
+                  updateState.text + ' —— ' + updateState.title,
+                  '来源：' + (r.sourceLabel || '未确认远端仓库') + (r.sourceUrl ? ' · ' + r.sourceUrl : ''),
+                  latestText,
+                  (record && done[r.pkg] === undefined)
+                    ? ('本轮结果：' + stateText(record.state) + ' · ' + (record.message || '') + '（它不是当前状态）')
+                    : '',
+                ].filter(function (x) { return typeof x === 'string' && x !== ''; }).join('\n');
                 var nameLine = (r.displayName && r.displayName !== r.pkg) ? r.displayName + ' · ' + r.pkg : (r.displayName || r.pkg);
                 /* 主功能展示：中文名做主标题、原包名次级、优化后的中文说明直接占一行。
                    过去把「包名（中文名） · 包名」整串塞进一格，等于把中文名藏起来、
@@ -1678,12 +1686,10 @@ window.__ModuleLoader__.load({
                               (openPkg === r.pkg ? '点这里收起' : '点这里在行下展开'),
                               function () { setOpenPkg(openPkg === r.pkg ? '' : r.pkg); }, openPkg === r.pkg)
                           : chip('ev', '暂无需处置', 'ok', '当前没有安全或冲突问题')))),
+                  /* 整列只留版本号 + 本行的本轮记录 chip：来源 / 更新状态 / 远端版本都在 title 里。 */
                   h('td', { className: 'das-num das-version-cell' },
                     h('span', { className: 'das-cell' },
-                      h('span', { className: 'das-version-current', title: IS_SKILL ? rev.title : 'package.json 里已安装的版本' }, IS_SKILL ? rev.text : (r.version || '—')),
-                      chip('us', updateState.text, updateState.tone, updateState.title),
-                      sourceNode,
-                      h('span', { className: 'das-num das-fit', title: latestText }, latestText),
+                      h('span', { className: 'das-version-current', title: versionTitle }, IS_SKILL ? rev.text : (r.version || '—')),
                       recordChip)),
                 ];
                 var op = [];
@@ -1706,7 +1712,8 @@ window.__ModuleLoader__.load({
                 }
                 else if (finished) op.push(opBtn('u', outcomeLabel(finished), true, null,
                   (finished.message ? finished.message + ' · ' : '') + '本轮已处理；点「刷新状态」可重新判定'));
-                else if (upd) op.push(opBtn('u', '更新', busyNow, function () { doUpdate(r.pkg); },
+                /* 有新版本时，目标版本号直接写在按钮上（版本列不再重复显示远端版本）。 */
+                else if (upd) op.push(opBtn('u', '更新 ' + (IS_SKILL ? shortShaOf(r.remoteSha) : (r.latest || '')), busyNow, function () { doUpdate(r.pkg); },
                   IS_SKILL ? 'git 快进到远端 ' + shortShaOf(r.remoteSha) : '更新到 ' + (r.latest || '最新版'), true));
                 if (!readOnly && r.translationEligible !== false && r.needsText === true) {
                   op.push(h('button', { key: 'gen', type: 'button', className: 'das-btn das-mini primary',

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.10.5+patch4 — 2026-10-06 · 技能页空列表的根因 + 版本列只留版本号（宿主 + 客户端）
+
+### 症状
+
+1. **技能页无内容**：实测 `POST /api/dsh-audit-skills/skills` → `ok:true` 但 `value` 为空（0 行）。
+2. **插件页「版本与来源」列内容重叠**：截图里 `1.4.11 不 Gi_ 1…`，版本 / 状态 / 来源 / 远端版本挤在一格看不全。
+
+### 根因
+
+1. **把 DSH 自己的技能根当成「外部目录」排除**：`collectSkills` 曾把 rank 500（`agentsHome/skills`）当
+   「Codex/ZCode 共享目录」，要求 DSH 服务给出 `provider=dsh` 或路径在 `~/.dsh/skills` 下才纳入。
+   本机事实：`~/.dsh/skills` **不存在**，9 个技能全在 `~/.agents/skills`，而且正是会话里可用的那批
+   （`cangjie-skill`/`learn`/`luopan`/`agent-reach`/`gpt-tasteskill`/`session-summarize`/`ruofeng-adversarial-review`/`advise-project-approach`）；
+   DSH 内核自己就用 `agentsHome = config.agentsHome ?? DSH_AGENTS_HOME ?? ~/.agents` 作为技能根（app.asar 内实现）
+   → 所有候选被排除 → 技能页 0 行。
+   （这个「外部目录」假设来自更早一轮，`includeExternalSkills` 也是那次臆造出来的宿主字段。）
+2. **版本列把 5 样东西挤在一格**：版本 + 更新状态 chip + 来源标签 + 远端版本 + 本轮记录，在 24% 列宽里互相挤压。
+
+### 改动
+
+- **H5**：去掉 rank 500 的目录排除，rank 只决定同名优先级（rank 400 压 500）；
+  `isVisible` 在拿不到（或拿到空）DSH 可见集时按「可见」处理 —— 否则一次字段名不匹配就会把整页标成未启用。
+- **H6**：版本列只显示版本号（技能行仍是「修订 / 版本」回落链）+ 该行的「本轮记录」chip；
+  更新状态、来源（含链接）、远端版本全部进 version title（悬停即读），悬停卡里的「来源」一行照旧。表头「版本与来源」→「版本」。
+- **H7**：有新版本时目标版本号直接写在按钮上（插件行 `更新 0.64.0`；技能行 `更新 <短 sha>`）。
+- **H8**：`llmOf` / `settingsOf` 的直读统一走 `ctxProp`，安全读取只剩一个入口。
+
+### 验证
+
+- regression `348/0`（改写 6 条：rank 500 默认纳入、读不到注入字段时技能仍入表、上下文白名单、`ctxProp` 入口、版本列断言）；
+  render-smoke `129/0`（新增 2 条：版本列只显示版本号、来源与远端版本仍可在 title 读到）；`--live` `138/0`；
+  crash-rehearsal `47/0`；preflight `ALL PASS`。部署后两个半体与本机已装副本逐字节一致。
+
+### 生效方式
+
+客户端（版本列）**刷新页面**即生效；宿主（技能页内容）**需重启 DSH**。
+
 ## 2.10.5+patch3 — 2026-10-06 · 设置页/技能页「读取失败：cannot get property "includeExternalSkills" without inject」（宿主 + 客户端）
 
 **症状**（用户真机）：设置页与技能页提示「读取失败：cannot get property "includeExternalSkills" without inject」。

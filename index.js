@@ -2232,12 +2232,9 @@ export function llmOf(ctx) {
        真实错误会被静默吞成「LLM 服务不可用」，用户拿不到任何线索。 */
     try { ctx?.logger?.warn?.('dsh-audit-skills: ctx.get("llm") 失败: ' + String((error && error.message) || error)) } catch { /* ignore */ }
   }
-  try {
-    const direct = ctx ? ctx.llm : undefined
-    if (direct !== undefined && direct !== null) return direct
-  } catch {
-    /* Cordis 未 inject 时读属性会抛，必须吞掉 */
-  }
+  /* 直读只作为**测试替身**兜底，且必须安全读取（Cordis 下它会抛，见 ctxProp 注释）。 */
+  const direct = ctxProp(ctx, 'llm')
+  if (direct !== undefined && direct !== null) return direct
   return undefined
 }
 
@@ -2249,12 +2246,8 @@ export function settingsOf(ctx) {
   } catch (error) {
     try { ctx?.logger?.warn?.('dsh-audit-skills: ctx.get("settings") 失败: ' + String((error && error.message) || error)) } catch { /* ignore */ }
   }
-  try {
-    const direct = ctx ? ctx.settings : undefined
-    if (direct !== undefined && direct !== null) return direct
-  } catch {
-    /* 同上 */
-  }
+  const direct = ctxProp(ctx, 'settings')
+  if (direct !== undefined && direct !== null) return direct
   return undefined
 }
 
@@ -2300,7 +2293,7 @@ const generationTimeout = (ms) => new Promise((_, reject) => setTimeout(() => re
 /** 让模型为技能生成中文名与中文说明（格式：主要触发词 → 精炼说明）。 */
 export async function generateSkillRefinement(ctx, name, originalDescription) {
   const llm = llmOf(ctx)
-  if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'ctx.llm 未注册或没有 stream() 方法' }
+  if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'llm 服务未注册或没有 stream() 方法' }
   const selection = await resolveGenerationModel(ctx)
   if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型', reason: '设置中没有 provider/model，且 llm.listProviders() 未返回可用模型' }
   const basePrompt = [
@@ -2370,20 +2363,18 @@ export function collectSkills(ctx) {
   const cands = scanSkillCandidates()
   const visibleRecords = visibleSkillRecords(ctx)
   const visible = visibleRecords === undefined ? undefined : new Set(visibleRecords.map((x) => (x.candidate ? x.candidate.name : x.name)).filter((x) => typeof x === 'string'))
-  // 宿主是否把外部共享目录（rank≥500，如 Codex/ZCode）也算作可见技能。
-  // 必须走安全读取：读不到就按「宿主未声明」处理 → 回到 dshManagedVisibleRecord 的保守判定。
-  const includeExternal = ctxProp(ctx, 'includeExternalSkills') === true
-  const dshRoot = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'skills')
   const byName = new Map()
   const inScope = (c) => {
     if (archivedSkillPath(c.path) || archivedSkillPath(c.dir) || excludedSkillCandidate(c)) return false
-    // rank 500 是 Codex/ZCode 的共享技能目录；只有 DSH 第一方服务明确列出时才接管。
-    if (c.rank >= 500 && includeExternal !== true) {
-      const rec = (visibleRecords || []).find((x) => { const n = x.candidate ? x.candidate.name : x.name; return typeof n === 'string' && skillBaseName(n) === skillBaseName(c.name) })
-      if (!dshManagedVisibleRecord(rec, c, dshRoot)) return false
-    }
+    /* 这里曾经把 rank 500（agentsHome/skills）当「Codex/ZCode 共享目录」排除，本机证据推翻了它：
+       DSH 内核自己就用 `agentsHome = config.agentsHome ?? DSH_AGENTS_HOME ?? ~/.agents` 作为技能根
+       （app.asar 内实现），而本机 `~/.dsh/skills` 根本不存在、9 个技能全在 `~/.agents/skills`，
+       它们正是会话里可用的那批技能 —— 排除它们等于技能页永远为空（实测 /skills 返回 0 行）。
+       现在 rank 只决定同名优先级（400 压 500），不再按目录排除。 */
     return true
   }
+  /* 只用于「补齐随 DSH 提供的技能」那条路径（判据：provider 明确是 DSH，或路径在 DSH 技能根下）。 */
+  const dshRoot = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'skills')
   for (const c of cands) {
     const key = c.nameValid === true ? skillBaseName(c.name) : c.dirName
     if (!inScope(c)) continue
@@ -2397,7 +2388,9 @@ export function collectSkills(ctx) {
     list.sort((a, b) => a.rank - b.rank)
     const top = list[0]
     const shadowed = list.slice(1)
-    const isVisible = visible === undefined ? top.rank < 500 : (top.rank < 500 || visible.has(name))
+    /* 拿不到（或拿到空）DSH 可见集时按「可见」处理：否则一次字段名不匹配就会把整页标成未启用。
+       有可见集时以 DSH 为准。 */
+    const isVisible = visible === undefined || visible.size === 0 ? true : (top.rank < 400 || visible.has(name))
     const sourceFact = resolveSkillSource(top)
     rows.push({
       pkg: name,
@@ -3078,7 +3071,7 @@ export function collectStreamText(records) {
 /** 让模型生成一条精炼文案；任何不确定都转成可读的失败原因。 */
 export async function generateRefinement(ctx, pkg, original) {
   const llm = llmOf(ctx)
-  if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'ctx.llm 未注册或没有 stream() 方法' }
+  if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'llm 服务未注册或没有 stream() 方法' }
   const selection = await resolveGenerationModel(ctx)
   if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型；请先在设置中选定默认模型', reason: '设置中没有 provider/model，且 llm.listProviders() 未返回可用模型' }
   const basePrompt = buildPrompt(pkg, original)
