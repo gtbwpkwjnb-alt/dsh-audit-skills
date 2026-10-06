@@ -948,6 +948,12 @@ check('demo-good 只报「被遮蔽」一条（无 frontmatter/名称/描述问�
 const withBundled = m.collectSkills({ includeExternalSkills: true, get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx', provider: 'dsh' }] } : undefined) })
 const bundledRow = withBundled.find((r) => r.pkg === 'office-docx')
 check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundledRow.source.includes('随 DSH 提供') && bundledRow.bundled === true)
+/* 补齐路径判据放宽：DSH 技能服务列出即算（只排除明确标了外部工具来源的记录）。 */
+const withUnlabeled = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx' }] } : undefined) })
+check('补齐：DSH 服务列出但没标 provider 的技能也入表（bundled，默认隐藏）',
+  (withUnlabeled.find((r) => r.pkg === 'office-docx') || {}).bundled === true)
+const withExternal = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'codex-remote-only', provider: 'codex' }] } : undefined) })
+check('补齐：明确标了外部工具来源（provider=codex）的技能不入表', !withExternal.some((r) => r.pkg === 'codex-remote-only'))
 check('技能行提供作用说明与来源字段', !!(byName2.get('demo-good') || {}).purpose && Object.hasOwn(byName2.get('demo-good') || {}, 'sourceUrl'))
 
 // ── A1d 宿主 ctx 注入守卫 ────────────────────────────────────────────────

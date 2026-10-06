@@ -2047,14 +2047,19 @@ export function visibleSkillNames(ctx) {
   return new Set(records.map((x) => (x.candidate ? x.candidate.name : x.name)).filter((x) => typeof x === 'string'))
 }
 
-function dshManagedVisibleRecord(record, candidate, dshRoot) {
+/**
+ * 明确的**非 DSH** 来源判定。
+ *
+ * 旧写法是反过来的白名单（provider 必须是 dsh/deepseek，或路径在 ~/.dsh/skills 下），
+ * 于是 DSH 技能服务列出的内置/插件技能几乎全被挡在外面（本文件注释自己也记了「实测少 3 个」）。
+ * 现在：DSH 技能服务列出的即视为 DSH 技能（它本来就是第一方注册表），
+ * 只有记录里明确标了别的工具来源时才排除。
+ */
+function externalSkillRecord(record) {
   if (!record || typeof record !== 'object') return false
   const obj = record.candidate && typeof record.candidate === 'object' ? record.candidate : record
   const provider = String(obj.provider || obj.sourceType || obj.managedBy || obj.owner || '').toLowerCase()
-  if (provider === 'dsh' || provider === 'deepseek' || provider === 'dsh-skills') return true
-  const recordPath = String(obj.path || obj.file || obj.skillPath || '').replaceAll('\\', '/').toLowerCase()
-  const root = String(dshRoot || '').replaceAll('\\', '/').toLowerCase().replace(/\/$/, '')
-  return root !== '' && recordPath !== '' && (recordPath === root || recordPath.startsWith(root + '/'))
+  return /^(codex|zcode|claude|anthropic|external)/.test(provider)
 }
 
 /** 稳定标识：去掉本插件附加的「（中文名）」后的原名。 */
@@ -2373,8 +2378,6 @@ export function collectSkills(ctx) {
        现在 rank 只决定同名优先级（400 压 500），不再按目录排除。 */
     return true
   }
-  /* 只用于「补齐随 DSH 提供的技能」那条路径（判据：provider 明确是 DSH，或路径在 DSH 技能根下）。 */
-  const dshRoot = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'skills')
   for (const c of cands) {
     const key = c.nameValid === true ? skillBaseName(c.name) : c.dirName
     if (!inScope(c)) continue
@@ -2454,9 +2457,9 @@ export function collectSkills(ctx) {
         const n = x && x.candidate ? x.candidate.name : x && x.name
         return typeof n === 'string' && skillBaseName(n) === skillBaseName(name)
       })
-      // 这里是服务补齐路径，必须有 DSH provider 或 DSH skills 路径证据。
-      // 仅凭服务返回的名称不能把 Codex/ZCode 技能归入 DSH 管理范围。
-      if (excludedSkillName(name) || !dshManagedVisibleRecord(record, null, dshRoot)) continue
+      /* 补齐路径：DSH 技能服务列出的即视为 DSH 技能，只排除明确标了外部工具来源的记录。
+         （旧判据要求 provider=dsh/deepseek 或路径在 ~/.dsh/skills 下，把内置与插件技能几乎全挡住了。） */
+      if (excludedSkillName(name) || externalSkillRecord(record)) continue
       if (byName.has(name)) continue
       rows.push({
         pkg: name,

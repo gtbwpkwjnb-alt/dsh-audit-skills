@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.10.6 — 2026-10-06 · 汇总发布：列表密度 / 更新失败 / 注入报错 / 技能页与版本列
+
+本版把 2.10.5 之后的四轮补丁合并为一个可发布版本（`2.10.5+patch1` … `patch4`），
+并额外放宽技能页「随 DSH 提供」的补齐判据。逐条根因与证据见下方各 patch 小节。
+
+### 用户可见的修复
+
+1. **列表密度**：一行一项、列宽预算、无横向滚动条（patch1）
+2. **更新失败**：git 直装的安装规格会随远端 tag / 提交变化；附注 tag 取 peeled 提交；
+   不再有假「可更新」，也不再产生注定 `ambiguous-install` 的安装（patch2）
+3. **翻译优化**：生成与应用两阶段各自留痕，失败原因不再被覆盖；计数与文案自洽（patch2）
+4. **设置页/技能页「读取失败：cannot get property "includeExternalSkills" without inject"」**：
+   移除这个臆造的宿主字段；失败提示改为 sticky，不再被挂载期的批量历史提示顶掉（patch3）
+5. **技能页空列表**：不再把 DSH 自己的技能根（`~/.agents/skills`）当外部目录排除（patch4）
+6. **版本列只显示版本号**；有新版本时目标版本号写在「更新」按钮上（patch4）
+
+### 本版新增
+
+- **技能页补齐判据放宽**：DSH 技能服务列出的即视为 DSH 技能，只排除明确标了
+  `codex` / `zcode` / `claude` / `anthropic` / `external` 来源的记录。旧判据要求 `provider=dsh/deepseek`
+  或路径在 `~/.dsh/skills` 下，把内置与插件技能几乎全挡住了（代码注释自己也记了「实测少 3 个」）。
+  这些行仍标记 `bundled` —— 默认隐藏，可用 KPI 上的「随 DSH · 展开」查看。
+
+### 闸门
+
+- preflight `ALL PASS` · crash-rehearsal `47/0` · render-smoke `129/0` · `--live` `138/0` · regression `350/0`
+- 部署后宿主 / 客户端半体与本机已装副本逐字节一致
+
+### 升级
+
+- 本机 profile 重钉到 `github:gtbwpkwjnb-alt/dsh-audit-skills#v2.10.6`
+  —— 解决「点本插件那行的『更新』会回退到 v2.10.5 代码」的坑。
+- npm 仍未发布（本机 `.npmrc` 没有 `_authToken`）：需要 `npm login` 后 `npm publish --access public`。
+
 ## 2.10.5+patch4 — 2026-10-06 · 技能页空列表的根因 + 版本列只留版本号（宿主 + 客户端）
 
 ### 症状
