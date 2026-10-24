@@ -24,7 +24,7 @@ import vm from 'node:vm'
 import http from 'node:http'
 
 const REPO = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')))
-const PROFILE = process.argv[2] || 'C:/Users/Administrator/.dsh/profiles/desktop'
+const PROFILE = process.argv[2] || process.env.DSH_TEST_PROFILE || 'C:/Users/Administrator/.dsh/profiles/desktop'
 let pass = 0
 let fail = 0
 const check = (name, cond, extra) => {

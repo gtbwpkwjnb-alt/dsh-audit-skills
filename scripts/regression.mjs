@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 const REPO = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')))
-const PROFILE = 'C:/Users/Administrator/.dsh/profiles/desktop'
+const PROFILE = process.env.DSH_TEST_PROFILE || 'C:/Users/Administrator/.dsh/profiles/desktop'
 let pass = 0
 let fail = 0
 const check = (name, cond, extra) => {
@@ -293,13 +293,19 @@ check('作用域包名可正确查询（URL 编码 /）', latestScoped.status ==
 // ─────────────────────── A3 覆盖层 / spec 解析 / 更新任务 ───────────────────────
 console.log(String.fromCharCode(10) + 'A3 覆盖层 · spec 解析 · 更新任务 · 问题诊断')
 check('outlayPath 指向 ~/.dsh/dsh-audit-skills/catalog.local.json', /dsh-audit-skills[\\/]catalog\.local\.json$/.test(m.overlayPath()), m.overlayPath())
+const savedOverlayHome = process.env.DSH_HOME
+process.env.DSH_HOME = path.join(sandbox, 'overlay-check')
+const builtinPkg = m.readCatalog()[0].pkg
+const overlayPkgs = ['fixture-overlay-only', builtinPkg]
+for (const pkg of overlayPkgs) m.upsertOverlay(pkg, { en: { title: pkg, description: 'fixture' }, zh: { title: pkg + '（测试覆盖）', description: '隔离的覆盖层夹具' } })
 const catAll = m.readCatalog()
-const overlayPkgs = ['@changfenhuang/dsh-annotation', 'dsh-computer-use-win', 'dsh-side-chat-plus']
 check('覆盖层条目已并入 catalog', overlayPkgs.every((p) => catAll.some((e) => e.pkg === p)), 'catalog=' + catAll.length)
 check('覆盖层优先于内置（同一 pkg 取覆盖层）', (function () {
-  const hit = catAll.filter((e) => e.pkg === 'dsh-side-chat-plus')
-  return hit.length === 1 && /侧边聊天/.test(hit[0].zh.title)
-})(), JSON.stringify(catAll.filter((e) => e.pkg === 'dsh-side-chat-plus').map((e) => e.zh.title)))
+  const hit = catAll.filter((e) => e.pkg === builtinPkg)
+  return hit.length === 1 && /测试覆盖/.test(hit[0].zh.title)
+})(), JSON.stringify(catAll.filter((e) => e.pkg === builtinPkg).map((e) => e.zh.title)))
+if (savedOverlayHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = savedOverlayHome
 // spec 解析：三类依赖
 fs.writeFileSync(path.join(sandbox, 'package.json'), JSON.stringify({
   name: 'sandbox',
@@ -945,6 +951,9 @@ process.env.DSH_AGENTS_HOME = agentsHome
 const skRows = m.collectSkills({ get: () => undefined, includeExternalSkills: true })
 const byName2 = new Map(skRows.map((r) => [r.pkg, r]))
 const scopedSkillRows = m.collectSkills({ get: () => undefined })
+check('宿主目录缺失：启用状态未知，不能推断为启用', scopedSkillRows.every((r) => r.enabled === null))
+check('宿主目录为空：启用状态未知', m.collectSkills({ get: () => ({ list: () => [] }) }).every((r) => r.enabled === null))
+check('宿主目录抛错：启用状态未知', m.collectSkills({ get: () => ({ list() { throw new Error('unavailable') } }) }).every((r) => r.enabled === null))
 check('技能范围：归档 ponytail/skillopt/skills-summarize-audit 永不入表', ['ponytail', 'skillopt', 'skills-summarize-audit'].every((name) => !scopedSkillRows.some((r) => r.pkg === name)))
 /* 本机证据：DSH 内核把 `agentsHome = config.agentsHome ?? DSH_AGENTS_HOME ?? ~/.agents` 当技能根，
    而本机 `~/.dsh/skills` 根本不存在、9 个技能全在 `~/.agents/skills`（正是会话里可用的那批）。
@@ -968,6 +977,7 @@ check('S6：同名被遮蔽 -> 事实级高', (function () { const f = skFind.fi
 check('demo-good 只报「被遮蔽」一条（无 frontmatter/名称/描述问题）', (function () { const g2 = skFind.filter((x) => x.pkg === 'demo-good'); return g2.length === 1 && g2[0].title.includes('遮蔽') })())
 const withBundled = m.collectSkills({ includeExternalSkills: true, get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx', provider: 'dsh' }] } : undefined) })
 const bundledRow = withBundled.find((r) => r.pkg === 'office-docx')
+check('非空宿主目录：只把列出的用户技能标为启用', withBundled.find((r) => r.pkg === 'demo-good').enabled === true && withBundled.find((r) => r.pkg === 'codex-only').enabled === false)
 check('随 DSH 提供的技能会入表并标注来源', !!bundledRow && bundledRow.source.includes('随 DSH 提供') && bundledRow.bundled === true)
 /* 补齐路径判据放宽：DSH 技能服务列出即算（只排除明确标了外部工具来源的记录）。 */
 const withUnlabeled = m.collectSkills({ get: (n) => (n === 'skills' ? { list: () => [{ name: 'demo-good' }, { name: 'office-docx' }] } : undefined) })
@@ -1187,6 +1197,7 @@ const wEntries = [
 m.upsertSkillOverlay('demo-one', wEntries[0].zh)
 m.upsertSkillOverlay('demo-block', wEntries[1].zh)
 check('技能文案写入覆盖层后可读回', m.readSkillCatalog().some((e) => e.pkg === 'demo-one'))
+check('仅有候选不能标记源文件已应用', (function () { const row = m.collectSkills({ get: () => undefined }).find((r) => r.pkg === 'demo-one'); return row.localized === false && row.localizationState === 'candidate' && row.needsText === false })())
 const applied1 = m.applySkillLocale([])
 check('应用：两个技能都成功', applied1.filter((r) => r.state === 'applied').length === 2, JSON.stringify(applied1))
 const oneAfter = fs.readFileSync(path.join(hi2, 'demo-one', 'SKILL.md'), 'utf8')
@@ -1211,6 +1222,24 @@ const reverted = m.revertSkillLocale([])
 check('还原：两项均为 restored', reverted.filter((r) => r.state === 'restored').length === 2, JSON.stringify(reverted))
 check('还原：单行文件与原文逐字节一致', fs.readFileSync(path.join(hi2, 'demo-one', 'SKILL.md'), 'utf8') === oneSrc)
 check('还原：块标量文件与原文逐字节一致', fs.readFileSync(path.join(hi2, 'demo-block', 'SKILL.md'), 'utf8') === blkSrc)
+check('还原后候选仍在，但源文件已应用状态被清除', (function () { const row = m.collectSkills({ get: () => undefined }).find((r) => r.pkg === 'demo-one'); return row.localized === false && row.localizationState === 'candidate' })())
+const sharedDir = path.join(agH, 'skills', 'demo-shared')
+fs.mkdirSync(sharedDir, { recursive: true })
+const sharedFile = path.join(sharedDir, 'SKILL.md')
+const sharedSource = '---\nname: demo-shared\ndescription: Original shared description\n---\nShared body\n'
+fs.writeFileSync(sharedFile, sharedSource)
+const sharedEntry = { pkg: 'demo-shared', zh: { name: 'demo-shared（共享）', description: '共享测试 → 检查 "引号" 与源文件应用' } }
+m.upsertSkillOverlay(sharedEntry.pkg, sharedEntry.zh)
+check('rank 500：应用共享技能成功', m.applySkillLocale([], { entries: [sharedEntry] })[0].state === 'applied')
+check('rank 500：回读应用状态且正文不变', (function () { const row = m.collectSkills({ get: () => undefined }).find((r) => r.pkg === sharedEntry.pkg); return row.localized === true && row.localizationState === 'applied' && fs.readFileSync(sharedFile, 'utf8').endsWith('Shared body\n') })())
+fs.writeFileSync(sharedFile, fs.readFileSync(sharedFile, 'utf8').replace('共享测试', '人工修改'))
+check('源文件被修改后，候选不能维持已应用状态', m.collectSkills({ get: () => undefined }).find((r) => r.pkg === sharedEntry.pkg).localized === false)
+check('rank 500：可还原且逐字节恢复', m.revertSkillLocale([], { entries: [sharedEntry] })[0].state === 'restored' && fs.readFileSync(sharedFile, 'utf8') === sharedSource)
+const excludedDir = path.join(agH, 'skills', 'skills-summarize-audit')
+fs.mkdirSync(excludedDir, { recursive: true })
+const excludedSource = '---\nname: skills-summarize-audit\ndescription: excluded\n---\n'
+fs.writeFileSync(path.join(excludedDir, 'SKILL.md'), excludedSource)
+check('排除项在应用路径同样跳过，不修改来源', m.applySkillLocale([], { entries: [{ pkg: 'skills-summarize-audit', zh: { description: '不能写入' } }] })[0].state === 'skipped-not-installed' && fs.readFileSync(path.join(excludedDir, 'SKILL.md'), 'utf8') === excludedSource)
 process.env.DSH_HOME = savedH7
 process.env.DSH_AGENTS_HOME = savedA7
 fs.rmSync(skRoot2, { recursive: true, force: true })

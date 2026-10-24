@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.10.9 — 2026-10-24 · 技能页状态说真话：只看源文件、不替宿主宣称启用
+
+本版把技能页两个长期含糊的状态拆成可核实的事实，并统一发现 / 应用 / 还原的作用范围；
+同时合并上一轮已提交的 2.10.8（更新链路与翻译容错）。
+
+### 修复
+
+- **「已优化」不再等于「已应用」**：此前只要覆盖层里有候选文案就把该技能标为已优化，
+  实际源文件可能根本没写进去（或被人手改回去了）。现在新增 `localizationState`
+  （`applied` / `candidate` / `missing`）：`applied` 要求稳定 `name` 与 `description`
+  的值与当前候选**逐字相符**；技能页对应显示「源文件已应用」/「已有候选」/「待生成文案」。
+  源文件被改后状态自动回落为候选（用例：`源文件被修改后，候选不能维持已应用状态`）。
+- **「启用状态」缺失或空目录时显示未知，不再冒充已启用**：宿主的技能服务不存在、
+  抛出错误或返回空集合时 `enabled` 为 `null`，界面显示「启用状态未知」并说明
+  「文件存在不能证明当前会话已启用」；非空目录只把真正列出的项标为启用，未列出的显示
+  「当前会话未列出」。旧逻辑在拿不到可见集时一律按可见处理，等于替宿主下结论。
+- **frontmatter 回读要比较值，不比较引号**：`rewriteSkillFrontmatter` 写出的是 JSON 双引号
+  标量，回读时原先保留引号，导致刚应用完就被判定「不符合」，应用状态永远显示不出来。
+  现在按 JSON / YAML 单引号规则解析回原值（解析失败保留原文）。
+- **发现 / 应用 / 还原使用同一范围**：抽出 `managedSkillCandidate` 与 `skillCandidateKey`。
+  此前应用与还原用 `rank < 500` 过滤，而发现路径已放开 rank 500（DSH 支持的共享技能根
+  `~/.agents/skills`）——结果是列表里看得到、却永远应用不上的技能。归档与排除项在三条路径
+  上一致跳过（用例：`排除项在应用路径同样跳过，不修改来源`）。
+
+### 2.10.8（随本版一并发布）
+
+- **一键更新改「先卸载再安装」，失败按原 spec 装回**：`installAndWait` 增加自身包前置拒绝
+  （`skipped-self`）；`updatePreflight` 校验 `removable` / `readOnlyReason`；有
+  `removeBundle` 时先有界卸载、等依赖消失再安装，失败自动回滚。
+  `startUpdateAll` 跳过自身更新，并在结束语指向官方插件页。
+- **翻译按 LLM 失败码归因**：解析 `finish.reason.failure`，`classifyLlmCode` 覆盖 16 个码；
+  默认模型优先 `agentDefaultModel.currentSelection()`；超时 45s→90s 且用 `AbortController`
+  真取消，失败按 3 次退避重试。
+- **测试隔离**：`crash-rehearsal` / `regression` 支持 `DSH_TEST_PROFILE`；regression 的覆盖层
+  用例与技能场景改用自带夹具，不再依赖本机真实覆盖层（此前换机器就会红）。
+- **文档**：`SKILL.md` 按当前产品边界重写（不注册独立技能，只说明维护与审查范围）。
+
+### 闸门
+
+- preflight `ALL PASS` · crash-rehearsal `46/2`（两条均为 profile 为本地 tgz 的部署态，
+  重钉到 tag 后转 PASS）· render-smoke `131/0` · regression `365/0` · tdd `25/0`
+
 ## 2.10.7 — 2026-10-06 · 技能页翻译留痕独立成文件 + 行尾基线
 
 ### 修复

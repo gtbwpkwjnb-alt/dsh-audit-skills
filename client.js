@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.8';
+    var CLIENT_REV = '2.10.9';
     /* 本插件自己的包名：客户端就是它自己，所以它自己的中文名不必等宿主提供
        （否则列表里 6 行是中文、唯独自己那一行是包名，看着像坏了）。 */
     var OWN_PKG = 'dsh-audit-skills';
@@ -1625,7 +1625,7 @@ window.__ModuleLoader__.load({
                 var stateTone = readOnly ? 'dim' : (r.localized ? 'ok' : 'warn');
                 var stateText2 = readOnly
                   ? (r.bundled === true ? '随 DSH 提供' : '未纳入翻译优化')
-                  : (r.localized ? '已优化' : (r.needsText ? '待生成文案' : '待应用'));
+                  : (r.localized ? (IS_SKILL ? '源文件已应用' : '已优化') : (r.needsText ? '待生成文案' : (IS_SKILL ? '已有候选' : '待应用')));
                 var record = recordByPkg[r.pkg];
                 var recordChip = (record && done[r.pkg] === undefined)
                   ? chip('rc', '本轮 · ' + stateText(record.state), STATE_TONE[record.state] || 'dim',
@@ -1696,6 +1696,9 @@ window.__ModuleLoader__.load({
                   h('td', { className: 'das-status-cell' },
                     h('span', { className: 'das-cell' },
                       chip('lo', stateText2, stateTone, optimizeTitle),
+                      IS_SKILL && r.enabled !== true && r.enabled !== false
+                        ? chip('vis', '启用状态未知', 'dim', '尚未取得非空的宿主技能目录，文件存在不能证明当前会话已启用')
+                        : (IS_SKILL && r.enabled === false ? chip('vis', '当前会话未列出', 'dim', '当前宿主技能目录中未找到此名称') : null),
                       (translateItems[r.pkg] && isBad(translateItems[r.pkg].state) && r.localized !== true)
                         ? chip('tf', '上次失败', 'err',
                             '上次翻译优化（' + agoText(translate.finishedAt) + '）里这一项失败了：' + (translateItems[r.pkg].message || '无原因') +

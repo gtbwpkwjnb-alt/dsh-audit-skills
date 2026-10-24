@@ -1859,7 +1859,13 @@ export function parseSkillFrontmatter(text) {
     }
     if (key !== null && /^\s+\S/.test(line)) fields[key] = String(fields[key]).trim() + ' ' + line.trim()
   }
-  for (const k of Object.keys(fields)) fields[k] = String(fields[k]).trim()
+  for (const k of Object.keys(fields)) {
+    fields[k] = String(fields[k]).trim()
+    // rewriteSkillFrontmatter 输出 JSON 双引号标量；回读必须比较值，不能比较引号。
+    if (fields[k].startsWith('"')) {
+      try { fields[k] = JSON.parse(fields[k]) } catch { /* 非 JSON YAML 标量保留原文 */ }
+    } else if (/^'[^]*'$/.test(fields[k])) fields[k] = fields[k].slice(1, -1).replaceAll("''", "'")
+  }
   return { present: true, fields }
 }
 
@@ -1903,6 +1909,15 @@ function excludedSkillName(value) {
 
 function excludedSkillCandidate(candidate) {
   return excludedSkillName(candidate?.name) || excludedSkillName(candidate?.declaredName) || excludedSkillName(candidate?.dirName)
+}
+
+// 发现、应用和还原使用同一范围；rank 500 是 DSH 支持的共享技能根。
+function managedSkillCandidate(candidate) {
+  return !archivedSkillPath(candidate.path) && !archivedSkillPath(candidate.dir) && !excludedSkillCandidate(candidate)
+}
+
+function skillCandidateKey(candidate) {
+  return candidate.nameValid === true ? skillBaseName(candidate.name) : candidate.dirName
 }
 
 function sourceUrlFromValue(value) {
@@ -2156,10 +2171,10 @@ export function rewriteSkillFrontmatter(text, opts) {
 export function applySkillLocale(_dirs, options = {}) {
   const entries = options.entries ?? readSkillCatalog()
   const results = []
-  const cands = scanSkillCandidates().filter((c) => c.rank < 500)
+  const cands = scanSkillCandidates().filter(managedSkillCandidate)
   const byName = new Map()
   for (const c of cands) {
-    const key = skillBaseName(c.name)
+    const key = skillCandidateKey(c)
     if (!byName.has(key)) byName.set(key, [])
     byName.get(key).push(c)
   }
@@ -2202,7 +2217,7 @@ export function revertSkillLocale(_dirs, options = {}) {
   const results = []
   for (const entry of entries) {
     try {
-      const list = scanSkillCandidates().filter((c) => c.rank < 500 && skillBaseName(c.name) === entry.pkg)
+      const list = scanSkillCandidates().filter((c) => managedSkillCandidate(c) && skillCandidateKey(c) === entry.pkg)
       if (list.length === 0) {
         results.push({ pkg: entry.pkg, state: 'skipped-not-installed' })
         continue
@@ -2528,18 +2543,9 @@ export function collectSkills(ctx) {
   const visibleRecords = visibleSkillRecords(ctx)
   const visible = visibleRecords === undefined ? undefined : new Set(visibleRecords.map((x) => (x.candidate ? x.candidate.name : x.name)).filter((x) => typeof x === 'string'))
   const byName = new Map()
-  const inScope = (c) => {
-    if (archivedSkillPath(c.path) || archivedSkillPath(c.dir) || excludedSkillCandidate(c)) return false
-    /* 这里曾经把 rank 500（agentsHome/skills）当「Codex/ZCode 共享目录」排除，本机证据推翻了它：
-       DSH 内核自己就用 `agentsHome = config.agentsHome ?? DSH_AGENTS_HOME ?? ~/.agents` 作为技能根
-       （app.asar 内实现），而本机 `~/.dsh/skills` 根本不存在、9 个技能全在 `~/.agents/skills`，
-       它们正是会话里可用的那批技能 —— 排除它们等于技能页永远为空（实测 /skills 返回 0 行）。
-       现在 rank 只决定同名优先级（400 压 500），不再按目录排除。 */
-    return true
-  }
   for (const c of cands) {
-    const key = c.nameValid === true ? skillBaseName(c.name) : c.dirName
-    if (!inScope(c)) continue
+    const key = skillCandidateKey(c)
+    if (!managedSkillCandidate(c)) continue
     if (!byName.has(key)) byName.set(key, [])
     byName.get(key).push(c)
   }
@@ -2550,9 +2556,11 @@ export function collectSkills(ctx) {
     list.sort((a, b) => a.rank - b.rank)
     const top = list[0]
     const shadowed = list.slice(1)
-    /* 拿不到（或拿到空）DSH 可见集时按「可见」处理：否则一次字段名不匹配就会把整页标成未启用。
-       有可见集时以 DSH 为准。 */
-    const isVisible = visible === undefined || visible.size === 0 ? true : (top.rank < 400 || visible.has(name))
+    // 缺失或空目录不能证明启用；非空目录才用于判断当前会话可见性。
+    const isVisible = visible === undefined || visible.size === 0 ? null : visible.has(name)
+    const candidateDescription = typeof entry?.zh?.description === 'string' ? entry.zh.description : ''
+    const hasCandidate = candidateDescription.trim() !== ''
+    const localized = hasCandidate && top.declaredName === name && top.description === candidateDescription
     const sourceFact = resolveSkillSource(top)
     rows.push({
       pkg: name,
@@ -2560,9 +2568,11 @@ export function collectSkills(ctx) {
       installed: true,
       enabled: isVisible,
       version: top.version,
-      // 优化状态 = 该技能的 name 已被本插件改写为「原名（中文名）」
-      localized: entry !== undefined && !!(entry.zh && entry.zh.description),
-      needsText: entry === undefined,
+      // 已应用只证明源文件与文案相符，不能代替宿主重新加载或 UI 验收。
+      localized,
+      localizationState: localized ? 'applied' : (hasCandidate ? 'candidate' : 'missing'),
+      inCatalog: hasCandidate,
+      needsText: !hasCandidate,
       translationEligible: true,
       displayName: entry?.zh?.name || top.name,
       source: 'rank ' + top.rank,

@@ -228,9 +228,9 @@ const skillRow = (o) => Object.assign({
 
 /* 与实测 POST /skills 一致：10 个技能里 5 个未声明 version，两个是 git 仓库且有本地改动。 */
 const SKILL_ROWS = [
-  skillRow({ pkg: 'agent-reach', version: '1.6.0', localized: false, needsText: true, descriptionLang: '英文' }),
+  skillRow({ pkg: 'agent-reach', version: '1.6.0', enabled: null, localized: false, needsText: false, localizationState: 'candidate', descriptionLang: '英文' }),
   skillRow({ pkg: 'cangjie-skill', version: '0.2.0', localized: false, needsText: true }),
-  skillRow({ pkg: 'gpt-tasteskill', version: '1.0.0', localized: false, needsText: true }),
+  skillRow({ pkg: 'gpt-tasteskill', version: '1.0.0', enabled: false, localized: true, needsText: false, localizationState: 'applied' }),
   skillRow({ pkg: 'learn', version: null, localized: false, needsText: true, isGit: true, repoOwned: true, repoUrl: 'https://github.com/x/learn', sourceLabel: 'GitHub 原作者仓库', sourceUrl: 'https://github.com/x/learn', branch: 'main', localSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', remoteSha: 'b1c7007f02c32c18bf83c4ea6df8a62aab2b5953', hasUpdate: false, dirty: 3, displayName: 'learn（学习一个视频）', purpose: '把长视频与播客蒸馏成可执行方法论', localizedDescription: '中文说明：学习一个视频并生成闪卡' }),
   skillRow({ pkg: 'luopan', version: null, localized: false, needsText: true, descriptionLang: '中文' }),
   skillRow({ pkg: 'ponytail', version: null, localized: false, needsText: true }),
@@ -744,6 +744,7 @@ check('【主功能】槽位写出「宿主未提供中文名，重启后可见�
 console.log('\n4 技能视图 · 版本/修订回落链与来源压缩')
 const skillText = textOf(stale.skillTree)
 const skillTitles = titlesOf(stale.skillTree)
+check('技能页区分候选、源文件应用和启用未知状态', skillText.includes('已有候选') && skillText.includes('源文件已应用') && skillText.includes('启用状态未知') && skillText.includes('当前会话未列出'))
 check('切换视图后无异常（key={mode} 真重挂载并拉 /skills）', stale.loaded.state.calls.includes('skills'), stale.loaded.state.calls.join(','))
 check('10 个技能全部成行', SKILL_ROWS.every((r) => skillText.includes(r.pkg)), '缺：' + SKILL_ROWS.filter((r) => !skillText.includes(r.pkg)).map((r) => r.pkg).join(','))
 check('视图切换不串数据：技能表里没有插件名', !skillText.includes('dsh-free-search') && !skillText.includes('@furongjun1999/dsh-memory'))
