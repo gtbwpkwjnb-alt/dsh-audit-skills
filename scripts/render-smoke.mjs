@@ -729,6 +729,20 @@ check('【主功能】宿主太旧时明确告知：重启后才能看到插件�
 check('【密度】长解释不再占版面（只在 title 里可悬停读到）',
   !mmText.includes('因此可能缺少本页需要的接口') && !mmText.includes('宿主半体是旧的') &&
   mmTitles.includes('因此可能缺少本页需要的接口') && mmTitles.includes('请重启 DSH。'), 'titles=' + mmTitles.slice(0, 120))
+/* 红色提示必须能直接点掉，而不是只在文案里写「建议：…」。
+   实测宿主版本 2.10.8+audit.20261024 这类带构建元数据的形态曾被判成「与客户端不一致」并常红：
+   构建元数据不参与比较，同一主次版本不得为元数据差异报警。 */
+/* 红色提示要能就地处理：版本落后时给出「查看重启方法」按钮，而不是只写一句「建议：…」 */
+const mmRetry = elementsOf(mismatch.pluginTree, (n) => n.tag === 'button' && ['查看重启方法', '刷新后重读'].indexOf(textOf(n).trim()) >= 0)[0]
+check('【主功能】版本不一致的提示带可点击的操作按钮', !!mmRetry, textOf(mismatch.pluginTree).slice(0, 200))
+/* 元数据用例必须与当前客户端**主次版本相同**才有意义：2.10.7+x 与 2.10.9 是真实版本差，
+   那种情况下报不一致是对的。这里用 CLIENT_REV 派生，避免写死版本号后再次失真。 */
+const CLIENT_REV_FOR_TEST = (/CLIENT_REV\s*=\s*'([^']+)'/.exec(clientSrc) || [])[1]
+const metaOnly = await scenario(60 * 1000, false, CLIENT_REV_FOR_TEST + '+audit.20261024')
+const metaText = textOf(metaOnly.pluginTree)
+const metaHit = /(.{0,60}(版本不一致|落后于客户端).{0,60})/.exec(metaText)
+check('【主功能】宿主版本只差构建元数据时不报不一致（不产生常红提示）',
+  metaOnly.errors.length === 0 && !metaHit, metaHit ? metaHit[1] : '')
 check('技能页同样渲染成一条紧凑数据带',
   elementsOf(stale.skillTree, (n) => n.props && String(n.props.className || '').indexOf('das-stats') >= 0).length === 1)
 /* 旧宿主（对插件行不发 displayName）下：不在内置快照里的行必须解释清楚为什么没有中文 */

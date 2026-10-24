@@ -1,4 +1,4 @@
-/* dsh-audit-skills — 客户端半体
+﻿/* dsh-audit-skills — 客户端半体
  *
  * 形态要求（不可违反）：DSH 以传统 <script> 加载 client.js，
  * 不得有顶层 import/export，必须用 window.__ModuleLoader__.load({ id, factory }) 注册。
@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.9';
+    var CLIENT_REV = '2.10.10';
     /* 本插件自己的包名：客户端就是它自己，所以它自己的中文名不必等宿主提供
        （否则列表里 6 行是中文、唯独自己那一行是包名，看着像坏了）。 */
     var OWN_PKG = 'dsh-audit-skills';
@@ -72,10 +72,11 @@ window.__ModuleLoader__.load({
     };
 /* @catalog-snapshot:end */
 
-    /** 比较点分版本号；非数字段按 0 算。 */
+    /** 比较点分版本号；非数字段按 0 算。构建元数据（`+` 之后）不参与比较。 */
     function compareRev(a, b) {
-      var pa = String(a === undefined || a === null ? '' : a).split('.');
-      var pb = String(b === undefined || b === null ? '' : b).split('.');
+      var strip = function (v) { return String(v === undefined || v === null ? '' : v).split('+')[0] };
+      var pa = strip(a).split('.');
+      var pb = strip(b).split('.');
       var n = Math.max(pa.length, pb.length);
       for (var i = 0; i < n; i += 1) {
         var x = parseInt(pa[i], 10); var y = parseInt(pb[i], 10);
@@ -84,6 +85,15 @@ window.__ModuleLoader__.load({
         if (x !== y) return x < y ? -1 : 1;
       }
       return 0;
+    }
+    /**
+     * 版本是否需要提示。构建元数据（如 `+audit.20261024`）不参与比较：
+     * 实测宿主 `2.10.8+audit.20261024` 曾被按字符串判成「与客户端不一致」，
+     * 于是每次本地 tgz 部署都留一条常红警告——它既不可操作，也不是真问题。
+     */
+    function revMismatch(hostRev, clientRev) {
+      if (hostRev === '' || hostRev === undefined || hostRev === null) return false;
+      return compareRev(hostRev, clientRev) !== 0;
     }
 
     function call(action, body) {
@@ -1471,7 +1481,7 @@ window.__ModuleLoader__.load({
                 : (IS_SKILL ? '按顺序 git 快进全部可更新技能' : '按顺序更新全部可更新插件'))),
           false, 'primary'));
 
-      var revGap = hostRev !== '' && hostRev !== CLIENT_REV;
+      var revGap = revMismatch(hostRev, CLIENT_REV);
       /* 长解释进 title（用户反馈这条提示太占地方）；可见的只留一行短句。
          注意 regression 钉住 '宿主半体版本过旧' / '请重启 DSH。' / '请刷新页面。' 必须在源码里存续。 */
       var revExplain = revGap
@@ -1523,18 +1533,23 @@ window.__ModuleLoader__.load({
       var hasCurrentResultSummary = results.length > 0 || hasBatchResult;
       var batchNote = note && typeof note.text === 'string' && (/^上次批量执行|^上次批量更新未跑完/.test(note.text));
       var guidance = [];
-      if (revGap) guidance.push({ tone: 'err', title: '运行代码未同步', evidence: '客户端 v' + CLIENT_REV + '，宿主 v' + hostRev, impact: '更新和中文显示可能继续使用旧接口。', action: compareRev(hostRev, CLIENT_REV) < 0 ? '重启 DSH 后再刷新状态' : '刷新页面后再操作' });
+      /* 每条提示带可选 action：给了 onClick 就渲染成按钮，让用户就地处理，
+         而不是只读一句「建议：…」再去别处找入口。 */
+      if (revGap) guidance.push({ tone: 'err', title: '运行代码未同步', evidence: '客户端 v' + CLIENT_REV + '，宿主 v' + hostRev, impact: '更新和中文显示可能继续使用旧接口。', action: compareRev(hostRev, CLIENT_REV) < 0 ? '重启 DSH 后再刷新状态' : '刷新页面后再操作', label: compareRev(hostRev, CLIENT_REV) < 0 ? '查看重启方法' : '刷新后重读', onClick: compareRev(hostRev, CLIENT_REV) < 0 ? function () { setNote({ kind: 'note', text: '宿主半体在 DSH 进程启动时只加载一次：关闭 DSH 主窗口后重新打开（或在托盘菜单里选「重启」），再回到本页点「刷新状态」，红条会自行消失。' }) } : function () { if (typeof window !== 'undefined' && window.location) window.location.reload() } });
       /* pending / failed 已由 resultHint 统一显示；审查问题和代码版本问题仍独立保留。 */
-      if (!hasCurrentResultSummary && pendingResults > 0) guidance.push({ tone: 'warn', title: '有 ' + pendingResults + ' 项更新待确认', evidence: '宿主已收到安装请求，但等待结果超时。', impact: '重复点击可能并发安装。', action: '先刷新状态，不要重复点击更新' });
-      if (actionable > 0) guidance.push({ tone: 'err', title: '有 ' + actionable + ' 条需要处置的审查发现', evidence: '事实级 ' + factCount + ' 条；中高严重度推断 ' + notableInferred + ' 条。', impact: '可能影响兼容性或安全更新。', action: '展开对应行，按证据和建议停用、升级或等待兼容版本' });
-      if (!hasCurrentResultSummary && failedResults > 0) guidance.push({ tone: 'err', title: '本轮有 ' + failedResults + ' 项未完成', evidence: '结果已记录，未把失败包装成成功。', impact: '当前版本可能没有变化。', action: '先看行内失败原因，按建议刷新或重试' });
+      if (!hasCurrentResultSummary && pendingResults > 0) guidance.push({ tone: 'warn', title: '有 ' + pendingResults + ' 项更新待确认', evidence: '宿主已收到安装请求，但等待结果超时。', impact: '重复点击可能并发安装。', action: '先刷新状态，不要重复点击更新', label: '刷新状态', onClick: function () { refresh() } });
+      if (actionable > 0) guidance.push({ tone: 'err', title: '有 ' + actionable + ' 条需要处置的审查发现', evidence: '事实级 ' + factCount + ' 条；中高严重度推断 ' + notableInferred + ' 条。', impact: '可能影响兼容性或安全更新。', action: '展开对应行，按证据和建议停用、升级或等待兼容版本', label: onlyFlagged ? '取消只看问题项' : '只看问题项', onClick: function () { setOnlyFlagged(!onlyFlagged) } });
+      if (!hasCurrentResultSummary && failedResults > 0) guidance.push({ tone: 'err', title: '本轮有 ' + failedResults + ' 项未完成', evidence: '结果已记录，未把失败包装成成功。', impact: '当前版本可能没有变化。', action: '先看行内失败原因，按建议刷新或重试', label: '重试读取', onClick: function () { refresh() } });
       /* 有动作结果时不再补一条「当前没有问题」绿提示，避免和结果摘要互相打架。 */
       if (guidance.length === 0 && !hasCurrentResultSummary && !batchNote) guidance.push({ tone: 'ok', title: '当前没有需要处置的安全或冲突问题', evidence: '审查结果中没有事实级或中高严重度发现。', impact: '可以继续使用当前插件。', action: '按需刷新状态，或执行翻译优化' });
       var guidanceEl = guidance.length > 0 ? h('div', { className: 'das-guidance', role: 'status' }, guidance.slice(0, 3).map(function (g, i) {
         return h('div', { key: 'g' + i, className: 'das-guidance-item is-' + g.tone },
           chip('gt' + i, g.title, g.tone),
           h('span', { className: 'das-guidance-copy' }, g.evidence + ' · ' + g.impact),
-          h('span', { className: 'das-guidance-action' }, '建议：' + g.action));
+          /* 能给动作时给按钮（就地处理）；不能自动处理的才退回「建议：…」文字。 */
+          typeof g.onClick === 'function'
+            ? h('button', { type: 'button', className: 'das-btn das-mini das-guidance-btn', disabled: busy === 'refresh', title: g.action, onClick: g.onClick }, busy === 'refresh' ? '执行中…' : g.label)
+            : h('span', { className: 'das-guidance-action' }, '建议：' + g.action));
       })) : null;
       if (s) {
         var pendingTranslation = s.toApply + s.pending;
