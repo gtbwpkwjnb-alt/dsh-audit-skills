@@ -27,6 +27,11 @@ function ensureScheme() {
   return true
 }
 ensureScheme()
+/* 状态目录（catalog.local.json / update-batch.json / translate-run.json）跟着 DSH_HOME 走。
+   不隔离的话，批量用例会把**真实**状态写成「正在更新 2/2」，接着跑的 regression 会被
+   updateAllStatus 的互斥锁挡成 batch-running —— 测试互相污染比被测代码更坑。 */
+const STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-audit-tdd-home-'))
+process.env.DSH_HOME = STATE_HOME
 const m = await import('../index.js')
 
 /** 造一个沙箱 profile：pkg-a 已装 1.0.0。 */

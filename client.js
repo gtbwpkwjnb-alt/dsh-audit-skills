@@ -1177,26 +1177,10 @@ window.__ModuleLoader__.load({
                    apply 的「已安装但缺少精炼文案」顶掉，用户只看到一句无从追查的结论（线上实测发生过）。 */
                 var applyFailed = items.filter(function (x) { return x.state === 'failed'; }).length;
                 var needsCatalog = items.filter(function (x) { return x.state === 'needs-catalog'; }).length;
-                /* 留痕按包合并成一条终态。两个相反的坑都踩过：
-                   ① 只留生成项 → 应用结果丢了；② 生成 + 应用各留一条 → 同一个包在库里出现两次，
-                   用户看到「4 项、2 项失败」这种与事实不符的账。
-                   合并规则：状态以 apply 为准，但**生成阶段的失败原因必须拼进去**，
-                   否则「模型为什么不干活」又被 apply 的「缺少文案」顶掉。 */
-                var merged = [];
-                var byPkg = {};
-                var pushMerged = function (x, replace) {
-                  if (!x || !x.pkg) return;
-                  if (byPkg[x.pkg] === undefined) { byPkg[x.pkg] = merged.length; merged.push({ pkg: x.pkg, state: x.state, code: x.code, message: x.message }); return; }
-                  var prev = merged[byPkg[x.pkg]];
-                  var genFailed = prev.state === 'failed';
-                  var message = genFailed && prev.message && prev.message !== (x.message || '')
-                    ? String(x.message || '') + '；生成阶段失败原因：' + String(prev.message)
-                    : (x.message || prev.message);
-                  merged[byPkg[x.pkg]] = { pkg: x.pkg, state: replace ? x.state : prev.state, code: x.code || prev.code, message: message };
-                };
-                (runItems || []).forEach(function (x) { pushMerged(x, false); });
-                (items || []).forEach(function (x) { pushMerged(x, true); });
-                recordTranslate('optimize', merged,
+                /* 两个阶段各自留痕：实测曾有「apply 结果覆盖生成结果」⇒ 模型为什么没干活就此消失。
+                   同一包因此可能出现两条（生成失败 + 待补文案），这是有意的：它们是两件事。
+                   「一共几个包」用 run.packages 呈现，不再拿条目数冒充。 */
+                recordTranslate('optimize', (runItems || []).concat(items || []),
                   '新生成 ' + genOk + ' 条，应用 ' + applied + ' 项' +
                   (needsCatalog ? '，待补文案 ' + needsCatalog + ' 个' : '') +
                   '，失败 ' + (genFail.length + applyFailed) + ' 个');
