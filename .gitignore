@@ -6,3 +6,4 @@ __pycache__/
 *.dsh-locale.bak
 .DS_Store
 Thumbs.db
+.release-msg-*.txt
