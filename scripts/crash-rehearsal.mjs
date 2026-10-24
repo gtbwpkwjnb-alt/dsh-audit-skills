@@ -207,6 +207,9 @@ try {
   }
 } catch { /* ignore */ }
 const appPkgs = new Set()
+/* 宿主有两种安装形态：Electron 打包的 app.asar（旧），与 resources/app/dsh/node_modules（当前）。
+   只认 asar 时，本机 profile 里没有、但宿主自带的注入目标会全部误报「致命」——
+   这个检查本该发现真问题，不该被安装形态骗成噪声。 */
 try {
   const ASAR = process.env.DSH_APP_ASAR || 'D:/DSH/DeepSeekHarness/resources/app.asar'
   const fd = fs.openSync(ASAR, 'r')
@@ -231,7 +234,22 @@ try {
   }
   walkAsar(header, '')
   fs.closeSync(fd)
-} catch (error) { console.log('  (asar 读取失败，跳过 app 侧判定: ' + error.message + ')') }
+} catch (error) { console.log('  (asar 读取失败，改用 app 目录: ' + error.message + ')') }
+if (appPkgs.size === 0) {
+  const bases = [
+    process.env.DSH_APP_DIR,
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'resources', 'app'),
+    process.env.APPDATA && path.join(process.env.APPDATA, 'DeepSeek Harness', 'resources', 'app'),
+    'D:/DSH/DeepSeekHarness/resources/app',
+  ].filter(Boolean)
+  for (const base of bases) {
+    for (const sub of ['node_modules/@deepseek-ai', 'dsh/node_modules/@deepseek-ai']) {
+      const dir = path.join(base, sub)
+      try { for (const name of fs.readdirSync(dir)) appPkgs.add('@deepseek-ai/' + name) } catch { /* 该形态没有这层 */ }
+    }
+    if (appPkgs.size > 0) break
+  }
+}
 for (const mod of injectList) {
   const inProfile = profilePkgs.has(mod)
   const inApp = appPkgs.has(mod)

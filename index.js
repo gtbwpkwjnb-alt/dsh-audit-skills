@@ -997,6 +997,15 @@ const MANAGER_FAILURE_TEXT = {
   'stale-approval': '审批已过期，请重新发起安装。',
   'incompatible-version': '目标版本与当前 DSH 运行时不兼容。',
   'operation-error': '宿主管理器执行出错。',
+  /* 宿主在 HMR 下「只要这个包已在依赖里就拒绝安装」，与版本号无关（见 dsh-plugin-manager
+     的 specPackageName 检查）。所以更新已装包必须先卸载 —— 这条码以前没有译文，页面只剩
+     一句「插件管理器报告安装失败（already-installed）」，用户既看不懂也不知道该做什么。 */
+  'already-installed': '宿主在有 HMR 的情况下不允许同名覆盖安装（必须先卸载旧版本再装新版本）——本插件已改为自动「先卸载、再安装」；看到这条说明卸载被跳过了。',
+  'self-update': '不能从本页面更新 dsh-audit-skills 自己（卸载会中断正在运行的宿主半体）；请到官方插件页更新，然后重启 DSH。',
+  'remove-failed': '卸载旧版本失败，安装没有进行；插件仍是原版本。',
+  'remove-timeout': '旧版本没有在预期时间内卸载完成，安装没有进行；请重启 DSH 后重试。',
+  'manager-unsupported': '当前宿主插件管理器不支持卸载，无法更新已安装的包；请升级 DSH 或在插件页更新。',
+  'rollback-failed': '安装失败，自动装回原版本也没有成功；这个插件现在处于缺失状态，请重启 DSH 后到官方插件页重新安装。',
 }
 
 /** 失败码 + 宿主原话 → 可直接展示给用户的说明（原话永远保留）。 */
@@ -2292,15 +2301,157 @@ export function classifyHostFailure(body) {
   })
 }
 
-const GENERATION_TIMEOUT_MS = 45000
+/* 单次模型调用的超时。45s 对长文案（en+zh 各 200 字）偏紧：实测有正常请求在 50~70s
+   才吐完最后一个分片，被旧值截断后归类成「无法解析 JSON」，用户重试也照样失败。 */
+const GENERATION_TIMEOUT_MS = 90000
+/** 最多尝试几次。限流这类瞬时错误值得再试；凭据/额度类不重试（见 LLM_RETRYABLE）。 */
+const GENERATION_ATTEMPTS = 3
+/** 重试退避基数：第 n 次重试前等 n*base，避免在限流窗口里连续撞墙。 */
+const GENERATION_BACKOFF_MS = 600
 const generationTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('模型响应超时'), { code: 'generation-timeout' })), ms))
 
+/**
+ * 宿主 @deepseek-ai/dsh-llm 的稳定失败码 → 本插件对外码。
+ *
+ * 关键事实：llm.stream() 失败时**不 throw**，而是最后一个分片给
+ * `{ type:"finish", reason:{ kind:"error"|"aborted", failure:{code,message} } }`。
+ * 旧实现只看 text 分片，于是限流、欠费、缺凭据、超时全被当成「模型输出无法解析」——
+ * 用户看到的是"模型不行"，实际是"该充钱/该换模型/该等一会"。
+ */
+const LLM_FAILURE_CODES = {
+  RATE_LIMIT: 'llm-rate-limit',
+  QUOTA: 'llm-quota',
+  ACCOUNT_QUOTA: 'llm-account-quota',
+  AUTH: 'llm-auth',
+  INVALID_CREDENTIAL: 'llm-auth',
+  MISSING_CREDENTIAL: 'llm-credential',
+  CONTEXT_WINDOW_EXCEEDED: 'llm-context-window',
+  EMPTY_RESPONSE: 'llm-empty-response',
+  ABORTED: 'llm-timeout',
+  NO_ADAPTER: 'llm-no-adapter',
+}
+/** 值得重试的码：其余（额度/凭据/上下文/未注册适配器）重试只是白烧一次调用。 */
+const LLM_RETRYABLE = new Set(['llm-rate-limit', 'llm-empty-response', 'llm-timeout', 'llm-provider-error'])
+const LLM_FAILURE_TEXT = {
+  'llm-rate-limit': '模型服务限流了（短时间请求太多）；稍等一会再点「翻译优化」即可。',
+  'llm-quota': '模型额度已用完；请充值或换一个可用模型后再试。',
+  'llm-account-quota': '模型账号余额不足，无法继续调用；请充值或换一个可用模型。',
+  'llm-auth': '模型服务认证失败（凭据无效或已过期）；请重新填写 API Key。',
+  'llm-credential': '该模型提供方缺少 API Key；请先在设置里配置凭据。',
+  'llm-context-window': '提示词超出模型上下文窗口；请换上下文更大的模型。',
+  'llm-empty-response': '模型没有返回任何内容（可能被安全策略拦截）；可重试或换模型。',
+  'llm-timeout': '模型响应超时；已取消这次请求（不会继续烧 token），稍后重试或换更快的模型。',
+  'llm-no-adapter': '当前没有该模型提供方的适配器；请在设置里换一个已启用的模型。',
+  'llm-provider-error': '模型服务返回错误；原因见详情。',
+}
+
+/** 宿主码 → 本插件码（大小写与未知码都兜住）。 */
+export function classifyLlmCode(rawCode) {
+  const key = String(rawCode === undefined || rawCode === null ? '' : rawCode).toUpperCase()
+  const mapped = LLM_FAILURE_CODES[key]
+  return mapped !== undefined ? mapped : 'llm-provider-error'
+}
+
+/** 本插件码 + 宿主原话 → 可直接展示的说明（原话永远保留）。 */
+export function describeLlmFailure(code, failure) {
+  const key = String(code === undefined || code === null ? '' : code)
+  const known = LLM_FAILURE_TEXT[key]
+  const raw = failure !== null && typeof failure === 'object' ? String(failure.message === undefined || failure.message === null ? '' : failure.message).trim() : ''
+  if (known !== undefined) return raw === '' ? known : known + '（宿主原话：' + raw + '）'
+  return raw === '' ? '模型调用失败（' + (key === '' ? '未知原因' : key) + '）' : raw
+}
+
+/**
+ * 收集一条模型流的文本与失败原因。失败**不在异常里**，而在终止分片的 reason.failure 上。
+ * 保留旧的 collectStreamText 契约（同步返回 string / 异步返回 Promise<string>），
+ * 但内部改成先拿到 { text, failure }，避免再有人只看文本。
+ */
+export function collectStreamResult(records) {
+  let text = ''
+  let failure = null
+  const take = (record) => {
+    if (!record || typeof record !== 'object') return
+    if (record.type === 'finish') {
+      const reason = record.reason
+      if (reason !== null && typeof reason === 'object' && reason.failure !== null && typeof reason.failure === 'object') failure = reason.failure
+      return
+    }
+    if (record.type === 'text-chunks' && Array.isArray(record.texts)) {
+      text += record.texts.join('')
+      return
+    }
+    if (record.type === 'text-delta' && typeof record.text === 'string') {
+      text += record.text
+      return
+    }
+    const chunk = record.chunk
+    if (chunk && typeof chunk === 'object' && chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+      text += chunk.text
+    }
+  }
+  if (records && typeof records[Symbol.asyncIterator] === 'function') {
+    return (async () => {
+      for await (const record of records) take(record)
+      return { text, failure }
+    })()
+  }
+  if (records && typeof records[Symbol.iterator] === 'function') {
+    for (const record of records) take(record)
+  }
+  return { text, failure }
+}
+
+/**
+ * 跑一次模型调用，带**真取消**的有界等待。
+ *
+ * 旧实现用 Promise.race 超时：到点只是我们不等了，底层流还在跑，白烧 token，
+ * 而且下一次重试会和它并发。这里超时立刻 abort 信号（llm.stream 支持 options.signal），
+ * 让宿主把流真正停掉。
+ */
+async function streamRefinementOnce(llm, selection, prompt, timeoutMs) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : undefined
+  let timer = null
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs) })
+  const abortWith = () => { try { if (controller !== undefined) controller.abort() } catch { /* 已被取消 */ } }
+  try {
+    const base = {
+      provider: selection.provider,
+      model: selection.model,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+    }
+    let raw = llm.stream(controller !== undefined ? Object.assign({ signal: controller.signal }, base) : base)
+    if (raw && typeof raw.then === 'function') raw = await Promise.race([raw, timeout])
+    if (raw && raw.timedOut === true) {
+      abortWith()
+      return { text: '', failure: { code: 'ABORTED', message: '等待模型响应超过 ' + timeoutMs + 'ms' }, timedOut: true }
+    }
+    const stream = raw && raw.stream !== undefined ? raw.stream : raw
+    const settled = await Promise.race([Promise.resolve(collectStreamResult(stream)), timeout])
+    if (settled && settled.timedOut === true) {
+      abortWith()
+      return { text: '', failure: { code: 'ABORTED', message: '等待模型响应超过 ' + timeoutMs + 'ms' }, timedOut: true }
+    }
+    return { text: typeof settled.text === 'string' ? settled.text : '', failure: settled.failure !== null && typeof settled.failure === 'object' ? settled.failure : null }
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
+}
+
+/** 从可选参数读到一次调用真正要用的超时/次数（测试与手动重试都可覆盖）。 */
+function generationLimits(options) {
+  const opts = options !== null && typeof options === 'object' ? options : {}
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : GENERATION_TIMEOUT_MS
+  const attempts = Number.isFinite(opts.attempts) && opts.attempts > 0 ? Math.min(opts.attempts, GENERATION_ATTEMPTS) : GENERATION_ATTEMPTS
+  return { timeoutMs, attempts }
+}
+
 /** 让模型为技能生成中文名与中文说明（格式：主要触发词 → 精炼说明）。 */
-export async function generateSkillRefinement(ctx, name, originalDescription) {
+export async function generateSkillRefinement(ctx, name, originalDescription, options) {
   const llm = llmOf(ctx)
   if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'llm 服务未注册或没有 stream() 方法' }
   const selection = await resolveGenerationModel(ctx)
   if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型', reason: '设置中没有 provider/model，且 llm.listProviders() 未返回可用模型' }
+  const limits = generationLimits(options)
   const basePrompt = [
     '你在为 DSH 的技能库做中文化精炼。下面是某个技能的英文/中英混合说明。', '',
     '技能标识：' + name, '原始说明：', String(originalDescription || '').slice(0, 2000), '',
@@ -2314,24 +2465,32 @@ export async function generateSkillRefinement(ctx, name, originalDescription) {
     '6. 只依据原文，不要编造原文未提及的能力。', '', '只输出 JSON。',
   ].join('\n')
   let last = null
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < limits.attempts; attempt += 1) {
+    if (attempt > 0) await sleep(GENERATION_BACKOFF_MS * attempt)
     try {
       const prompt = attempt === 0 ? basePrompt : basePrompt + '\n上次输出无法解析。请只输出一行合法 JSON，禁止任何解释或代码围栏。'
-      let raw = llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
-      if (raw && typeof raw.then === 'function') raw = await Promise.race([raw, generationTimeout(GENERATION_TIMEOUT_MS)])
-      const stream = raw && raw.stream !== undefined ? raw.stream : raw
-      const text = await Promise.race([Promise.resolve(collectStreamText(stream)), generationTimeout(GENERATION_TIMEOUT_MS)])
-      const parsed = parseGeneratedSkill(typeof text === 'string' ? text : '')
+      const outcome = await streamRefinementOnce(llm, selection, prompt, limits.timeoutMs)
+      if (outcome.failure !== null) {
+        const code = classifyLlmCode(outcome.failure.code)
+        last = { ok: false, code, message: describeLlmFailure(code, outcome.failure), reason: String(outcome.failure.message ?? ''), provider: selection.provider, model: selection.model, attempts: attempt + 1 }
+        if (!LLM_RETRYABLE.has(code)) return last
+        continue
+      }
+      const text = String(outcome.text ?? '')
+      if (text.trim() === '') {
+        last = { ok: false, code: 'llm-empty-response', message: describeLlmFailure('llm-empty-response', null), reason: '模型返回空内容（流里没有任何文本分片）', provider: selection.provider, model: selection.model, attempts: attempt + 1 }
+        continue
+      }
+      const parsed = parseGeneratedSkill(text)
       if (parsed !== undefined) {
         parsed.zhName = enforceSkillName(name, parsed.zhName)
         parsed.description = String(parsed.description).replace(/:\s/g, '：')
         return { ok: true, entry: { pkg: name, zh: { name: parsed.zhName, description: parsed.description } }, selection, attempts: attempt + 1 }
       }
-      last = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已自动重试 1 次）', reason: '模型输出缺少 en/zh.title/description，或不是合法 JSON', raw: String(text).slice(0, 400), attempts: attempt + 1 }
+      last = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已尝试 ' + limits.attempts + ' 次）', reason: '模型输出缺少 zhName/description，或不是合法 JSON', raw: text.slice(0, 400), provider: selection.provider, model: selection.model, attempts: attempt + 1 }
     } catch (error) {
-      const timeout = error?.code === 'generation-timeout'
       const detail = String(error?.message ?? error)
-      last = { ok: false, code: timeout ? 'generation-timeout' : 'generate-failed', message: timeout ? '模型响应超时（已自动重试 1 次）' : detail, reason: timeout ? '超过 ' + GENERATION_TIMEOUT_MS + 'ms 未收到完整模型输出' : detail, attempts: attempt + 1 }
+      last = { ok: false, code: 'generate-failed', message: '生成失败：' + detail, reason: detail, provider: selection.provider, model: selection.model, attempts: attempt + 1 }
     }
   }
   return last || { ok: false, code: 'generate-failed', message: '生成失败', reason: '模型没有返回可用结果' }
@@ -2657,6 +2816,9 @@ export function normalizeTranslateRun(raw) {
     action,
     items,
     total: items.length,
+    /* 按包去重的数量：同一包会先记一条 generated、应用后记一条 applied，
+       于是 total 永远比实际处理的包数多一倍，看起来像「一半失败」。 */
+    packages: new Set(items.map((it) => it.pkg)).size,
     generated: items.filter((it) => it.state === 'generated').length,
     applied: items.filter((it) => it.state === 'applied').length,
     failed: items.filter((it) => it.state === 'failed').length,
@@ -2685,6 +2847,98 @@ export function updateAllStatus() {
 
 const sleep = (ms, unref = false) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); if (unref && timer && typeof timer.unref === 'function') timer.unref() })
 
+/** 本插件自己的包名。更新它会卸载正在运行的宿主半体，必须跳过。 */
+export const SELF_PACKAGE = 'dsh-audit-skills'
+
+/** 卸载旧版本最多等多久。卸载比安装快，90 秒足够吸收 pnpm 冷启动。 */
+const REMOVE_WAIT_MS = 90000
+
+/**
+ * 有界调用：把宿主 Promise 包成「一定会 settle」的观测结果。
+ * 宿主在 HMR 下重组合插件图时 installBundle/removeBundle 的 Promise 可能永不 settle
+ * （实机表现是「批量更新卡在 1/3」），所以任何宿主调用都不能裸 await。
+ */
+async function boundedCall(fn, ms) {
+  let timer = null
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), ms); if (timer && typeof timer.unref === 'function') timer.unref() })
+  const call = Promise.resolve().then(fn).then((value) => ({ value }), (error) => ({ error }))
+  const settled = await Promise.race([call, timeout])
+  if (timer !== null) clearTimeout(timer)
+  return settled
+}
+
+/** profile 里某个包的原始依赖串（registry 是版本区间，git 是完整 git spec）；没有则 null。 */
+export function profileDependencyOf(profileDir, pkg) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'))
+    for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+      const map = doc && doc[field]
+      if (map !== null && typeof map === 'object' && Object.hasOwn(map, pkg)) {
+        return typeof map[pkg] === 'string' ? map[pkg] : ''
+      }
+    }
+  } catch { /* 读不到就是没有 */ }
+  return null
+}
+
+/** 等依赖真的从 profile 里消失（removeBundle 落盘有延迟，立刻 install 会撞上「依赖只剩一半」的状态）。 */
+async function waitForDependencyGone(profileDir, pkg, ms) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (profileDependencyOf(profileDir, pkg) === null && installedVersion(profileDir, pkg) === null) return true
+    if (Date.now() >= deadline) return false
+    await sleep(250)
+  }
+}
+
+/**
+ * 安装前体检。**必须**在 installBundle 之前跑。
+ *
+ * 宿主在 HMR 下对「已在依赖里的包」直接抛 already-installed（与版本号无关，见
+ * dsh-plugin-manager 的 specPackageName 检查），所以对已装包的更新只能「先卸载、再安装」。
+ * 这里判断该不该卸载、能不能卸载；宿主没提供 removeBundle 时退回原行为（旧宿主/测试替身），
+ * 不阻断安装。
+ */
+export async function updatePreflight(pm, profileDir, pkg) {
+  if (pkg === SELF_PACKAGE) {
+    return { ok: false, code: 'self-update', skip: true, message: describeManagerFailure('self-update', '') }
+  }
+  const canRemove = pm !== undefined && pm !== null && typeof pm.removeBundle === 'function'
+  let bundle
+  try {
+    bundle = typeof pm.listBundles === 'function' ? (await pm.listBundles()).find((item) => item && item.name === pkg) : undefined
+  } catch {
+    bundle = undefined // 读不到清单就按「未知」处理，交给安装阶段如实报错
+  }
+  if (bundle !== undefined && bundle.installed === true && bundle.removable !== true) {
+    const code = typeof bundle.readOnlyReason === 'string' && bundle.readOnlyReason !== '' ? bundle.readOnlyReason : 'not-removable'
+    return { ok: false, code, message: describeManagerFailure(code, '该包由宿主管理，HMR 下无法覆盖安装') + ' 请到官方插件页更新。' }
+  }
+  return {
+    ok: true,
+    installed: bundle !== undefined ? bundle.installed === true : installedVersion(profileDir, pkg) !== null,
+    removable: bundle !== undefined ? bundle.removable === true : canRemove,
+    canRemove,
+    dependency: profileDependencyOf(profileDir, pkg),
+  }
+}
+
+/** 安装阶段失败后按原依赖规格装回，返回可写进结果里的一句话。 */
+async function rollbackInstall(pm, profileDir, pkg, spec) {
+  if (typeof spec !== 'string' || spec === '') {
+    return { ok: false, code: 'rollback-failed', message: describeManagerFailure('rollback-failed', '没有可用的原依赖规格') }
+  }
+  const call = await boundedCall(() => pm.installBundle(spec, {}), REMOVE_WAIT_MS)
+  if (call.error !== undefined) {
+    return { ok: false, code: 'rollback-failed', message: describeManagerFailure('rollback-failed', String((call.error && call.error.message) || call.error)) }
+  }
+  let now = installedVersion(profileDir, pkg)
+  const deadline = Date.now() + 30000
+  while (now === null && Date.now() < deadline) { await sleep(300); now = installedVersion(profileDir, pkg) }
+  if (now === null) return { ok: false, code: 'rollback-failed', message: describeManagerFailure('rollback-failed', '回滚安装没有落盘') }
+  return { ok: true, to: now, spec }
+}
+
 /** 单个包最多等多久（毫秒）。超时不代表失败，只代表我们不再等。 */
 const UPDATE_WAIT_MS = 120000
 
@@ -2697,6 +2951,18 @@ const UPDATE_WAIT_MS = 120000
  * 绝不把整个批量的推进权交给一个可能不返回的 Promise。
  */
 export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_MS) {
+  /* 自身检查放在最前：卸载 dsh-audit-skills 会连同正在运行的宿主半体一起停掉，
+     之后的 install 永远等不到结果，用户看到的是「卡住/失败」。 */
+  if (pkg === SELF_PACKAGE) {
+    return {
+      ok: false,
+      state: 'skipped-self',
+      code: 'self-update',
+      skip: true,
+      message: describeManagerFailure('self-update', ''),
+      from: installedVersion(profileDir, pkg),
+    }
+  }
   const plan = resolveUpdateSpec(profileDir, pkg)
   if (plan.spec === null) return { ok: false, message: plan.reason }
   const from0 = installedVersion(profileDir, pkg)
@@ -2728,6 +2994,50 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
   if (pm === undefined) return { ok: false, message: '插件管理器服务未就绪' }
   if (typeof pm.installBundle !== 'function') return { ok: false, message: '插件管理器未提供 installBundle' }
   const from = from0
+
+  /* HMR 下 installBundle 对「已在 profile 依赖里」的包直接抛 already-installed（与版本无关），
+     所以更新已装包只有一条路：先卸载、再安装。没有 removeBundle 的宿主退回直装
+     （旧行为，会如实报 already-installed，不做假动作）。 */
+  const preflight = await updatePreflight(pm, profileDir, pkg)
+  if (preflight.ok !== true) {
+    return { ok: false, state: 'failed', code: preflight.code, skip: preflight.skip === true, message: preflight.message, from }
+  }
+  /* 回滚规格用**原依赖串**：registry 是版本区间（^1.2.11 / 1.0.0），git 是完整 git spec。
+     registry 拼成 pkg@<range> 才能装回同一个主版本，否则会装回最新版。 */
+  const rollbackSpec = preflight.dependency !== null && preflight.dependency !== ''
+    ? (plan.kind === 'git' ? plan.range : pkg + '@' + preflight.dependency)
+    : null
+  let removed = false
+  if (preflight.canRemove === true && (preflight.installed === true || preflight.dependency !== null)) {
+    const removal = await boundedCall(() => pm.removeBundle(pkg), REMOVE_WAIT_MS)
+    if (removal.error !== undefined && removal.error !== null) {
+      const raw = String((removal.error && removal.error.code) || 'remove-failed')
+      const code = raw === 'not-removable' || raw === 'management-required' ? raw : 'remove-failed'
+      return { ok: false, state: 'failed', code, message: describeManagerFailure(code, String((removal.error && removal.error.message) || '')), from }
+    }
+    const gone = await waitForDependencyGone(profileDir, pkg, 30000)
+    if (gone !== true) {
+      return { ok: false, state: 'failed', code: 'remove-timeout', message: describeManagerFailure('remove-timeout', pkg + ' 仍在 profile 依赖里'), from }
+    }
+    removed = true
+  }
+
+  /** 安装阶段确定失败、且旧版本已被卸掉时，按原规格装回——不能让用户白丢一个插件。 */
+  const withRollback = async (result) => {
+    if (result === null || result.ok === true || removed !== true || rollbackSpec === null) return result
+    const restored = await rollbackInstall(pm, profileDir, pkg, rollbackSpec)
+    if (restored.ok === true) {
+      return Object.assign({}, result, {
+        message: String(result.message ?? '') + '；已自动把 ' + pkg + ' 装回原版本 ' + String(restored.to) + '（' + rollbackSpec + '），当前不受影响。',
+        rolledBack: true,
+        to: restored.to,
+      })
+    }
+    return Object.assign({}, result, {
+      message: String(result.message ?? '') + '；原版本也没能自动装回（' + String(restored.message ?? '') + '）；请到官方插件页重新安装 ' + pkg + ' 并重启 DSH。',
+      rollbackFailed: true,
+    })
+  }
   let failure = null
   let settled = false
   let managerResult = null
@@ -2807,7 +3117,7 @@ export async function installAndWait(ctx, profileDir, pkg, waitMs = UPDATE_WAIT_
       await sleep(250, unref)
     }
   }
-  const result = await poll(Date.now() + waitMs)
+  const result = await withRollback(await poll(Date.now() + waitMs))
   if (result !== null) return result
   const confirmation = poll(Date.now() + Math.max(waitMs, BATCH_STALE_MS), true)
     .then((confirmed) => confirmed || {
@@ -2838,7 +3148,13 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
   const current = updateAllStatus()
   if (current && current.running === true) return { ok: true, alreadyRunning: true, batch: current }
   if (activeInstall !== null) return { ok: false, code: activeInstall.pending ? 'update-pending' : 'update-busy', message: activeInstall.pending ? '已有安装请求仍在等待宿主确认，请先刷新状态' : '已有单项更新正在执行，请等待当前更新完成后再启动一键更新' }
-  const items = (Array.isArray(pkgs) ? pkgs : []).filter(isSafePackageName).map((pkg) => ({ pkg, state: 'pending', message: '', from: installedVersion(profileDir, pkg), to: null }))
+  const items = (Array.isArray(pkgs) ? pkgs : []).filter(isSafePackageName).map((pkg) => (
+    pkg === SELF_PACKAGE
+      /* 自身不参与批量：卸载它会停掉宿主半体，整批都会卡住。标成 skipped-self 而不是 failed，
+         否则一次「一键更新」会永远带着一条红叉，用户还被引导去点它。 */
+      ? { pkg, state: 'skipped-self', code: 'self-update', message: describeManagerFailure('self-update', ''), from: installedVersion(profileDir, pkg), to: installedVersion(profileDir, pkg) }
+      : { pkg, state: 'pending', message: '', from: installedVersion(profileDir, pkg), to: null }
+  ))
   if (items.length === 0) return { ok: false, code: 'no-target', message: '没有可更新的插件' }
   const batch = { running: true, index: 0, total: items.length, items, message: '准备中…', startedAt: Date.now(), finishedAt: null, awaitingConfirmation: false }
   const lock = { kind: 'batch', batch, profileDir, pending: false }
@@ -2849,6 +3165,7 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
       const item = items[i]
       const live = readBatch() ?? batch
       live.index = i; live.message = '正在更新 ' + (i + 1) + '/' + items.length + '：' + item.pkg
+      if (item.state === 'skipped-self') continue
       item.state = 'running'; live.items = items; writeBatch(live)
       let result
       try {
@@ -2891,7 +3208,9 @@ export function startUpdateAll(ctx, profileDir, pkgs) {
     const unchanged = items.filter((x) => x.state === 'unchanged').length
     const pendingCheck = items.filter((x) => x.state === 'pending-check').length
     const failed = items.filter((x) => x.state === 'failed').length
+    const skippedSelf = items.filter((x) => x.state === 'skipped-self').length
     done.message = '完成：成功 ' + updated + ' 个，未变化 ' + unchanged + ' 个，待确认 ' + pendingCheck + ' 个，失败 ' + failed + ' 个'
+      + (skippedSelf > 0 ? '，跳过自身更新 ' + skippedSelf + ' 个（请到官方插件页更新 dsh-audit-skills，更新后重启 DSH）' : '')
     writeBatch(done); releaseInstall(lock)
   })().catch((error) => {
     const fallback = readBatch() ?? batch
@@ -3004,8 +3323,21 @@ export function parseGenerated(text) {
   }
 }
 
-/** 解析生成用的 provider/model：优先 settings 里的默认模型，其次 llm 提供商枚举。 */
+/** 解析生成用的 provider/model：优先宿主默认模型服务，其次 settings，最后 llm 提供商枚举。 */
 export async function resolveGenerationModel(ctx) {
+  /* 官方入口最可靠：dsh-agent-default-model 的 currentSelection() 返回 { provider, model }，
+     和真正聊天用的模型是同一个 —— 用户换了模型，翻译跟着换，不会悄悄退到没配凭据的路由。 */
+  try {
+    const service = ctxProp(ctx, 'agentDefaultModel') ?? (ctx && typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : undefined)
+    const selection = service !== undefined && service !== null && typeof service.currentSelection === 'function'
+      ? await service.currentSelection()
+      : (service !== undefined && service !== null && typeof service.get === 'function' ? service.get() : undefined)
+    if (selection !== undefined && selection !== null && typeof selection.provider === 'string' && typeof selection.model === 'string') {
+      return { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, source: 'agent-default-model' }
+    }
+  } catch {
+    /* 服务未注入或未就绪：继续回落 */
+  }
   try {
     const settings = settingsOf(ctx)
     if (settings) {
@@ -3046,59 +3378,51 @@ export async function resolveGenerationModel(ctx) {
   return undefined
 }
 
-/** 把流里的可见文本收集出来（同时兼容同步/异步可迭代与多种记录形状）。 */
+/**
+ * 把流里的可见文本收集出来（兼容同步/异步可迭代与多种记录形状）。
+ * 失败原因在终止分片上，需要它时用 collectStreamResult —— 只拿文本会把
+ * 限流/欠费/超时全当成「模型输出质量差」。
+ */
 export function collectStreamText(records) {
-  let text = ''
-  const take = (record) => {
-    if (!record || typeof record !== 'object') return
-    if (record.type === 'text-chunks' && Array.isArray(record.texts)) {
-      text += record.texts.join('')
-      return
-    }
-    if (record.type === 'text-delta' && typeof record.text === 'string') {
-      text += record.text
-      return
-    }
-    const chunk = record.chunk
-    if (chunk && typeof chunk === 'object' && chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-      text += chunk.text
-    }
-  }
-  if (records && typeof records[Symbol.asyncIterator] === 'function') {
-    return (async () => {
-      for await (const record of records) take(record)
-      return text
-    })()
-  }
-  if (records && typeof records[Symbol.iterator] === 'function') {
-    for (const record of records) take(record)
-  }
-  return text
+  const result = collectStreamResult(records)
+  return result !== null && typeof result.then === 'function' ? result.then((x) => x.text) : result.text
 }
 
 /** 让模型生成一条精炼文案；任何不确定都转成可读的失败原因。 */
-export async function generateRefinement(ctx, pkg, original) {
+export async function generateRefinement(ctx, pkg, original, options) {
   const llm = llmOf(ctx)
   if (!llm || typeof llm.stream !== 'function') return { ok: false, code: 'llm-unavailable', message: 'LLM 服务不可用（未注册 llm 服务）', reason: 'llm 服务未注册或没有 stream() 方法' }
   const selection = await resolveGenerationModel(ctx)
   if (selection === undefined) return { ok: false, code: 'no-model', message: '找不到可用的默认模型；请先在设置中选定默认模型', reason: '设置中没有 provider/model，且 llm.listProviders() 未返回可用模型' }
+  const limits = generationLimits(options)
   const basePrompt = buildPrompt(pkg, original)
   let last = null
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < limits.attempts; attempt += 1) {
+    /* 退避：限流窗口里连续重试只会继续撞墙，让出一点时间反而更容易成功。 */
+    if (attempt > 0) await sleep(GENERATION_BACKOFF_MS * attempt)
     try {
       const prompt = attempt === 0 ? basePrompt : basePrompt + '\n上次输出无法解析。请只输出符合约定结构的合法 JSON，不要 markdown 或解释。'
-      let raw = llm.stream({ provider: selection.provider, model: selection.model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
-      if (raw && typeof raw.then === 'function') raw = await Promise.race([raw, generationTimeout(GENERATION_TIMEOUT_MS)])
-      const stream = raw && raw.stream !== undefined ? raw.stream : raw
-      const text = await Promise.race([Promise.resolve(collectStreamText(stream)), generationTimeout(GENERATION_TIMEOUT_MS)])
-      const parsed = parseGenerated(typeof text === 'string' ? text : '')
+      const outcome = await streamRefinementOnce(llm, selection, prompt, limits.timeoutMs)
+      if (outcome.failure !== null) {
+        const code = classifyLlmCode(outcome.failure.code)
+        last = { ok: false, code, message: describeLlmFailure(code, outcome.failure), reason: String(outcome.failure.message ?? ''), provider: selection.provider, model: selection.model, attempts: attempt + 1 }
+        if (!LLM_RETRYABLE.has(code)) return last
+        continue
+      }
+      const text = String(outcome.text ?? '')
+      if (text.trim() === '') {
+        last = { ok: false, code: 'llm-empty-response', message: describeLlmFailure('llm-empty-response', null), reason: '模型返回空内容（流里没有任何文本分片）', provider: selection.provider, model: selection.model, attempts: attempt + 1 }
+        continue
+      }
+      const parsed = parseGenerated(text)
       if (parsed !== undefined) {
         parsed.zh.title = enforceTitle(pkg, parsed.zh.title)
         return { ok: true, entry: parsed, selection, attempts: attempt + 1 }
       }
-      last = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已自动重试 1 次）', reason: '模型输出缺少 en/zh.title/description，或不是合法 JSON', raw: String(text).slice(0, 400), attempts: attempt + 1 }
+      last = { ok: false, code: 'bad-output', message: '模型返回无法解析为约定 JSON（已尝试 ' + limits.attempts + ' 次）', reason: '模型输出缺少 en/zh.title/description，或不是合法 JSON', raw: text.slice(0, 400), provider: selection.provider, model: selection.model, attempts: attempt + 1 }
     } catch (error) {
-      last = { ok: false, code: error?.code === 'generation-timeout' ? 'generation-timeout' : 'generate-failed', message: error?.code === 'generation-timeout' ? '模型响应超时（已自动重试 1 次）' : String(error?.message ?? error), reason: error?.code === 'generation-timeout' ? '超过 ' + GENERATION_TIMEOUT_MS + 'ms 未收到完整模型输出' : String(error?.message ?? error), attempts: attempt + 1 }
+      const detail = String(error?.message ?? error)
+      last = { ok: false, code: 'generate-failed', message: '生成失败：' + detail, reason: detail, provider: selection.provider, model: selection.model, attempts: attempt + 1 }
     }
   }
   return last || { ok: false, code: 'generate-failed', message: '生成失败', reason: '模型没有返回可用结果' }

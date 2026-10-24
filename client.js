@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
     /* 本客户端半体的版本，必须等于 package.json 的 version —— regression.mjs 会断言。
        宿主半体只在 DSH 进程启动时加载一次，客户端半体会热更新；只有把两边的版本摆在一起，
        「按钮是新的、接口是旧的」才自解释，否则用户只能看到一个没头没尾的 404。 */
-    var CLIENT_REV = '2.10.7';
+    var CLIENT_REV = '2.10.8';
     /* 本插件自己的包名：客户端就是它自己，所以它自己的中文名不必等宿主提供
        （否则列表里 6 行是中文、唯独自己那一行是包名，看着像坏了）。 */
     var OWN_PKG = 'dsh-audit-skills';
@@ -116,6 +116,25 @@ window.__ModuleLoader__.load({
       if (c === 'llm-unavailable') return 'LLM 服务不可用或未注册；请确认模型服务已启用后重试。'
       /* 宿主插件管理器自己的失败码：以前页面上会出现裸的 ambiguous-install，用户既看不懂也不知道做什么。 */
       if (c === 'ambiguous-install') return '宿主管理器无法确认这次安装对应哪个包（git 直装依赖重装时依赖字符串不变就会出现）→ 已阻止，未做任何改动。'
+      /* HMR 下这个码是宿主亲手抛的，不是偶发：说明安装前没卸载。本插件已改为自动两段式，
+         仍看到它就说明宿主没提供 removeBundle（旧宿主）→ 只能去官方插件页。 */
+      if (c === 'already-installed') return '宿主拒绝覆盖安装已存在的包（HMR 下必须先卸载）：插件管理器未提供卸载能力；请到官方插件页更新后重启 DSH。'
+      if (c === 'self-update') return '不能在本页面更新 dsh-audit-skills 自己（卸载会中断当前页面）；请到官方插件页更新，然后重启 DSH。'
+      if (c === 'remove-failed') return '卸载旧版本失败，未做安装；请重启 DSH 后重试，或到官方插件页更新。'
+      if (c === 'remove-timeout') return '旧版本没有在预期时间内卸载完成；请稍等后刷新状态，或重启 DSH 再试。'
+      if (c === 'manager-unsupported') return '当前宿主插件管理器不支持卸载；HMR 下无法覆盖安装，请到官方插件页更新。'
+      if (c === 'rollback-failed') return '新版本没装上，原版本也没能自动装回；请到官方插件页重新安装该插件，然后重启 DSH。'
+      /* 模型侧的失败以前全被归成 bad-output，用户以为模型"不行"。按真实原因给下一步。 */
+      if (c === 'llm-rate-limit') return '模型服务限流了（短时间请求太多）；等几十秒再点「翻译优化」。'
+      if (c === 'llm-quota') return '模型额度已用完，请充值或换一个可用模型后再试。'
+      if (c === 'llm-account-quota') return '模型账号余额不足，请充值或换一个可用模型后再试。'
+      if (c === 'llm-auth') return '模型凭据无效或已过期，请重新填写 API Key。'
+      if (c === 'llm-credential') return '该模型提供方缺少 API Key，请先在设置里配置凭据。'
+      if (c === 'llm-context-window') return '提示词超出模型上下文窗口，请换上下文更大的模型。'
+      if (c === 'llm-empty-response') return '模型返回了空内容（可能被安全策略拦截）；可再点一次或换模型。'
+      if (c === 'llm-timeout') return '模型响应超时，这次请求已取消（不会继续烧 token）；稍后重试或换更快的模型。'
+      if (c === 'llm-no-adapter') return '当前没有该模型提供方的适配器，请在设置里换一个已启用的模型。'
+      if (c === 'llm-provider-error') return '模型服务返回错误，原因见当前行详情；可按原因重试或换模型。'
       if (c === 'invalid-spec') return '宿主管理器不接受这个依赖规格，请检查 profile 里的依赖写法。'
       if (c === 'bundle-in-use') return '该 bundle 正在使用中，宿主拒绝在运行中替换；重启 DSH 后再试。'
       if (c === 'management-required' || c === 'unaddressable') return '该对象由宿主管理（或在 app.asar 内），没有可写路径，不能从这里更新。'
@@ -1158,7 +1177,26 @@ window.__ModuleLoader__.load({
                    apply 的「已安装但缺少精炼文案」顶掉，用户只看到一句无从追查的结论（线上实测发生过）。 */
                 var applyFailed = items.filter(function (x) { return x.state === 'failed'; }).length;
                 var needsCatalog = items.filter(function (x) { return x.state === 'needs-catalog'; }).length;
-                recordTranslate('optimize', runItems.concat(items),
+                /* 留痕按包合并成一条终态。两个相反的坑都踩过：
+                   ① 只留生成项 → 应用结果丢了；② 生成 + 应用各留一条 → 同一个包在库里出现两次，
+                   用户看到「4 项、2 项失败」这种与事实不符的账。
+                   合并规则：状态以 apply 为准，但**生成阶段的失败原因必须拼进去**，
+                   否则「模型为什么不干活」又被 apply 的「缺少文案」顶掉。 */
+                var merged = [];
+                var byPkg = {};
+                var pushMerged = function (x, replace) {
+                  if (!x || !x.pkg) return;
+                  if (byPkg[x.pkg] === undefined) { byPkg[x.pkg] = merged.length; merged.push({ pkg: x.pkg, state: x.state, code: x.code, message: x.message }); return; }
+                  var prev = merged[byPkg[x.pkg]];
+                  var genFailed = prev.state === 'failed';
+                  var message = genFailed && prev.message && prev.message !== (x.message || '')
+                    ? String(x.message || '') + '；生成阶段失败原因：' + String(prev.message)
+                    : (x.message || prev.message);
+                  merged[byPkg[x.pkg]] = { pkg: x.pkg, state: replace ? x.state : prev.state, code: x.code || prev.code, message: message };
+                };
+                (runItems || []).forEach(function (x) { pushMerged(x, false); });
+                (items || []).forEach(function (x) { pushMerged(x, true); });
+                recordTranslate('optimize', merged,
                   '新生成 ' + genOk + ' 条，应用 ' + applied + ' 项' +
                   (needsCatalog ? '，待补文案 ' + needsCatalog + ' 个' : '') +
                   '，失败 ' + (genFail.length + applyFailed) + ' 个');
@@ -1337,8 +1375,15 @@ window.__ModuleLoader__.load({
       }, [absorbResults, snapshot, updateOne, updateSkills]);
 
       var updateAll = useCallback(function (list) {
-        var pend = (list || []).filter(function (r) { return r.hasUpdate === true; }).map(function (r) { return r.pkg; });
-        if (pend.length === 0) { setNote({ kind: 'ok', text: '没有可更新的插件。' }); return; }
+        var all = (list || []).filter(function (r) { return r.hasUpdate === true; });
+        /* dsh-audit-skills 自己不能在这里更新：卸载它会停掉宿主半体，本页面与整批更新都会断。
+           宿主侧也会把它标成 skipped-self，这里提前拦掉，避免「一键更新（1）」点了没反应。 */
+        var selfOnly = all.length > 0 && all.every(function (r) { return r.pkg === 'dsh-audit-skills'; });
+        var pend = all.filter(function (r) { return r.pkg !== 'dsh-audit-skills'; }).map(function (r) { return r.pkg; });
+        if (pend.length === 0) {
+          setNote({ kind: selfOnly ? 'note' : 'ok', text: selfOnly ? '只有 dsh-audit-skills 自己需要更新；不能在插件内更新自己，请到官方插件页更新后重启 DSH。' : '没有可更新的插件。' });
+          return;
+        }
         setBusy('update:all');
         setNote({ kind: 'note', text: '已提交批量更新（' + pend.length + ' 个），由宿主侧串行执行…' });
         return call('update-all', { pkgs: pend }).then(absorb).then(function (r) {
@@ -1393,9 +1438,12 @@ window.__ModuleLoader__.load({
       var noRows = s === null;
       var noOptimize = noRows || s.toApply === 0;          // 全部条目都已优化 → 无待办
       var noRevert = noRows || s.refined === 0;            // 没有处于已优化状态的条目 → 无待办
-      var updatable = noRows ? 0 : s.upd;
+      /* 自身单独计数：它永远不进「一键更新」，计数里带上它会让用户点了却什么都没发生。 */
+      var updatableRows = noRows ? [] : rows.filter(function (r) { return r.hasUpdate === true; });
+      var selfUpdatable = updatableRows.filter(function (r) { return r.pkg === 'dsh-audit-skills'; }).length;
+      var updatable = updatableRows.filter(function (r) { return r.pkg !== 'dsh-audit-skills'; }).length;
       var noUpdate = noRows || updatable === 0 || batchSettled;
-      var updatablePkgs = noRows ? [] : rows.filter(function (r) { return r.hasUpdate === true; }).map(function (r) { return r.pkg; });
+      var updatablePkgs = updatableRows.filter(function (r) { return r.pkg !== 'dsh-audit-skills'; }).map(function (r) { return r.pkg; });
       var lockedCount = Object.keys(done).length;
       var locked = lockedCount > 0;
       /* 口径原因由这里显式判定，不让 lockNote 去猜：
@@ -1432,7 +1480,9 @@ window.__ModuleLoader__.load({
           },
           noRows ? '状态尚未读取完成'
             : (updatable === 0
-              ? (IS_SKILL ? '当前没有可更新的技能（非 git 目录没有远端可比）' : '当前没有可更新的插件')
+              ? (selfUpdatable > 0
+                ? '只有 dsh-audit-skills 自己需要更新；它不能在插件内更新，请到官方插件页更新后重启 DSH。'
+                : (IS_SKILL ? '当前没有可更新的技能（非 git 目录没有远端可比）' : '当前没有可更新的插件'))
               : (batchSettled ? '本轮已处理过更新（未变化 / 失败也不重复执行）；点「刷新状态」可重新判定'
                 : (IS_SKILL ? '按顺序 git 快进全部可更新技能' : '按顺序更新全部可更新插件'))),
           false, 'primary'));
